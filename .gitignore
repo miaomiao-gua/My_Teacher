@@ -1,0 +1,23 @@
+# ====== JSON 配置文件（全部排除） ======
+*.json
+
+# ====== Python 缓存 ======
+__pycache__/
+*.pyc
+*.pyo
+
+# ====== 课程数据（用户生成内容） ======
+project/lessons/
+
+# ====== 用户上传文件 ======
+project/static/images/bg.upload.*
+project/static/images/avatar.upload.*
+project/static/audio/
+
+# ====== IDE / 系统 ======
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

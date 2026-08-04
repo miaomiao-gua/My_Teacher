@@ -1,0 +1,146 @@
+项目概述
+构建一个桌面级“AI全能私教”，具有Galgame/乙女游戏风格界面。核心特色：
+
+自主联网备课：调用云端智能模型（如 DeepSeek-V3）并开启联网搜索，生成结构化教案、知识点、测验题，以及相关资源链接（PDF/Word/网页等）。
+
+资源自动下载与管理：解析备课返回的 JSON 中的资源 URL，前端列表展示，用户手动确认后自动下载到本地 lessons/<课程名>/ 文件夹，并自动将文档转换为 Markdown（便于 Ollama 读取）。
+
+本地知识增强：每次对话时，自动读取当前课程文件夹下的所有 Markdown 内容，作为背景知识注入 Ollama 的 System Prompt，实现基于本地资料的精准讲解。
+
+流式交互 + TTS：文字打字机效果 + 异步硅基 TTS 语音，解决延迟冷场。
+
+动态代码执行（编程课）：可生成并运行用户提交的 Python 代码，捕获控制台输出，实现“实操型”教学。
+
+考试功能：自动出题、批改，防幻觉（Markdown 表格解析）。
+
+技术选型
+后端：Python Flask（或 FastAPI）
+
+前端：HTML + CSS + JS（视觉小说风格，含对话框、立绘、输入框、资源下载确认面板）
+
+本地 LLM：Ollama（如 qwen2.5 / llama3.1，用于日常对话、批改）
+
+云端备课 LLM：硅基流动（SiliconFlow）API，调用 deepseek-ai/DeepSeek-V3 或 Qwen/Qwen2.5-72B-Instruct，开启联网搜索（enable_search: true）
+
+TTS：硅基 TTS（多音色）
+
+文档解析：pypdf（PDF）、python-docx（Word）、markdown 库（转换）
+
+代码沙盒：subprocess + tempfile（超时限制 5 秒）
+
+核心功能模块详解
+1. 课前准备（联网备课 + 资源发现）
+触发：用户输入“我想学【主题】”或点击“开始备课”按钮。
+
+云端调用：后端向硅基 API 发送请求，系统提示词：
+
+text
+你是一位顶级学科专家。针对【主题】，请搜索最新、权威的资料，并以 JSON 格式返回以下字段：
+{
+  "syllabus": "章节大纲（Markdown 格式）",
+  "key_points": ["核心概念1", "核心概念2", ...],
+  "resources": [
+    {
+      "title": "资源标题",
+      "url": "下载链接（PDF/Word/网页等）",
+      "type": "pdf" | "docx" | "webpage",
+      "description": "简短说明",
+      "markdown_content": "如果资源是公开文本，请直接提供转换后的 Markdown 正文（可选）"
+    }
+  ],
+  "quiz_preset": [
+    {"question": "...", "options": ["A...", "B...", "C...", "D..."], "answer": "A"}
+  ]
+}
+注意：请尽量提供可直接下载的资源链接（如 PDF 教材、官方文档），并优先选择稳定的镜像源。
+前端展示：收到 JSON 后，前端显示“备课完成”，并列出所有资源（标题、类型、描述），每个资源附带一个“确认下载”复选框（默认全选）和一个“立即下载”按钮。
+
+2. 资源下载与管理（手动确认）
+用户确认：点击“立即下载”后，后端遍历被选中的资源，下载文件至 ./lessons/<课程名（日期+主题）>/ 目录，文件名自动生成（如 resource1.pdf）。
+
+自动转换：下载后，若文件为 .pdf 或 .docx，使用 pypdf / python-docx 提取纯文本，并保存为同名的 .md 文件（同时保留原文件）。
+
+课程信息存储：在课程文件夹内生成一个 metadata.json，记录课程名称、备课 JSON 中的大纲和知识点、资源列表等。
+
+安全提示：下载前会验证 URL 是否为安全协议（http/https），且只允许常见文档后缀，防止恶意文件。
+
+3. 本地知识读取（Ollama 上下文注入）
+每次对话前：后端根据当前活跃的课程，自动加载该文件夹下所有 .md 文件的内容，合并成一个长文本，并作为 System Prompt 的一部分（例如：“你正在教授以下课程，请参考以下资料：\n[内容]”）。
+
+若课程文件过大：可截断最近 N 个字符，或使用简单的向量检索（但第一版可暂不实现，直接全部加载）。
+
+切换课程：用户可在界面选择不同课程，后端切换对应的知识文件夹。
+
+4. 流式对话 + 异步 TTS（无“关心”干扰）
+流程：用户输入 → Ollama 流式生成 → SSE 推送前端（打字机） → 完成后自动触发硅基 TTS 生成语音 → 前端自动播放（或点击播放按钮）。
+
+记忆：仅保留对话历史（最近 10 轮），无需额外情感模块。
+
+5. 代码执行（编程课专用）
+当备课主题涉及编程：备课返回的 JSON 中可包含一个 tool_script 字段（可选），或由后端在备课完成后自动生成一个通用的代码测试脚本（含 run_tests(user_code) 函数）。
+
+前端提供代码编辑器（如 <textarea>），用户可编写代码并点击“运行”。
+
+后端 /execute_code 接口：接收代码，写入临时 .py 文件，用 subprocess 运行，返回 stdout/stderr。
+
+6. 考试功能（容错解析）
+出题：调用 Ollama（或复用备课生成的题目）生成 Markdown 表格，后端用正则解析。
+
+批改：用户提交答案后，将“正确答案”与“用户答案”发送给 Ollama 进行评分与解析。
+
+后端 API 设计（新增资源下载相关）
+端点	方法	说明
+/prepare_lesson	POST	入参：{"topic": "..."}。调用云端联网模型，返回完整 JSON（含资源列表）。
+/list_resources	GET	返回当前课程待下载的资源列表（用于前端勾选）。
+/download_resources	POST	入参：{"selected": [0, 2]}（索引列表）。下载对应资源到课程文件夹，并转换 Markdown。返回下载状态。
+/chat	SSE 流式	入参：{"message": "..."}。自动加载当前课程本地 Markdown 资料作为上下文。
+/execute_code	POST	入参：{"code": "..."}。返回控制台输出。
+/exam/generate	POST	生成题目（Markdown 表格解析后返回结构化数据）。
+/exam/submit	POST	批改答案。
+/switch_lesson	POST	入参：{"lesson_folder": "..."}。切换当前活跃课程，更新上下文。
+前端交互细节（资源确认界面）
+在备课完成后，弹出一个资源确认面板，以表格形式展示所有资源（标题、类型、描述），每行一个复选框，默认全部勾选。
+
+下方有“全部下载”按钮，点击后逐个下载（可显示进度）。
+
+下载完成后，自动刷新界面，显示“资源已就绪”提示，并自动进入对话模式。
+
+项目结构（示例）
+text
+project/
+├── app.py                 # Flask 主程序
+├── lesson_prep.py         # 联网备课 + 资源下载与转换
+├── code_executor.py       # 代码沙盒
+├── file_utils.py          # 下载、PDF/Word 转 Markdown
+├── requirements.txt       # flask, requests, sse-starlette, ollama, pypdf, python-docx, markdownify
+├── lessons/               # 所有课程文件夹
+│   ├── 20260804_python_basics/
+│   │   ├── metadata.json
+│   │   ├── resource1.pdf
+│   │   ├── resource1.md   (转换后)
+│   │   ├── resource2.docx
+│   │   └── resource2.md
+│   └── ...
+├── static/
+│   ├── images/            # 立绘、背景
+│   ├── audio/             # TTS 缓存
+│   └── css/ style.css
+├── templates/
+│   └── index.html         # 主界面（含代码编辑器、资源确认弹窗）
+└── config.json            # API 密钥、默认音色等
+额外安全与稳定性要求
+资源下载：使用 requests 库，设置超时（30秒），仅允许 Content-Type 为常见文档类型，下载后扫描文件头确保安全。
+
+代码执行：必须禁用危险模块（可通过 ast 检查或使用 restricted 环境），并设置 timeout=5。
+
+降级策略：若云端备课 API 超时，自动切换为 Ollama 直接生成简单教案（不带资源）。
+
+使用说明（面向 Vibe Coding 工具）
+请根据以上需求生成完整的 Web 应用代码，包含所有前后端文件。特别注意：
+
+资源下载与转换模块要健壮，能处理常见 PDF/Word 文档。
+
+对话上下文加载本地 Markdown 内容，需注意字符长度限制（可截断）。
+
+前端界面仿 GalGame 风格，具有立绘切换、对话框、打字机效果、语音播放。
+

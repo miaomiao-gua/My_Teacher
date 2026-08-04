@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI 全能私教</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+  </head>
+  <body>
+    <div class="scene-bg"></div>
+    <div class="menu-bg"></div>
+
+    <div id="menu-screen" class="screen">
+      <div class="menu-header">
+        <div>
+          <p class="eyebrow">Private Tutor</p>
+          <h1>AI 全能私教</h1>
+          <p class="menu-subtitle">选择一门课程，开始你的专属学习时光</p>
+        </div>
+        <div class="menu-actions">
+          <button id="config-btn" class="ghost-btn">⚙️ 设置</button>
+          <button id="new-course-btn" class="primary-btn">新建课程</button>
+        </div>
+      </div>
+      <div class="menu-creator">
+        <input id="menu-topic-input" type="text" value="Python 基础" placeholder="输入课程主题并创建新课程" />
+        <button id="menu-new-course-btn" class="primary-btn">创建课程</button>
+      </div>
+      <div id="lesson-list" class="lesson-list"></div>
+    </div>
+
+    <div id="new-course-modal" class="modal hidden">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h2>新建课程</h2>
+          <button id="close-new-course-btn" class="ghost-btn">关闭</button>
+        </div>
+        <form id="new-course-form">
+          <div class="config-section">
+            <h3>学习内容</h3>
+            <div class="field-grid">
+              <label>
+                <span>课程主题</span>
+                <input id="nc-topic" type="text" value="Python 基础" placeholder="例：Python 基础、高中数学" />
+              </label>
+              <label>
+                <span>教师名称</span>
+                <input id="nc-assistant-name" type="text" value="艾琳老师" />
+              </label>
+            </div>
+          </div>
+
+          <div class="config-section">
+            <h3>教师人格</h3>
+            <label class="wide-field">
+              <span>人格提示词</span>
+              <textarea id="nc-personality" rows="3">你是一位温柔、专业、耐心的 AI 学习导师。请以启发式提问方式指导学生，先解释概念，再给出例子和练习。</textarea>
+            </label>
+          </div>
+
+          <div class="config-section">
+            <h3>模型与音色</h3>
+            <div class="field-grid">
+              <label>
+                <span>备课模型</span>
+                <select id="nc-model-select">
+                  <option value="">使用全局设置</option>
+                  <option value="deepseek-ai/DeepSeek-V3">DeepSeek-V3（硅基）</option>
+                  <option value="deepseek-chat">deepseek-chat（DeepSeek 原生）</option>
+                  <option value="Qwen/Qwen2.5-72B-Instruct">Qwen2.5-72B（硅基）</option>
+                  <option value="gpt-4o-mini">gpt-4o-mini（OpenAI）</option>
+                  <option value="custom">自定义</option>
+                </select>
+                <input id="nc-model-custom" type="text" placeholder="自定义模型名（选择自定义后填写）" class="hidden" />
+              </label>
+              <label>
+                <span>语音音色</span>
+                <select id="nc-voice">
+                  <option value="">使用全局设置</option>
+                  <option value="claire">claire · 温柔女声</option>
+                  <option value="anna">anna · 沉稳女声</option>
+                  <option value="bella">bella · 激情女声</option>
+                  <option value="diana">diana · 欢快女声</option>
+                  <option value="alex">alex · 沉稳男声</option>
+                  <option value="benjamin">benjamin · 低沉男声</option>
+                  <option value="charles">charles · 磁性男声</option>
+                  <option value="david">david · 欢快男声</option>
+                </select>
+              </label>
+            </div>
+          </div>
+
+          <div class="modal-actions">
+            <button type="submit" class="primary-btn">开始备课</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div id="completion-modal" class="modal hidden">
+      <div class="modal-card completion-card">
+        <div class="completion-icon">🎓</div>
+        <h2>恭喜完成全部课程！</h2>
+        <p id="completion-text">你已经完成了所有章节的学习和测验，太棒了！</p>
+        <div class="modal-actions">
+          <button id="completion-back-btn" class="ghost-btn">返回菜单</button>
+          <button id="completion-close-btn" class="primary-btn">继续探索</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="scene-screen" class="screen hidden">
+      <button id="back-menu-btn" class="floating-btn left">返回菜单</button>
+
+      <div class="top-icons">
+        <button id="scene-config-btn" class="icon-btn" title="设置" aria-label="设置">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
+      </div>
+
+      <div id="unit-progress" class="unit-progress hidden">
+        <div class="unit-progress-bar">
+          <div id="unit-progress-fill" class="unit-progress-fill" style="width: 0%"></div>
+        </div>
+        <div class="unit-progress-text">
+          <span id="unit-progress-label">第 1 课 / 共 1 课</span>
+          <span id="unit-progress-title" class="unit-progress-title"></span>
+        </div>
+      </div>
+
+      <div id="toast-container" class="toast-container"></div>
+
+      <div class="teacher-portrait-wrap">
+        <img id="portrait" class="teacher-portrait" src="{{ url_for('static', filename='images/teacher.svg') }}" alt="teacher portrait" />
+      </div>
+
+      <!-- 右侧滑入面板（聊天历史 / 资料 / 测验） -->
+      <div id="side-panel" class="side-panel">
+        <div class="side-panel-tabs">
+          <button class="side-tab active" data-panel="chat">聊天记录</button>
+          <button class="side-tab" data-panel="resources">课程资料</button>
+          <button class="side-tab" data-panel="exam">随堂测验</button>
+        </div>
+
+        <div class="side-panel-body">
+          <div class="side-panel-tab active" data-panel="chat">
+            <div class="side-panel-header">
+              <h3>对话历史</h3>
+            </div>
+            <div class="conversation-history" id="conversation-history"></div>
+          </div>
+
+          <div class="side-panel-tab" data-panel="resources">
+            <div class="side-panel-header">
+              <h3>课程资料</h3>
+              <button id="download-btn" class="small-btn primary">下载所选</button>
+            </div>
+            <div id="resource-list" class="resource-list"></div>
+          </div>
+
+          <div class="side-panel-tab" data-panel="exam">
+            <div class="side-panel-header">
+              <h3>随堂测验</h3>
+              <button id="exam-btn" class="small-btn primary">生成题目</button>
+            </div>
+            <div id="exam-list" class="exam-list"></div>
+            <div id="exam-actions" class="exam-actions hidden"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Galgame 风格底部对话框 -->
+      <div class="dialogue-bar" id="dialogue-bar">
+        <div class="dialogue-speaker-tag" id="dialogue-speaker-tag">
+          <span id="dialogue-speaker-name">艾琳老师</span>
+        </div>
+        <div class="dialogue-content">
+          <div id="typing-indicator" class="typing-indicator hidden">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          </div>
+          <div id="dialogue-text" class="dialogue-text"></div>
+        </div>
+        <div class="dialogue-input-row">
+          <div class="input-row message-row">
+            <textarea id="message-input" rows="1" placeholder="你想和私教聊什么？（输入 /help 查看命令）"></textarea>
+            <button id="send-btn" class="primary-btn">送</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="config-modal" class="modal hidden">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h2>本地配置</h2>
+          <button id="close-config-btn" class="ghost-btn">关闭</button>
+        </div>
+
+        <form id="config-form">
+          <div id="lesson-config-banner" class="lesson-config-banner hidden">
+            <span class="lesson-config-icon">📚</span>
+            <span id="lesson-config-banner-text">正在编辑课程独立配置</span>
+            <span class="lesson-config-hint">（仅影响当前课程）</span>
+            <button type="button" id="reset-to-global-btn" class="small-btn ghost-btn" style="display:none;margin-left:auto;">重置为全局设置</button>
+          </div>
+
+          <div class="config-section">
+            <h3>本地模型（Ollama）</h3>
+            <div class="field-grid">
+              <label>
+                <span>Ollama 地址</span>
+                <input id="ollama_base_url" type="text" value="http://127.0.0.1:11434" />
+              </label>
+              <label>
+                <span>Ollama 模型</span>
+                <input id="ollama_model" type="text" value="qwen2.5" />
+              </label>
+              <label>
+                <span>上下文长度 num_ctx</span>
+                <input id="ollama_num_ctx" type="number" min="2048" step="1024" value="16384" />
+              </label>
+              <label>
+                <span>温度 temperature</span>
+                <input id="ollama_temperature" type="number" min="0" max="2" step="0.1" value="0.7" />
+              </label>
+              <label>
+                <span>最大生成长度 num_predict</span>
+                <input id="ollama_num_predict" type="number" min="64" step="64" value="1024" />
+              </label>
+            </div>
+            <label class="toggle-row">
+              <input id="enable_local_ollama" type="checkbox" checked />
+              <span>启用本地 Ollama（关闭则只用云端对话）</span>
+            </label>
+          </div>
+
+          <div class="config-section">
+            <h3>语音 TTS</h3>
+            <div class="field-grid">
+              <label>
+                <span>TTS 方案</span>
+                <select id="tts_provider">
+                  <option value="local">本地 TTS（edge-tts 服务）</option>
+                  <option value="cloud">云端 TTS（硅基 CosyVoice2）</option>
+                </select>
+              </label>
+              <label>
+                <span>本地 TTS 地址</span>
+                <input id="tts_base_url" type="text" value="http://127.0.0.1:8000" />
+              </label>
+              <label>
+                <span>本地 TTS 音色</span>
+                <input id="tts_voice" type="text" value="zh-CN-XiaoxiaoNeural" placeholder="Azure/edge-tts 音色名" />
+              </label>
+              <label>
+                <span>云端 TTS 模型</span>
+                <select id="tts_cloud_model_select">
+                  <option value="FunAudioLLM/CosyVoice2-0.5B">FunAudioLLM/CosyVoice2-0.5B</option>
+                  <option value="fishaudio/fish-speech-1.5">fishaudio/fish-speech-1.5</option>
+                  <option value="custom">自定义模型</option>
+                </select>
+                <input id="tts_cloud_model" type="text" value="FunAudioLLM/CosyVoice2-0.5B" />
+              </label>
+              <label>
+                <span>云端 TTS 音色</span>
+                <select id="tts_cloud_voice">
+                  <option value="anna">anna · 沉稳女声</option>
+                  <option value="bella">bella · 激情女声</option>
+                  <option value="claire">claire · 温柔女声</option>
+                  <option value="diana">diana · 欢快女声</option>
+                  <option value="alex">alex · 沉稳男声</option>
+                  <option value="benjamin">benjamin · 低沉男声</option>
+                  <option value="charles">charles · 磁性男声</option>
+                  <option value="david">david · 欢快男声</option>
+                </select>
+              </label>
+              <label>
+                <span>音频格式</span>
+                <select id="tts_cloud_response_format">
+                  <option value="mp3">mp3（推荐，体积小）</option>
+                  <option value="wav">wav（无损）</option>
+                  <option value="opus">opus</option>
+                  <option value="pcm">pcm</option>
+                </select>
+              </label>
+            </div>
+            <label class="toggle-row">
+              <input id="tts_enabled" type="checkbox" />
+              <span>启用本地 TTS（关闭时本地方案会回退到云端）</span>
+            </label>
+            <label class="toggle-row">
+              <input id="auto_play_tts" type="checkbox" checked />
+              <span>回复后自动播放语音</span>
+            </label>
+          </div>
+
+          <div class="config-section">
+            <h3>云端备课模型（开始备课时调用）</h3>
+            <div class="field-grid">
+              <label>
+                <span>服务商 / 类型</span>
+                <select id="cloud_provider">
+                  <option value="siliconflow">SiliconFlow（硅基流动）</option>
+                  <option value="deepseek">DeepSeek 原生 API</option>
+                  <option value="openai_compatible">OpenAI 兼容（填任意原生地址）</option>
+                </select>
+              </label>
+              <label>
+                <span>API 基础地址 Base URL</span>
+                <input id="cloud_base_url" type="text" placeholder="https://api.siliconflow.cn/v1 或 https://api.deepseek.com/v1" />
+              </label>
+              <label>
+                <span id="cloud_api_key_label">API Key</span>
+                <input id="siliconflow_api_key" type="password" placeholder="在此填写云端 API Key" />
+              </label>
+              <label>
+                <span>备课模型（快速选择）</span>
+                <select id="cloud_model_select">
+                  <option value="deepseek-ai/DeepSeek-V3">deepseek-ai/DeepSeek-V3（硅基）</option>
+                  <option value="deepseek-chat">deepseek-chat（DeepSeek 原生）</option>
+                  <option value="deepseek-ai/DeepSeek-R1">deepseek-ai/DeepSeek-R1（硅基推理）</option>
+                  <option value="Qwen/Qwen2.5-72B-Instruct">Qwen/Qwen2.5-72B-Instruct（硅基）</option>
+                  <option value="gpt-4o-mini">gpt-4o-mini（OpenAI）</option>
+                  <option value="moonshotai/kimi-k2-0901-preview">moonshotai/kimi-k2（硅基）</option>
+                  <option value="custom">自定义（在下方文本框填）</option>
+                </select>
+                <input id="siliconflow_model" type="text" placeholder="自定义模型名" />
+              </label>
+            </div>
+            <label class="toggle-row">
+              <input id="enable_search" type="checkbox" checked />
+              <span>备课请求启用联网搜索（仅支持硅基/百川等实现了 enable_search 的服务）</span>
+            </label>
+          </div>
+
+          <div class="config-section">
+            <h3>云端对话模型（聊天生成时调用，留空则回退到备课那组）</h3>
+            <div class="field-grid">
+              <label>
+                <span>服务商 / 类型</span>
+                <select id="chat_provider">
+                  <option value="openai_compatible">OpenAI 兼容（原生通用）</option>
+                  <option value="siliconflow">SiliconFlow（硅基流动）</option>
+                  <option value="deepseek">DeepSeek 原生</option>
+                  <option value="openai">OpenAI 官方</option>
+                </select>
+              </label>
+              <label>
+                <span>对话 Base URL（留空 = 复用备课地址）</span>
+                <input id="chat_base_url" type="text" placeholder="例：https://api.deepseek.com/v1" />
+              </label>
+              <label>
+                <span id="chat_api_key_label">对话 API Key（留空 = 复用备课 Key）</span>
+                <input id="chat_api_key" type="password" placeholder="留空则复用备课 API Key" />
+              </label>
+              <label>
+                <span>对话模型（留空 = 复用备课模型）</span>
+                <select id="chat_model_select">
+                  <option value="">（不填）使用备课模型</option>
+                  <option value="deepseek-chat">deepseek-chat（DeepSeek 原生）</option>
+                  <option value="deepseek-reasoner">deepseek-reasoner（DeepSeek R1 原生）</option>
+                  <option value="deepseek-ai/DeepSeek-V3">deepseek-ai/DeepSeek-V3（硅基）</option>
+                  <option value="Qwen/Qwen2.5-72B-Instruct">Qwen/Qwen2.5-72B-Instruct（硅基）</option>
+                  <option value="gpt-4o-mini">gpt-4o-mini（OpenAI）</option>
+                  <option value="gpt-4.1">gpt-4.1（OpenAI）</option>
+                  <option value="custom">自定义（在下方文本框填）</option>
+                </select>
+                <input id="chat_model" type="text" placeholder="自定义对话模型名" />
+              </label>
+            </div>
+            <label class="toggle-row">
+              <input id="chat_enable_search" type="checkbox" />
+              <span>对话请求启用联网搜索（默认关闭，避免原生 DeepSeek/OpenAI 报错）</span>
+            </label>
+          </div>
+
+          <div class="config-section">
+            <h3>教师人格 / 默认主题</h3>
+            <div class="field-grid">
+              <label>
+                <span>默认教师名称</span>
+                <input id="assistant_name" type="text" value="艾琳老师" />
+              </label>
+              <label>
+                <span>默认主题</span>
+                <input id="default_topic" type="text" value="Python 基础" />
+              </label>
+              <label class="wide-field">
+                <span>默认人格提示词</span>
+                <textarea id="personality_prompt" rows="3">你是一位温柔、专业、耐心的 AI 学习导师。请以启发式提问方式指导学生，先解释概念，再给出例子和练习。</textarea>
+              </label>
+            </div>
+          </div>
+
+          <div class="config-section">
+            <h3>教师头像</h3>
+            <input id="avatar-file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml" hidden />
+            <div class="avatar-field">
+              <img id="avatar-preview" class="avatar-preview" src="{{ url_for('static', filename='images/teacher.svg') }}" alt="头像预览" />
+              <div class="avatar-actions">
+                <button type="button" id="avatar-upload-btn" class="small-btn primary">选择图片上传</button>
+                <button type="button" id="avatar-reset-btn" class="small-btn ghost-btn">恢复默认</button>
+                <span class="avatar-hint">支持 PNG / JPG / GIF / WebP / SVG，将显示在对话场景左侧</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="config-section">
+            <h3>立绘位置与动画</h3>
+            <div class="portrait-controls">
+              <label class="slider-row">
+                <span class="slider-label">水平位置 <b id="portrait-pos-x-val">50</b>%</span>
+                <input id="portrait-pos-x" type="range" min="0" max="100" value="50" step="1" />
+              </label>
+              <label class="slider-row">
+                <span class="slider-label">垂直位置 <b id="portrait-pos-y-val">44</b>%</span>
+                <input id="portrait-pos-y" type="range" min="0" max="100" value="44" step="1" />
+              </label>
+              <label class="slider-row">
+                <span class="slider-label">缩放大小 <b id="portrait-scale-val">1.15</b>x</span>
+                <input id="portrait-scale" type="range" min="0.5" max="3.0" value="1.15" step="0.05" />
+              </label>
+              <label class="slider-row">
+                <span class="slider-label">浮动幅度 <b id="portrait-float-val">8</b>px</span>
+                <input id="portrait-float-amp" type="range" min="0" max="40" value="8" step="1" />
+              </label>
+              <label class="slider-row toggle-row">
+                <input id="portrait-float-enabled" type="checkbox" checked />
+                <span>启用浮动呼吸动画</span>
+              </label>
+              <div class="portrait-actions">
+                <button type="button" id="portrait-reset-btn" class="small-btn ghost-btn">恢复默认</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="config-section">
+            <h3>场景背景（对话界面）</h3>
+            <input id="bg-file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
+            <div class="bg-preset-grid">
+              <button type="button" class="bg-preset-btn active" data-theme="warm">
+                <span class="bg-preset-name">暖色和室</span>
+              </button>
+              <button type="button" class="bg-preset-btn" data-theme="sakura">
+                <span class="bg-preset-name">樱花庭院</span>
+              </button>
+              <button type="button" class="bg-preset-btn" data-theme="bamboo">
+                <span class="bg-preset-name">竹林翠影</span>
+              </button>
+              <button type="button" class="bg-preset-btn" data-theme="snow">
+                <span class="bg-preset-name">雪景冬夜</span>
+              </button>
+              <button type="button" class="bg-preset-btn" data-theme="dusk">
+                <span class="bg-preset-name">黄昏夕照</span>
+              </button>
+              <button type="button" class="bg-preset-btn" data-theme="night">
+                <span class="bg-preset-name">夜幕星辰</span>
+              </button>
+            </div>
+            <div class="bg-custom-field">
+              <button type="button" id="bg-upload-btn" class="small-btn primary">上传自定义背景</button>
+              <button type="button" id="bg-reset-btn" class="small-btn ghost-btn">恢复默认主题</button>
+              <span class="avatar-hint">支持 PNG / JPG / GIF / WebP，自定义背景叠加暖色暗色遮罩，保持 UI 可读性</span>
+            </div>
+          </div>
+
+          <div class="config-section">
+            <h3>主页背景（菜单界面）</h3>
+            <input id="menu-bg-file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
+            <div class="bg-preset-grid" id="menu-bg-preset-grid">
+              <button type="button" class="bg-preset-btn menu-bg-preset active" data-theme="warm">
+                <span class="bg-preset-name">暖色和室</span>
+              </button>
+              <button type="button" class="bg-preset-btn menu-bg-preset" data-theme="sakura">
+                <span class="bg-preset-name">樱花庭院</span>
+              </button>
+              <button type="button" class="bg-preset-btn menu-bg-preset" data-theme="bamboo">
+                <span class="bg-preset-name">竹林翠影</span>
+              </button>
+              <button type="button" class="bg-preset-btn menu-bg-preset" data-theme="snow">
+                <span class="bg-preset-name">雪景冬夜</span>
+              </button>
+              <button type="button" class="bg-preset-btn menu-bg-preset" data-theme="dusk">
+                <span class="bg-preset-name">黄昏夕照</span>
+              </button>
+              <button type="button" class="bg-preset-btn menu-bg-preset" data-theme="night">
+                <span class="bg-preset-name">夜幕星辰</span>
+              </button>
+            </div>
+            <div class="bg-custom-field">
+              <button type="button" id="menu-bg-upload-btn" class="small-btn primary">上传自定义背景</button>
+              <button type="button" id="menu-bg-reset-btn" class="small-btn ghost-btn">恢复默认主题</button>
+              <span class="avatar-hint">设置独立于对话界面的主页背景</span>
+            </div>
+          </div>
+
+          <div class="modal-actions">
+            <button type="button" id="test-ollama-btn" class="ghost-btn">测试 Ollama</button>
+            <button type="button" id="test-tts-btn" class="ghost-btn">测试 TTS</button>
+            <button type="submit" class="primary-btn">保存配置</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}?v=20260804v"></script>
+  </body>
+</html>
+  
