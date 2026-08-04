@@ -1,4 +1,5 @@
 import json
+import os
 import random
 import re
 import time
@@ -9,6 +10,13 @@ from typing import Any, Dict, List
 import requests
 from flask import Flask, Response, jsonify, render_template, request, send_file, stream_with_context
 from werkzeug.utils import secure_filename
+
+# 尝试加载 .env 环境变量（开发环境）
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+except ImportError:
+    pass
 
 from file_utils import (
     download_resource,
@@ -116,15 +124,56 @@ def default_config() -> Dict[str, Any]:
 
 def load_config() -> Dict[str, Any]:
     if not CONFIG_PATH.exists():
-        return default_config()
-    try:
-        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return default_config()
-    merged = default_config()
-    if isinstance(data, dict):
-        merged.update(data)
-    return merged
+        cfg = default_config()
+    else:
+        try:
+            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        cfg = default_config()
+        if isinstance(data, dict):
+            cfg.update(data)
+
+    # 环境变量覆盖（优先级高于 config.json）
+    _env_override(cfg)
+    return cfg
+
+
+# 环境变量 → 配置字段映射表
+_ENV_MAP: Dict[str, str] = {
+    "MY_TEACHER_CLOUD_API_KEY":     "cloud_api_key",
+    "MY_TEACHER_CLOUD_MODEL":       "cloud_model",
+    "MY_TEACHER_CLOUD_BASE_URL":    "cloud_base_url",
+    "MY_TEACHER_CHAT_API_KEY":      "chat_api_key",
+    "MY_TEACHER_CHAT_MODEL":        "chat_model",
+    "MY_TEACHER_CHAT_BASE_URL":     "chat_base_url",
+    "MY_TEACHER_OLLAMA_BASE_URL":   "ollama_base_url",
+    "MY_TEACHER_OLLAMA_MODEL":      "ollama_model",
+    "MY_TEACHER_ENABLE_LOCAL_OLLAMA": "enable_local_ollama",
+    "MY_TEACHER_TTS_PROVIDER":      "tts_provider",
+    "MY_TEACHER_TTS_CLOUD_VOICE":   "tts_cloud_voice",
+    "MY_TEACHER_AUTO_PLAY_TTS":     "auto_play_tts",
+    "MY_TEACHER_ASSISTANT_NAME":    "assistant_name",
+    "MY_TEACHER_DEFAULT_TOPIC":     "default_topic",
+}
+
+
+def _env_override(cfg: Dict[str, Any]) -> None:
+    """用环境变量覆盖配置字典中的对应字段（仅当环境变量非空时）。"""
+    for env_key, cfg_key in _ENV_MAP.items():
+        val = os.getenv(env_key, "").strip()
+        if not val:
+            continue
+        # 布尔类型字段
+        if cfg_key in ("enable_local_ollama", "auto_play_tts"):
+            cfg[cfg_key] = val.lower() in ("true", "1", "yes")
+        else:
+            cfg[cfg_key] = val
+    # siliconflow_api_key 别名兼容旧配置
+    if not cfg.get("siliconflow_api_key"):
+        cfg["siliconflow_api_key"] = cfg.get("cloud_api_key", "")
+    if not cfg.get("cloud_api_key"):
+        cfg["cloud_api_key"] = cfg.get("siliconflow_api_key", "")
 
 
 def save_config(data: Dict[str, Any]) -> Dict[str, Any]:

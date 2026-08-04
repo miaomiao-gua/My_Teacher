@@ -24,19 +24,23 @@ pip install -r project/requirements.txt
 
 ### 2. 配置
 
-复制 `project/config.json`（首次运行会自动生成默认配置），主要配置项：
+**方式一：环境变量（推荐）**
 
-```json
-{
-  "enable_local_ollama": true,
-  "ollama_base_url": "http://127.0.0.1:11434",
-  "ollama_model": "qwen2.5:7B",
-  "cloud_api_key": "你的硅基流动 API Key",
-  "cloud_model": "deepseek-ai/DeepSeek-V3"
-}
+```bash
+cp .env.example .env
 ```
 
-也可通过界面的「设置」面板直接配置。
+编辑 `.env`，至少填写一个云端 API Key：
+
+```env
+MY_TEACHER_CLOUD_API_KEY=sk-your-key-here
+```
+
+环境变量优先级高于 `config.json`，也可通过 Web UI「设置」面板修改其他选项。
+
+**方式二：Web UI 配置**
+
+首次启动后，项目会自动生成 `project/config.json`，点击界面右上角「⚙️ 设置」直接填写。
 
 ### 3. 启动
 
@@ -61,6 +65,8 @@ python app.py
 
 ```
 My_teacher/
+├── .env.example           # 环境变量模板（复制为 .env 后填写）
+├── .gitignore
 ├── project/
 │   ├── app.py              # Flask 主程序
 │   ├── lesson_prep.py       # 备课逻辑
@@ -76,5 +82,4 @@ My_teacher/
 │   ├── templates/
 │   │   └── index.html       # 页面模板
 │   └── lessons/             # 课程数据（不纳入版本控制）
-└── .gitignore
 ```

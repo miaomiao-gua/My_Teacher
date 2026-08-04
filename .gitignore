@@ -1,6 +1,9 @@
 # ====== JSON 配置文件（全部排除） ======
 *.json
 
+# ====== 环境变量（.env 排除，.env.example 保留） ======
+.env
+
 # ====== Python 缓存 ======
 __pycache__/
 *.pyc
