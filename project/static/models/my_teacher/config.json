@@ -1,0 +1,86 @@
+{
+    "arkit_mapping": {
+        "ParamJawOpen": [
+            "jawOpen"
+        ],
+        "ParamMouthClose": [
+            "mouthClose"
+        ],
+        "ParamMouthFunnel": [
+            "mouthFunnel"
+        ],
+        "ParamMouthPucker": [
+            "mouthPucker"
+        ],
+        "ParamMouthStretchLeft": [
+            "mouthStretchLeft"
+        ],
+        "ParamMouthStretchRight": [
+            "mouthStretchRight"
+        ],
+        "ParamMouthLeft": [
+            "mouthLeft"
+        ],
+        "ParamMouthRight": [
+            "mouthRight"
+        ],
+        "MouthSmileLeft": [
+            "mouthSmileLeft",
+            "mouthSmileRight"
+        ],
+        "MouthFrownLeft": [
+            "mouthFrownLeft"
+        ],
+        "MouthFrownRight": [
+            "mouthFrownRight"
+        ],
+        "MouthShrugUpper": [
+            "mouthShrugUpper"
+        ],
+        "MouthShrugLower": [
+            "mouthShrugLower"
+        ],
+        "MouthUpperUpLeft": [
+            "mouthUpperUpLeft"
+        ],
+        "MouthUpperUpRight": [
+            "mouthUpperUpRight"
+        ],
+        "ParamMouthLowerDownLeft": [
+            "mouthLowerDownLeft"
+        ],
+        "ParamMouthLowerDownRight": [
+            "mouthLowerDownRight"
+        ],
+        "ParamMouthRollUpper": [
+            "mouthRollUpper"
+        ],
+        "ParamMouthRollLower": [
+            "mouthRollLower"
+        ],
+        "ParamMouthPressLeft": [
+            "mouthPressLeft"
+        ],
+        "ParamMouthPressRight": [
+            "mouthPressRight"
+        ],
+        "MouthCheekPuff": [
+            "cheekPuff"
+        ],
+        "ParamMouthDimpleLeft": [
+            "mouthDimpleLeft"
+        ],
+        "ParamMouthDimpleRight": [
+            "mouthDimpleRight"
+        ]
+    },
+    "setparameter": {
+        "Param": 1,
+        "Param47": 1,
+        "Param48": 1,
+        "Param54": 0,
+        "Param57": 1,
+        "Param59": 1,
+        "Param60": 0
+    }
+}

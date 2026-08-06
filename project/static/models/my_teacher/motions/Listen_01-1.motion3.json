@@ -1,0 +1,184 @@
+{
+	"Version": 3,
+	"Meta": {
+		"Duration": 0.733,
+		"Fps": 30.0,
+		"Loop": true,
+		"AreBeziersRestricted": true,
+		"CurveCount": 9,
+		"TotalSegmentCount": 16,
+		"TotalPointCount": 49,
+		"UserDataCount": 0,
+		"TotalUserDataSize": 0
+	},
+	"Curves": [
+		{
+			"Target": "Parameter",
+			"Id": "Param18",
+			"Segments": [
+				0,
+				0,
+				1,
+				0.244,
+				0,
+				0.489,
+				0,
+				0.733,
+				0
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Id": "ParamAngleX",
+			"Segments": [
+				0,
+				0,
+				1,
+				0.244,
+				0,
+				0.489,
+				-30,
+				0.733,
+				-30
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Id": "ParamAngleY",
+			"Segments": [
+				0,
+				0,
+				1,
+				0.111,
+				0,
+				0.222,
+				-0.293,
+				0.333,
+				-4,
+				1,
+				0.433,
+				-7.337,
+				0.533,
+				-14,
+				0.633,
+				-14,
+				1,
+				0.667,
+				-14,
+				0.7,
+				-9.103,
+				0.733,
+				-9.103
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Id": "ParamAngleZ",
+			"Segments": [
+				0,
+				0,
+				1,
+				0.244,
+				0,
+				0.489,
+				-1.579,
+				0.733,
+				-1.579
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Id": "ParamEyeLOpen",
+			"Segments": [
+				0,
+				1,
+				0,
+				0.7,
+				1,
+				0,
+				0.733,
+				1
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Id": "ParamEyeROpen",
+			"Segments": [
+				0,
+				1,
+				0,
+				0.7,
+				1,
+				0,
+				0.733,
+				1
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Id": "ParamEyeBallX",
+			"Segments": [
+				0,
+				0,
+				1,
+				0.167,
+				0,
+				0.333,
+				0,
+				0.5,
+				0,
+				1,
+				0.578,
+				0,
+				0.656,
+				0.1,
+				0.733,
+				0.1
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Id": "ParamEyeBallY",
+			"Segments": [
+				0,
+				0,
+				1,
+				0.167,
+				0,
+				0.333,
+				0,
+				0.5,
+				0,
+				1,
+				0.578,
+				0,
+				0.656,
+				0.4,
+				0.733,
+				0.4
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Id": "Param4",
+			"Segments": [
+				0,
+				0,
+				1,
+				0.2,
+				0,
+				0.4,
+				-7,
+				0.6,
+				-7,
+				1,
+				0.644,
+				-7,
+				0.689,
+				-6.992,
+				0.733,
+				-6.992
+			]
+		}
+	]
+}

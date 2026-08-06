@@ -1,0 +1,142 @@
+{
+  "Version": 3,
+  "Meta": {
+    "Duration": 3.5,
+    "Fps": 30.0,
+    "Loop": false,
+    "AreBeziersRestricted": true,
+    "CurveCount": 6,
+    "TotalSegmentCount": 26,
+    "TotalPointCount": 32,
+    "UserDataCount": 0,
+    "TotalUserDataSize": 0
+  },
+  "Curves": [
+    {
+      "Target": "Parameter",
+      "Id": "ParamAngleX",
+      "Segments": [
+        0,
+        0,
+        0,
+        0.4,
+        25,
+        0,
+        0.9,
+        -25,
+        0,
+        1.4,
+        25,
+        0,
+        1.9,
+        -25,
+        0,
+        2.4,
+        25,
+        0,
+        2.9,
+        -15,
+        0,
+        3.5,
+        0
+      ]
+    },
+    {
+      "Target": "Parameter",
+      "Id": "ParamBodyAngleX",
+      "Segments": [
+        0,
+        0,
+        0,
+        0.4,
+        10,
+        0,
+        0.9,
+        -10,
+        0,
+        1.4,
+        10,
+        0,
+        1.9,
+        -10,
+        0,
+        2.4,
+        10,
+        0,
+        2.9,
+        -6,
+        0,
+        3.5,
+        0
+      ]
+    },
+    {
+      "Target": "Parameter",
+      "Id": "ParamShotHair",
+      "Segments": [
+        0,
+        0,
+        0,
+        0.4,
+        6,
+        0,
+        0.9,
+        -6,
+        0,
+        1.4,
+        6,
+        0,
+        1.9,
+        -6,
+        0,
+        2.4,
+        6,
+        0,
+        2.9,
+        -4,
+        0,
+        3.5,
+        0
+      ]
+    },
+    {
+      "Target": "Parameter",
+      "Id": "ParamMouthSmile",
+      "Segments": [
+        0,
+        0.5,
+        0,
+        0.3,
+        6,
+        0,
+        3.0,
+        6,
+        0,
+        3.5,
+        0.5
+      ]
+    },
+    {
+      "Target": "Parameter",
+      "Id": "ParamEyeLOpen",
+      "Segments": [
+        0,
+        1,
+        0,
+        3.5,
+        1
+      ]
+    },
+    {
+      "Target": "Parameter",
+      "Id": "ParamEyeROpen",
+      "Segments": [
+        0,
+        1,
+        0,
+        3.5,
+        1
+      ]
+    }
+  ]
+}

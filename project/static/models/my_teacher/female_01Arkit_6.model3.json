@@ -1,0 +1,125 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "female_01Arkit_6.moc3",
+		"Textures": [
+			"female_01Arkit_6.4096/texture_00.png",
+			"female_01Arkit_6.4096/texture_01.png",
+			"female_01Arkit_6.4096/texture_02.png",
+			"female_01Arkit_6.4096/texture_03.png",
+			"female_01Arkit_6.4096/texture_04.png",
+			"female_01Arkit_6.4096/texture_05.png",
+			"female_01Arkit_6.4096/texture_06.png",
+			"female_01Arkit_6.4096/texture_07.png",
+			"female_01Arkit_6.4096/texture_08.png"
+		],
+		"Physics": "female_01Arkit_6.physics3.json",
+		"DisplayInfo": "female_01Arkit_6.cdi3.json",
+		"HitAreas": [
+			{
+				"Name": "Head",
+				"Id": "Part5"
+			},
+			{
+				"Name": "Body",
+				"Id": "Part7"
+			},
+			{
+				"Name": "Legs",
+				"Id": "Part8"
+			},
+			{
+				"Name": "HandR",
+				"Id": "Part9"
+			},
+			{
+				"Name": "HandL",
+				"Id": "Part10"
+			}
+		],
+		"Expressions": [
+			{
+				"Name": "expression1",
+				"File": "expressions/expression1.exp3.json"
+			},
+			{
+				"Name": "expression2",
+				"File": "expressions/expression2.exp3.json"
+			},
+			{
+				"Name": "expression3",
+				"File": "expressions/expression3.exp3.json"
+			},
+			{
+				"Name": "expression4",
+				"File": "expressions/expression4.exp3.json"
+			},
+			{
+				"Name": "expression5",
+				"File": "expressions/expression5.exp3.json"
+			},
+			{
+				"Name": "expression6",
+				"File": "expressions/expression6.exp3.json"
+			},
+			{
+				"Name": "expression7",
+				"File": "expressions/expression7.exp3.json"
+			}
+		],
+		"Motions": {
+			"hello": [
+				{
+					"File": "motions/hello.motion3.json"
+				}
+			],
+			"idle": [
+				{
+					"File": "motions/idle_01.motion3.json"
+				},
+				{
+					"File": "motions/idle_02.motion3.json"
+				},
+				{
+					"File": "motions/idle_03.motion3.json"
+				}
+			],
+			"listen": [
+				{
+					"File": "motions/Listen_01-1.motion3.json"
+				},
+				{
+					"File": "motions/Listen_01-2.motion3.json"
+				}
+			],
+			"speak": [
+				{
+					"File": "motions/Speak_01.motion3.json"
+				},
+				{
+					"File": "motions/Speak_02.motion3.json"
+				}
+			],
+			"think": [
+				{
+					"File": "motions/Think_01.motion3.json"
+				}
+			]
+		}
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": [
+				"ParamEyeLOpen",
+				"ParamEyeROpen"
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": []
+		}
+	]
+}
