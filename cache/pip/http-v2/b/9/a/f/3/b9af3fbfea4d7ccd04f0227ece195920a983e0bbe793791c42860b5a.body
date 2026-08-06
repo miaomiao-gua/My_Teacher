@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: comfyui-workflow-templates-media-image
+Version: 0.3.160
+Summary: Media bundle containing image workflow assets
+License-Expression: MIT
+Requires-Python: >=3.9
+Description-Content-Type: text/plain
+
+Media bundle containing image workflow assets for ComfyUI.

@@ -38,11 +38,19 @@ def download_resource(resource: Dict[str, Any], lesson_dir: str | Path, file_pre
     if not url or not safe_url_check(url):
         raise ValueError(f"Invalid or unsafe URL: {url!r}")
 
+    # 请求日志：记录向谁发请求包
+    print(f"[DOWNLOAD] 发起下载请求: {url} | 标题: {resource.get('title', 'unnamed')} | 目标: {lesson_dir}", flush=True)
+
     lesson_path = Path(lesson_dir)
     lesson_path.mkdir(parents=True, exist_ok=True)
 
-    response = requests.get(url, timeout=30)
-    response.raise_for_status()
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        print(f"[DOWNLOAD] 下载成功: {url} → HTTP {response.status_code}, {len(response.content)} bytes", flush=True)
+    except Exception as exc:
+        print(f"[DOWNLOAD] 下载失败: {url} → {type(exc).__name__}: {exc}", flush=True)
+        raise
 
     content_type = response.headers.get("Content-Type", "")
     if "pdf" not in content_type and "doc" not in content_type and "text" not in content_type and "html" not in content_type:

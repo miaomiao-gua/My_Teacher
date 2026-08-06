@@ -1,513 +1,2998 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI 全能私教</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
-  </head>
-  <body>
-    <div class="scene-bg"></div>
-    <div class="menu-bg"></div>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <!-- Markdown & Security -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+    <!-- PixiJS v7 -->
+    <script src="https://cdn.jsdelivr.net/npm/pixi.js@7.3.2/dist/pixi.min.js"></script>
+    <!-- Polyfill: Node.js process global (used by pixi-live2d-display) -->
+    <script>window.process = window.process || { env: { NODE_ENV: "production" } };</script>
+    <!-- Polyfill: PixiJS v7 removed utils.EventEmitter, needed by pixi-live2d-display -->
+    <script>
+        (function() {
+            if (!PIXI.utils.EventEmitter) {
+                var EventEmitter = function() { this._events = {}; };
+                EventEmitter.prototype.on = function(event, fn) {
+                    (this._events[event] = this._events[event] || []).push(fn);
+                    return this;
+                };
+                EventEmitter.prototype.once = function(event, fn) {
+                    var self = this;
+                    var onceFn = function() { self.off(event, onceFn); fn.apply(this, arguments); };
+                    onceFn._originalFn = fn;
+                    return this.on(event, onceFn);
+                };
+                EventEmitter.prototype.off = function(event, fn) {
+                    if (!this._events[event]) return this;
+                    if (!fn) { delete this._events[event]; return this; }
+                    this._events[event] = this._events[event].filter(function(f) {
+                        return f !== fn && f._originalFn !== fn;
+                    });
+                    return this;
+                };
+                EventEmitter.prototype.emit = function(event) {
+                    if (!this._events[event]) return this;
+                    var args = Array.prototype.slice.call(arguments, 1);
+                    this._events[event].slice().forEach(function(fn) { fn.apply(null, args); });
+                    return this;
+                };
+                EventEmitter.prototype.removeAllListeners = function() { this._events = {}; return this; };
+                PIXI.utils.EventEmitter = EventEmitter;
+            }
+            if (!PIXI.utils.url) {
+                PIXI.utils.url = { resolve: function(base, path) { return new URL(path, base).href; } };
+            }
+            console.log('Polyfill: PIXI.utils.EventEmitter + url applied');
+        })();
+    </script>
+    <!-- Global error catcher for pixi-live2d-display loading -->
+    <script>window._pl2dErrors=[];window.addEventListener('error',function(e){window._pl2dErrors.push(e.message);console.error('[PL2D-ERROR]',e.message);},true);</script>
+    <!-- Live2D Cubism Core -->
+    <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+    <!-- Cubism 2 minimal stub: satisfies pl2d load-time checks without real Cubism 2 SDK -->
+    <script>
+        if (!window.Live2D) window.Live2D = {};
+        if (!window.AMotion) window.AMotion = function() {};
+        if (!window.Live2DMotion) {
+            window.Live2DMotion = function() {};
+            window.Live2DMotion.prototype.updateParam = function() {};
+            window.Live2DMotion.loadMotion = function() { return new window.Live2DMotion(); };
+        }
+        if (!window.MotionQueueManager) {
+            window.MotionQueueManager = function() {};
+            window.MotionQueueManager.prototype.startMotion = function() {};
+            window.MotionQueueManager.prototype.stopAllMotions = function() {};
+            window.MotionQueueManager.prototype.updateParam = function() {};
+            window.MotionQueueManager.prototype.isFinished = function() { return true; };
+        }
+        if (!window.PhysicsHair) {
+            window.PhysicsHair = function() {};
+            window.PhysicsHair.Src = {
+                SRC_TO_X: 0,
+                SRC_TO_Y: 1,
+                SRC_TO_G_ANGLE: 2
+            };
+            window.PhysicsHair.prototype.setup = function() {};
+            window.PhysicsHair.prototype.addSrcParam = function() {};
+            window.PhysicsHair.prototype.addTargetParam = function() {};
+            window.PhysicsHair.prototype.update = function() {};
+        }
+        if (!window.PartsDataID) {
+            window.PartsDataID = { getID: function(id) { return id; } };
+        }
+        console.log('Cubism2 stub applied');
+    </script>
+    <!-- pixi-live2d-display -->
+    <script src="/static/js/pl2d.js"></script>
+    <!-- Diagnostic: check if pixi-live2d-display loaded correctly -->
+    <script>
+        console.log('PL2D check: PIXI.live2d keys =', Object.keys(PIXI.live2d || {}));
+        console.log('PL2D check: Live2DModel =', typeof PIXI.live2d.Live2DModel);
+        // If library failed to load, try to find internal model and expose it
+        if (typeof PIXI.live2d.Live2DModel === 'undefined') {
+            console.error('PL2D check: Live2DModel is undefined! Library failed to initialize.');
+            // The factory might have crashed - try to check what's available
+            if (typeof Live2DCubismCore !== 'undefined') {
+                console.log('PL2D: CubismCore IS available, version:', Live2DCubismCore.Version);
+                console.log('PL2D: CubismCore csmGetVersion:', Live2DCubismCore.Version?.csmGetVersion?.());
+            }
+        }
+    </script>
 
-    <div id="menu-screen" class="screen">
-      <div class="menu-header">
-        <div>
-          <p class="eyebrow">Private Tutor</p>
-          <h1>AI 全能私教</h1>
-          <p class="menu-subtitle">选择一门课程，开始你的专属学习时光</p>
+    <style>
+        /* ============================================================
+           CSS Variables — Dark Academia / Warm Vintage
+           ============================================================ */
+        :root {
+            --bg-deepest: #0a0604;
+            --bg-deep: #120a06;
+            --bg-mid: #1a0f09;
+            --bg-panel: rgba(20, 12, 8, 0.78);
+            --bg-card: rgba(26, 15, 9, 0.72);
+            --bg-glass: rgba(16, 9, 5, 0.68);
+            --bg-hover: rgba(255, 255, 255, 0.04);
+
+            --border-subtle: rgba(200, 155, 110, 0.1);
+            --border-mid: rgba(200, 155, 110, 0.2);
+            --border-strong: rgba(200, 155, 110, 0.35);
+            --border-accent: rgba(210, 125, 65, 0.5);
+
+            --text-primary: #efe0cf;
+            --text-secondary: #c4a88a;
+            --text-muted: #8a7560;
+            --text-dim: #5a4a3a;
+
+            --gold: #d4a373;
+            --gold-light: #e8c9a0;
+            --gold-strong: #c08050;
+            --gold-glow: 0 0 18px rgba(212, 163, 115, 0.28);
+
+            --rose: #c06070;
+            --rose-soft: #d8909a;
+
+            --accent-bg: rgba(200, 120, 70, 0.12);
+            --accent-border: rgba(200, 120, 70, 0.22);
+
+            --radius-sm: 8px;
+            --radius-md: 14px;
+            --radius-lg: 20px;
+            --radius-xl: 28px;
+
+            --shadow-sm: 0 2px 8px rgba(0,0,0,0.25);
+            --shadow-md: 0 8px 24px rgba(0,0,0,0.35);
+            --shadow-lg: 0 16px 40px rgba(0,0,0,0.45);
+
+            --font-serif: 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', serif;
+
+            --transition-fast: 0.15s ease;
+            --transition-normal: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+            --transition-smooth: 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        /* ========== Reset & Base ========== */
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            height: 100%;
+            font-family: var(--font-serif);
+            color: var(--text-primary);
+            background: var(--bg-deepest);
+            overflow: hidden;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        #app {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            position: relative;
+            background:
+                radial-gradient(ellipse at 48% 28%, rgba(55, 30, 20, 0.7) 0%, transparent 55%),
+                radial-gradient(ellipse at 80% 75%, rgba(35, 18, 12, 0.5) 0%, transparent 50%),
+                radial-gradient(ellipse at 18% 82%, rgba(28, 14, 20, 0.4) 0%, transparent 45%),
+                linear-gradient(180deg, #140c06 0%, #0a0604 100%);
+        }
+        #app::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+            z-index: 0;
+            opacity: 0.4;
+            background:
+                repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(255,255,255,0.006) 2px, rgba(255,255,255,0.006) 4px);
+        }
+
+        /* ========== Main Area ========== */
+        .main-area {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* ========== Left: Live2D Portrait ========== */
+        .left-area {
+            flex: 3;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-width: 0;
+        }
+        .portrait-wrapper {
+            flex: 1;
+            width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* ========== Galgame 对话条 ========== */
+        .dialogue-bar {
+            position: relative;
+            width: calc(100% - 24px);
+            margin: 0 12px 14px;
+            padding: 0;
+            background: linear-gradient(180deg, rgba(10,6,3,0.88), rgba(18,10,6,0.94));
+            border: 1px solid rgba(212,163,115,0.28);
+            border-radius: 10px;
+            box-shadow: 0 6px 24px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.06);
+            cursor: pointer;
+            transition: all var(--transition-normal);
+            flex-shrink: 0;
+        }
+        .dialogue-bar:hover { border-color: rgba(212,163,115,0.45); }
+        .dialogue-name-tag {
+            position: absolute;
+            top: -14px;
+            left: 16px;
+            padding: 4px 16px;
+            background: linear-gradient(135deg, var(--gold-strong), var(--rose-strong));
+            color: #201207;
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.12em;
+            border-radius: 14px 14px 14px 2px;
+            box-shadow: 0 2px 10px rgba(200,130,80,0.35);
+            z-index: 2;
+        }
+        .dialogue-body {
+            padding: 16px 18px 12px;
+            position: relative;
+        }
+        .dialogue-content {
+            font-size: 14.5px;
+            line-height: 1.85;
+            color: var(--text-primary);
+            font-family: var(--font-serif);
+            min-height: 62px;
+            max-height: 150px;
+            overflow-y: auto;
+            letter-spacing: 0.03em;
+            word-break: break-word;
+        }
+        .dialogue-content::-webkit-scrollbar { width: 4px; }
+        .dialogue-content::-webkit-scrollbar-thumb { background: rgba(200,155,110,0.25); border-radius: 4px; }
+        .dialogue-indicator {
+            text-align: right;
+            font-size: 11px;
+            color: var(--text-dim);
+            letter-spacing: 0.08em;
+            padding-top: 6px;
+            opacity: 0.7;
+            animation: softPulse 1.6s ease-in-out infinite;
+        }
+        .dialogue-indicator.hidden { visibility: hidden; }
+        @keyframes softPulse {
+            0%, 100% { opacity: 0.35; }
+            50% { opacity: 0.9; }
+        }
+        /* 打字机光标 */
+        .type-caret::after {
+            content: '▍';
+            color: var(--gold);
+            margin-left: 2px;
+            animation: caretBlink 0.8s step-end infinite;
+        }
+        @keyframes caretBlink { 50% { opacity: 0; } }
+        .portrait-wrapper::after {
+            content: '';
+            position: absolute;
+            bottom: 4%;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 50%;
+            height: 16%;
+            background: radial-gradient(ellipse, rgba(212,163,115,0.1), transparent 70%);
+            pointer-events: none;
+            z-index: 0;
+        }
+        #live2d-canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            position: relative;
+            z-index: 1;
+            cursor: pointer;
+        }
+        .live2d-click-hint {
+            position: absolute;
+            top: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: var(--text-muted);
+            font-size: 12px;
+            letter-spacing: 0.06em;
+            z-index: 2;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.5s ease;
+        }
+        .portrait-wrapper:hover .live2d-click-hint { opacity: 0.55; }
+
+        /* ========== View Content (floating card) ========== */
+        .view-content {
+            position: absolute;
+            bottom: 108px;
+            left: 24px;
+            right: 24px;
+            background: var(--bg-glass);
+            backdrop-filter: blur(22px) saturate(140%);
+            -webkit-backdrop-filter: blur(22px) saturate(140%);
+            border-radius: var(--radius-lg);
+            padding: 20px 24px;
+            max-height: 38%;
+            overflow-y: auto;
+            border: 1px solid var(--border-subtle);
+            box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255,255,255,0.03);
+            display: none;
+            z-index: 5;
+        }
+        .view-content.active {
+            display: block;
+            animation: fadeSlideUp 0.28s ease;
+        }
+        @keyframes fadeSlideUp {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .view-content::-webkit-scrollbar { width: 5px; }
+        .view-content::-webkit-scrollbar-track { background: transparent; }
+        .view-content::-webkit-scrollbar-thumb {
+            background: linear-gradient(180deg, rgba(212,163,115,0.18), rgba(192,96,112,0.18));
+            border-radius: 10px;
+        }
+        /* 面板关闭按钮 */
+        .view-close {
+            position: absolute;
+            top: 10px;
+            right: 12px;
+            width: 24px;
+            height: 24px;
+            border: none;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.06);
+            color: var(--text-dim);
+            font-size: 13px;
+            line-height: 1;
+            cursor: pointer;
+            z-index: 6;
+            transition: all var(--transition-normal);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .view-close:hover {
+            background: rgba(200,90,90,0.25);
+            color: var(--text-primary);
+        }
+
+        /* ========== 板书覆盖层 ========== */
+        #board-overlay {
+            position: absolute;
+            top: 14px;
+            left: 24px;
+            right: 24px;
+            bottom: 108px;
+            z-index: 8;
+            background: var(--bg-glass);
+            backdrop-filter: blur(22px) saturate(140%);
+            -webkit-backdrop-filter: blur(22px) saturate(140%);
+            border: 1px solid var(--border-mid);
+            border-radius: var(--radius-lg);
+            box-shadow: var(--shadow-lg);
+            display: flex;
+            flex-direction: column;
+            padding: 14px;
+            overflow: hidden;
+        }
+        #board-overlay .board-overlay-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+            font-size: 14px;
+            color: var(--text-secondary);
+            letter-spacing: 0.06em;
+        }
+        #board-overlay #board-overlay-close {
+            width: 26px;
+            height: 26px;
+            border: none;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.07);
+            color: var(--text-dim);
+            cursor: pointer;
+            font-size: 13px;
+            transition: all var(--transition-normal);
+        }
+        #board-overlay #board-overlay-close:hover {
+            background: rgba(200,90,90,0.3);
+            color: var(--text-primary);
+        }
+        #board-overlay canvas {
+            flex: 1;
+            width: 100%;
+            min-height: 0;
+            border-radius: 8px;
+            border: 1px solid var(--border-subtle);
+            background: #fff;
+            object-fit: contain;
+        }
+        #board-overlay .board-overlay-hint {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 8px;
+            text-align: center;
+            letter-spacing: 0.04em;
+        }
+
+        /* ========== Navigation (top-left pills) ========== */
+        .nav-float {
+            position: absolute;
+            top: 18px;
+            left: 18px;
+            z-index: 20;
+            display: flex;
+            gap: 5px;
+            background: var(--bg-glass);
+            backdrop-filter: blur(22px);
+            -webkit-backdrop-filter: blur(22px);
+            padding: 5px 8px;
+            border-radius: 40px;
+            border: 1px solid var(--border-subtle);
+            box-shadow: var(--shadow-sm);
+        }
+        .nav-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            font-size: 14px;
+            padding: 7px 14px;
+            border-radius: 30px;
+            cursor: pointer;
+            transition: all var(--transition-normal);
+            font-family: var(--font-serif);
+            letter-spacing: 0.04em;
+            white-space: nowrap;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .nav-btn .nav-icon { font-size: 15px; }
+        .nav-btn .nav-label { font-size: 12.5px; }
+        .nav-btn:hover { color: var(--text-secondary); background: var(--bg-hover); }
+        .nav-btn.active {
+            color: var(--gold-light);
+            background: rgba(200, 120, 70, 0.2);
+            box-shadow: 0 0 14px rgba(200, 120, 70, 0.15);
+        }
+
+        /* ========== Right Chat Sidebar ========== */
+        .chat-sidebar {
+            flex: 1;
+            min-width: 220px;
+            max-width: 340px;
+            background: var(--bg-panel);
+            backdrop-filter: blur(18px);
+            -webkit-backdrop-filter: blur(18px);
+            border-left: 1px solid var(--border-subtle);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .chat-sidebar .sidebar-header {
+            flex-shrink: 0;
+            padding: 22px 18px 14px;
+            text-align: center;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+        .chat-sidebar .sidebar-title {
+            font-size: 15px;
+            color: var(--text-secondary);
+            letter-spacing: 0.1em;
+            font-weight: 600;
+        }
+        .chat-sidebar .sidebar-subtitle {
+            font-size: 11px;
+            color: var(--text-dim);
+            letter-spacing: 0.08em;
+            margin-top: 3px;
+        }
+        .chat-sidebar #conversation {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            padding: 16px 14px;
+        }
+        .chat-sidebar #conversation::-webkit-scrollbar { width: 4px; }
+        .chat-sidebar #conversation::-webkit-scrollbar-track { background: transparent; }
+        .chat-sidebar #conversation::-webkit-scrollbar-thumb {
+            background: rgba(200,155,110,0.18);
+            border-radius: 4px;
+        }
+
+        /* Chat Bubbles */
+        .chat-sidebar .bubble {
+            padding: 10px 14px;
+            border-radius: 14px;
+            font-size: 13.5px;
+            line-height: 1.65;
+            word-break: break-word;
+            animation: bubbleIn 0.25s ease;
+            max-width: 92%;
+        }
+        @keyframes bubbleIn {
+            from { opacity: 0; transform: translateY(5px) scale(0.98); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .chat-sidebar .bubble.user {
+            background: rgba(200, 120, 70, 0.18);
+            border: 1px solid rgba(200, 120, 70, 0.12);
+            align-self: flex-end;
+            border-bottom-right-radius: 6px;
+            color: var(--text-primary);
+        }
+        .chat-sidebar .bubble.teacher {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.03);
+            align-self: flex-start;
+            border-bottom-left-radius: 6px;
+            color: var(--text-primary);
+        }
+        .chat-sidebar .bubble p { margin: 0 0 5px; }
+        .chat-sidebar .bubble p:last-child { margin-bottom: 0; }
+        .chat-sidebar .bubble code {
+            background: rgba(0,0,0,0.3);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.88em;
+            color: var(--gold-light);
+        }
+        .chat-sidebar .bubble pre {
+            background: rgba(0,0,0,0.38);
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            padding: 10px 14px;
+            overflow-x: auto;
+            font-size: 0.82em;
+            margin: 5px 0;
+        }
+        .chat-sidebar .bubble strong { color: var(--gold-light); }
+        .chat-sidebar .bubble em { color: var(--text-secondary); }
+
+        /* ========== Bottom Input ========== */
+        .input-area {
+            display: flex;
+            align-items: flex-end;
+            gap: 12px;
+            padding: 14px 24px;
+            background: var(--bg-panel);
+            backdrop-filter: blur(18px);
+            -webkit-backdrop-filter: blur(18px);
+            border-top: 1px solid var(--border-subtle);
+            flex-shrink: 0;
+            z-index: 2;
+        }
+        .input-area textarea {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border-subtle);
+            border-radius: 16px;
+            padding: 12px 18px;
+            color: var(--text-primary);
+            font-family: var(--font-serif);
+            font-size: 15px;
+            letter-spacing: 0.03em;
+            line-height: 1.5;
+            resize: none;
+            min-height: 48px;
+            max-height: 140px;
+            transition: all var(--transition-normal);
+        }
+        .input-area textarea:focus {
+            outline: none;
+            border-color: var(--border-accent);
+            box-shadow: 0 0 0 3px rgba(200, 120, 70, 0.1);
+            background: rgba(255, 255, 255, 0.06);
+        }
+        .input-area textarea::placeholder { color: var(--text-dim); font-style: italic; }
+        .input-area .btn {
+            background: rgba(200, 120, 70, 0.16);
+            border: 1px solid rgba(200, 120, 70, 0.18);
+            color: var(--text-primary);
+            padding: 0 22px;
+            border-radius: 30px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all var(--transition-normal);
+            font-family: var(--font-serif);
+            letter-spacing: 0.05em;
+            white-space: nowrap;
+            height: 48px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+        }
+        .input-area .btn:hover {
+            background: rgba(200, 120, 70, 0.28);
+            border-color: var(--border-accent);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 14px rgba(200, 120, 70, 0.18);
+        }
+        .input-area .btn:active { transform: translateY(0); }
+        .input-area .btn-primary {
+            background: linear-gradient(135deg, rgba(200, 110, 60, 0.38), rgba(175, 85, 45, 0.28));
+            border-color: rgba(200, 120, 70, 0.28);
+            min-width: 80px;
+        }
+        .input-area .btn-primary:hover {
+            background: linear-gradient(135deg, rgba(210, 120, 70, 0.52), rgba(185, 95, 55, 0.4));
+        }
+        .input-area .btn-icon { width: 48px; padding: 0; border-radius: 50%; }
+        .input-area .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; box-shadow: none; }
+
+        /* ========== View Content Cards ========== */
+        .view-content .card {
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: var(--radius-md);
+            padding: 16px 20px;
+            border: 1px solid var(--border-subtle);
+            margin-bottom: 12px;
+        }
+        .view-content .card h3 {
+            color: var(--gold-light);
+            margin-bottom: 10px;
+            font-size: 16px;
+            letter-spacing: 0.06em;
+            font-weight: 600;
+        }
+        .view-content .card .btn-sm {
+            background: var(--accent-bg);
+            border: 1px solid var(--accent-border);
+            color: var(--text-primary);
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: all var(--transition-normal);
+            font-family: var(--font-serif);
+            letter-spacing: 0.04em;
+            font-weight: 500;
+        }
+        .view-content .card .btn-sm:hover {
+            background: rgba(200, 120, 70, 0.22);
+            border-color: var(--border-accent);
+        }
+        .view-content .card input,
+        .view-content .card select {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-sm);
+            padding: 8px 12px;
+            color: var(--text-primary);
+            font-family: var(--font-serif);
+            font-size: 14px;
+            width: 100%;
+            transition: border-color var(--transition-normal);
+        }
+        .view-content .card input:focus,
+        .view-content .card select:focus {
+            outline: none;
+            border-color: var(--border-accent);
+            box-shadow: 0 0 0 2px rgba(200, 120, 70, 0.08);
+        }
+
+        /* Exam */
+        .exam-question {
+            background: rgba(255, 255, 255, 0.025);
+            padding: 14px 18px;
+            margin-bottom: 12px;
+            border-radius: var(--radius-md);
+            border-left: 3px solid var(--border-accent);
+        }
+        .exam-question .q-title {
+            font-weight: 600;
+            color: var(--gold-light);
+            font-size: 14px;
+            letter-spacing: 0.05em;
+        }
+        .exam-question .q-options label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 5px 0;
+            cursor: pointer;
+            color: var(--text-secondary);
+            font-size: 14px;
+            transition: color var(--transition-fast);
+        }
+        .exam-question .q-options label:hover { color: var(--text-primary); }
+        .exam-question .q-options input[type="radio"],
+        .exam-question .q-options input[type="checkbox"] {
+            accent-color: var(--gold-strong);
+            width: 16px; height: 16px;
+        }
+        .exam-question .q-explanation {
+            margin-top: 8px;
+            padding: 8px 12px;
+            background: rgba(200, 180, 160, 0.05);
+            border-radius: var(--radius-sm);
+            color: var(--text-muted);
+            font-size: 13px;
+        }
+
+        /* Resources */
+        .resource-item {
+            background: rgba(255, 255, 255, 0.02);
+            padding: 10px 14px;
+            margin-bottom: 8px;
+            border-radius: var(--radius-sm);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            transition: background var(--transition-fast);
+        }
+        .resource-item:hover { background: rgba(255, 255, 255, 0.04); }
+        .resource-item label {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex: 1;
+            cursor: pointer;
+        }
+        .resource-item input[type="checkbox"] {
+            accent-color: var(--gold-strong);
+            width: 16px; height: 16px;
+        }
+        .resource-item strong { color: var(--text-primary); font-size: 14px; font-weight: 600; }
+        .resource-item small { color: var(--text-muted); font-size: 12px; }
+
+        /* Lesson Cards */
+        .lesson-card {
+            background: rgba(255, 255, 255, 0.02);
+            border-radius: var(--radius-md);
+            padding: 14px 18px;
+            border: 1px solid var(--border-subtle);
+            cursor: pointer;
+            transition: all var(--transition-normal);
+            margin-bottom: 10px;
+            position: relative;
+        }
+        .lesson-card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0;
+            width: 3px;
+            height: 100%;
+            background: linear-gradient(180deg, var(--gold), var(--rose-soft));
+            border-radius: 3px 0 0 3px;
+            opacity: 0.7;
+        }
+        .lesson-card:hover {
+            background: rgba(200, 120, 70, 0.06);
+            border-color: var(--border-mid);
+            transform: translateY(-1px);
+        }
+        .lesson-card .name {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-primary);
+            letter-spacing: 0.04em;
+            margin-left: 6px;
+        }
+        .lesson-card .meta {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-left: 6px;
+        }
+        .lesson-card .progress-bar {
+            width: calc(100% - 6px);
+            height: 3px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 3px;
+            margin: 7px 0 0 6px;
+            overflow: hidden;
+        }
+        .lesson-card .progress-bar .fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--gold-strong), var(--gold-light));
+            border-radius: 3px;
+            transition: width 0.5s ease;
+        }
+
+        /* ========== Settings Panel ========== */
+        .setting-row {
+            margin-bottom: 12px;
+        }
+        .setting-row:last-child {
+            margin-bottom: 0;
+        }
+        .setting-label {
+            font-size: 12px;
+            color: var(--text-muted);
+            letter-spacing: 0.08em;
+            margin-bottom: 6px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .setting-label::before {
+            content: '';
+            width: 3px;
+            height: 12px;
+            border-radius: 2px;
+            background: linear-gradient(180deg, var(--gold), var(--rose-soft));
+            display: inline-block;
+        }
+        .slider-control {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 6px;
+        }
+        .slider-control label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            min-width: 28px;
+            flex-shrink: 0;
+        }
+        .slider-control input[type="range"] {
+            flex: 1;
+            height: 5px;
+            -webkit-appearance: none;
+            appearance: none;
+            border-radius: 3px;
+            background: linear-gradient(90deg, var(--gold-strong), var(--rose-soft));
+            outline: none;
+            cursor: pointer;
+        }
+        .slider-control input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 15px;
+            height: 15px;
+            border-radius: 50%;
+            background: var(--paper, #f0e3c8);
+            border: 2px solid var(--gold);
+            cursor: pointer;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+        }
+        .slider-control input[type="range"]::-moz-range-thumb {
+            width: 15px;
+            height: 15px;
+            border-radius: 50%;
+            background: #f0e3c8;
+            border: 2px solid var(--gold);
+            cursor: pointer;
+        }
+        .slider-control .val {
+            font-size: 12px;
+            color: var(--gold-light);
+            min-width: 44px;
+            text-align: right;
+            font-weight: 600;
+        }
+
+        /* Background presets */
+        .bg-preset-grid {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            gap: 6px;
+            margin-bottom: 8px;
+        }
+        .bg-preset-btn {
+            padding: 8px 4px;
+            border-radius: 10px;
+            border: 1px solid var(--border-subtle);
+            background: rgba(255,255,255,0.03);
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all var(--transition-normal);
+            font-family: var(--font-serif);
+            font-size: 12px;
+            letter-spacing: 0.04em;
+        }
+        .bg-preset-btn:hover {
+            border-color: var(--border-mid);
+            color: var(--text-primary);
+        }
+        .bg-preset-btn.active {
+            border-color: var(--gold);
+            color: var(--gold-light);
+            background: rgba(200, 120, 70, 0.2);
+            box-shadow: var(--gold-glow);
+        }
+        .bg-custom-field {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .bg-custom-field input[type="file"] {
+            flex: 1;
+            min-width: 120px;
+        }
+
+        /* ========== App Background Themes ========== */
+        #app {
+            --app-bg:
+                radial-gradient(ellipse at 48% 28%, rgba(55, 30, 20, 0.7) 0%, transparent 55%),
+                radial-gradient(ellipse at 80% 75%, rgba(35, 18, 12, 0.5) 0%, transparent 50%),
+                radial-gradient(ellipse at 18% 82%, rgba(28, 14, 20, 0.4) 0%, transparent 45%),
+                linear-gradient(180deg, #140c06 0%, #0a0604 100%);
+            background: var(--app-bg);
+        }
+        #app.theme-sakura {
+            --app-bg:
+                radial-gradient(ellipse at 48% 28%, rgba(90, 35, 55, 0.7) 0%, transparent 55%),
+                radial-gradient(ellipse at 80% 75%, rgba(60, 25, 40, 0.5) 0%, transparent 50%),
+                linear-gradient(180deg, #2a1020 0%, #120608 100%);
+        }
+        #app.theme-bamboo {
+            --app-bg:
+                radial-gradient(ellipse at 48% 28%, rgba(35, 60, 40, 0.7) 0%, transparent 55%),
+                radial-gradient(ellipse at 80% 75%, rgba(20, 40, 30, 0.5) 0%, transparent 50%),
+                linear-gradient(180deg, #101f16 0%, #060d09 100%);
+        }
+        #app.theme-snow {
+            --app-bg:
+                radial-gradient(ellipse at 48% 28%, rgba(70, 80, 100, 0.6) 0%, transparent 55%),
+                radial-gradient(ellipse at 80% 75%, rgba(50, 60, 80, 0.45) 0%, transparent 50%),
+                linear-gradient(180deg, #1a2230 0%, #0a0e16 100%);
+        }
+        #app.theme-dusk {
+            --app-bg:
+                radial-gradient(ellipse at 48% 28%, rgba(120, 60, 30, 0.65) 0%, transparent 55%),
+                radial-gradient(ellipse at 80% 75%, rgba(80, 40, 25, 0.45) 0%, transparent 50%),
+                linear-gradient(180deg, #241208 0%, #0c0603 100%);
+        }
+        #app.theme-night {
+            --app-bg:
+                radial-gradient(ellipse at 48% 28%, rgba(40, 45, 80, 0.65) 0%, transparent 55%),
+                radial-gradient(ellipse at 80% 75%, rgba(25, 30, 60, 0.5) 0%, transparent 50%),
+                linear-gradient(180deg, #10142a 0%, #060714 100%);
+        }
+        #app.theme-custom {
+            background-image: linear-gradient(180deg, rgba(8,5,3,0.25), rgba(4,2,1,0.55));
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+        }
+
+        /* ========== 首页菜单 ========== */
+        .menu-screen {
+            position: fixed;
+            inset: 0;
+            z-index: 100;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow-y: auto;
+            padding: 30px 20px;
+        }
+        .menu-screen.hidden { display: none; }
+        .menu-bg {
+            position: absolute;
+            inset: 0;
+            background:
+                radial-gradient(ellipse at 50% 30%, rgba(60, 35, 25, 0.6) 0%, transparent 55%),
+                radial-gradient(ellipse at 80% 75%, rgba(35, 18, 12, 0.5) 0%, transparent 50%),
+                radial-gradient(ellipse at 18% 82%, rgba(28, 14, 20, 0.4) 0%, transparent 45%),
+                linear-gradient(180deg, #140c06 0%, #0a0604 100%);
+        }
+        .menu-bg::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background:
+                repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(255,255,255,0.006) 2px, rgba(255,255,255,0.006) 4px);
+            opacity: 0.4;
+        }
+        .menu-container {
+            position: relative;
+            z-index: 2;
+            width: min(1000px, 94vw);
+            animation: fadeSlideUp 0.4s ease;
+        }
+        .menu-header {
+            text-align: center;
+            margin-bottom: 28px;
+        }
+        .menu-eyebrow {
+            font-size: 12px;
+            letter-spacing: 0.32em;
+            color: var(--gold);
+            text-transform: uppercase;
+            margin-bottom: 8px;
+            text-shadow: 0 0 14px var(--gold-glow);
+        }
+        .menu-header h1 {
+            font-size: clamp(2rem, 5vw, 3rem);
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            background: linear-gradient(135deg, var(--gold) 0%, var(--rose-soft) 55%, var(--gold-strong) 100%);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+            filter: drop-shadow(0 4px 18px rgba(212, 163, 115, 0.25));
+            margin: 0;
+        }
+        .menu-subtitle {
+            color: var(--text-muted);
+            font-size: 14px;
+            margin-top: 8px;
+            letter-spacing: 0.06em;
+        }
+        .menu-lessons {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 14px;
+            max-height: 52vh;
+            overflow-y: auto;
+            padding: 6px 4px 12px;
+        }
+        .menu-lessons::-webkit-scrollbar { width: 5px; }
+        .menu-lessons::-webkit-scrollbar-thumb { background: rgba(200,155,110,0.2); border-radius: 4px; }
+        .menu-lesson-card {
+            background: linear-gradient(160deg, rgba(245,232,211,0.05), rgba(212,163,115,0.015));
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-md);
+            padding: 18px 20px;
+            cursor: pointer;
+            transition: all var(--transition-normal);
+            position: relative;
+            overflow: hidden;
+        }
+        .menu-lesson-card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0;
+            width: 3px;
+            height: 100%;
+            background: linear-gradient(180deg, var(--gold), var(--rose-soft));
+            opacity: 0.75;
+        }
+        .menu-lesson-card:hover {
+            border-color: var(--border-mid);
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-md);
+            background: linear-gradient(160deg, rgba(200,120,70,0.08), rgba(212,163,115,0.02));
+        }
+        .menu-lesson-card .m-name {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-primary);
+            letter-spacing: 0.04em;
+            margin-bottom: 6px;
+        }
+        .menu-lesson-card .m-meta {
+            font-size: 12px;
+            color: var(--text-muted);
+            line-height: 1.6;
+        }
+        .menu-lesson-card .m-arrow {
+            position: absolute;
+            top: 16px; right: 16px;
+            color: var(--gold);
+            opacity: 0;
+            transition: opacity var(--transition-normal);
+            font-size: 18px;
+        }
+        .menu-lesson-card:hover .m-arrow { opacity: 0.9; }
+        .menu-empty {
+            grid-column: 1 / -1;
+            text-align: center;
+            color: var(--text-muted);
+            padding: 40px 0;
+            font-style: italic;
+            border: 1px dashed var(--border-subtle);
+            border-radius: var(--radius-md);
+        }
+        .menu-loading {
+            grid-column: 1 / -1;
+            text-align: center;
+            color: var(--text-muted);
+            padding: 30px 0;
+        }
+        .menu-actions {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            margin-top: 24px;
+            flex-wrap: wrap;
+        }
+        .menu-btn {
+            padding: 12px 28px;
+            border-radius: 40px;
+            border: 1px solid var(--border-mid);
+            background: rgba(255,255,255,0.04);
+            color: var(--text-primary);
+            font-family: var(--font-serif);
+            font-size: 14px;
+            letter-spacing: 0.06em;
+            cursor: pointer;
+            transition: all var(--transition-normal);
+        }
+        .menu-btn:hover {
+            border-color: var(--gold);
+            background: rgba(200,120,70,0.12);
+            transform: translateY(-1px);
+        }
+        .menu-btn.primary {
+            background: linear-gradient(135deg, rgba(200,110,60,0.35), rgba(175,85,45,0.25));
+            border-color: rgba(200,120,70,0.35);
+        }
+        .menu-btn.primary:hover {
+            background: linear-gradient(135deg, rgba(210,120,70,0.5), rgba(185,95,55,0.4));
+            box-shadow: 0 4px 16px rgba(200,120,70,0.2);
+        }
+
+        /* ========== Responsive ========== */
+        @media (max-width: 768px) {
+            .main-area { flex-direction: column; }
+            .left-area { flex: 1; min-height: 0; }
+            .chat-sidebar {
+                max-width: none; min-width: 0;
+                border-left: none;
+                border-top: 1px solid var(--border-subtle);
+                max-height: 28vh;
+            }
+            .view-content {
+                max-height: 30%;
+                bottom: 10px; left: 10px; right: 10px;
+                padding: 14px 16px;
+            }
+            .input-area { padding: 10px 14px; gap: 8px; }
+            .nav-float { top: 10px; left: 10px; padding: 4px 6px; gap: 2px; }
+            .nav-btn { padding: 6px 9px; }
+            .nav-btn .nav-label { display: none; }
+        }
+        @media (max-width: 480px) {
+            .input-area textarea { font-size: 14px; padding: 10px 14px; }
+            .input-area .btn { height: 42px; padding: 0 14px; font-size: 13px; }
+            .input-area .btn-icon { width: 42px; }
+        }
+    </style>
+</head>
+<body>
+    <!-- ========== 首页菜单（覆盖层） ========== -->
+    <div id="menu-screen" class="menu-screen hidden">
+        <div class="menu-bg"></div>
+        <div class="menu-container">
+            <div class="menu-header">
+                <div class="menu-eyebrow">AI 全能私教</div>
+                <h1>🎓 欢迎回来</h1>
+                <p class="menu-subtitle">选择课程开始学习，或创建新课程</p>
+            </div>
+            <div class="menu-lessons" id="menu-lesson-list">
+                <div class="menu-loading">加载课程中...</div>
+            </div>
+            <div class="menu-actions">
+                <button id="menu-create-btn" class="menu-btn primary">➕ 创建课程</button>
+                <button id="menu-settings-btn" class="menu-btn">⚙️ 更改配置</button>
+            </div>
         </div>
-        <div class="menu-actions">
-          <button id="config-btn" class="ghost-btn">⚙️ 设置</button>
-          <button id="new-course-btn" class="primary-btn">新建课程</button>
-        </div>
-      </div>
-      <div class="menu-creator">
-        <input id="menu-topic-input" type="text" value="Python 基础" placeholder="输入课程主题并创建新课程" />
-        <button id="menu-new-course-btn" class="primary-btn">创建课程</button>
-      </div>
-      <div id="lesson-list" class="lesson-list"></div>
     </div>
 
-    <div id="new-course-modal" class="modal hidden">
-      <div class="modal-card">
-        <div class="modal-header">
-          <h2>新建课程</h2>
-          <button id="close-new-course-btn" class="ghost-btn">关闭</button>
+    <div id="app">
+
+        <div class="main-area">
+
+            <!-- Navigation (top-left) -->
+            <div class="nav-float">
+                <button class="nav-btn" id="back-to-menu-btn" title="返回首页">
+                    <span class="nav-icon">🏠</span><span class="nav-label">首页</span>
+                </button>
+                <button class="nav-btn active" data-view="chat">
+                    <span class="nav-icon">💬</span><span class="nav-label">对话</span>
+                </button>
+                <button class="nav-btn" data-view="exam">
+                    <span class="nav-icon">📝</span><span class="nav-label">测验</span>
+                </button>
+                <button class="nav-btn" data-view="resource">
+                    <span class="nav-icon">📄</span><span class="nav-label">资源</span>
+                </button>
+                <button class="nav-btn" data-view="lesson">
+                    <span class="nav-icon">🔄</span><span class="nav-label">课程</span>
+                </button>
+                <button class="nav-btn" data-view="settings">
+                    <span class="nav-icon">⚙️</span><span class="nav-label">设置</span>
+                </button>
+            </div>
+
+            <!-- Left: Live2D Portrait Area -->
+            <div class="left-area">
+                <div class="portrait-wrapper" id="portrait-wrapper">
+                    <canvas id="live2d-canvas"></canvas>
+                    <div class="live2d-click-hint">✨ 点击角色互动</div>
+                </div>
+
+                <!-- 板书覆盖层（控制台 showBoard() 强制展示） -->
+                <div id="board-overlay" style="display:none;">
+                    <div class="board-overlay-head">
+                        <span>📋 板书</span>
+                        <button id="board-overlay-close" title="关闭">✕</button>
+                    </div>
+                    <canvas id="board-overlay-canvas"></canvas>
+                    <div class="board-overlay-hint">💡 点击标记点，角色会看向该处</div>
+                </div>
+
+                <!-- Galgame 风格对话条（画面下方） -->
+                <div class="dialogue-bar" id="dialogue-bar" style="display:none;">
+                    <div class="dialogue-name-tag" id="dialogue-name">艾琳老师</div>
+                    <div class="dialogue-body">
+                        <div class="dialogue-content" id="dialogue-content"></div>
+                        <div class="dialogue-indicator" id="dialogue-indicator">▼ 按 Enter 继续</div>
+                    </div>
+                </div>
+
+                <!-- View Panels (floating over portrait) -->
+                <div id="view-chat" class="view-content active">
+                    <button class="view-close" data-view="chat" title="关闭">✕</button>
+                    <div class="card">
+                        <p style="color:var(--text-secondary); font-size:14px;">欢迎来到 AI 全能私教</p>
+                        <p style="color:var(--text-dim); font-size:13px;">输入课程主题开始学习，或点击角色互动 🎓</p>
+                    </div>
+                </div>
+                <div id="view-exam" class="view-content">
+                    <button class="view-close" data-view="exam" title="关闭">✕</button>
+                    <div class="card">
+                        <h3>📝 随堂测验</h3>
+                        <div style="display:flex; gap:8px; margin-bottom:10px;">
+                            <input id="exam-topic" placeholder="主题" value="Python 基础" style="flex:1;">
+                            <button id="exam-generate-btn" class="btn-sm">生成题目</button>
+                        </div>
+                        <div id="exam-list"><span style="color:var(--text-dim);">点击生成题目</span></div>
+                        <button id="exam-submit-btn" class="btn-sm" style="display:none; margin-top:8px;">提交答案</button>
+                    </div>
+                </div>
+                <div id="view-resource" class="view-content">
+                    <button class="view-close" data-view="resource" title="关闭">✕</button>
+                    <div class="card">
+                        <h3>📄 学习资源</h3>
+                        <div id="resource-list"><span style="color:var(--text-dim);">暂无资源</span></div>
+                        <button id="download-btn" class="btn-sm" style="margin-top:10px;">⬇ 下载选中</button>
+                    </div>
+                </div>
+                <div id="view-lesson" class="view-content">
+                    <button class="view-close" data-view="lesson" title="关闭">✕</button>
+                    <div class="card">
+                        <h3>📋 板书</h3>
+                        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+                            <input type="file" id="board-upload" accept="image/*" style="flex:1; min-width:120px;">
+                            <button id="board-delete-btn" class="btn-sm">删除板书</button>
+                        </div>
+                        <div id="board-preview" style="display:none; position:relative;">
+                            <canvas id="board-canvas" style="width:100%; border-radius:8px; border:1px solid var(--border-subtle);"></canvas>
+                            <div style="font-size:12px; color:var(--text-muted); margin-top:4px;">💡 点击标记点，角色会看向该处</div>
+                        </div>
+                        <div id="board-empty" style="font-size:13px; color:var(--text-dim);">暂无板书，上传图片后自动识别内容区域</div>
+                    </div>
+                    <div class="card">
+                        <h3>🔄 切换课程</h3>
+                        <div id="lesson-list"><span style="color:var(--text-dim);">加载中...</span></div>
+                        <button id="create-lesson-btn" class="btn-sm" style="margin-top:10px;">➕ 新建课程</button>
+                    </div>
+                </div>
+                <div id="view-settings" class="view-content">
+                    <button class="view-close" data-view="settings" title="关闭">✕</button>
+                    <div class="card">
+                        <h3>🎨 角色外观</h3>
+                        <div class="setting-row">
+                            <div class="setting-label">位置</div>
+                            <div class="slider-control">
+                                <label>水平</label>
+                                <input type="range" id="portrait-pos-x" min="0" max="100" value="50">
+                                <span class="val" id="portrait-pos-x-val">50%</span>
+                            </div>
+                            <div class="slider-control">
+                                <label>垂直</label>
+                                <input type="range" id="portrait-pos-y" min="0" max="100" value="50">
+                                <span class="val" id="portrait-pos-y-val">50%</span>
+                            </div>
+                        </div>
+                        <div class="setting-row">
+                            <div class="setting-label">大小</div>
+                            <div class="slider-control">
+                                <label>缩放</label>
+                                <input type="range" id="portrait-scale" min="10" max="80" value="32">
+                                <span class="val" id="portrait-scale-val">0.32</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <h3>🖼️ 背景</h3>
+                        <div class="bg-preset-grid">
+                            <button class="bg-preset-btn" data-theme="warm">暖色</button>
+                            <button class="bg-preset-btn" data-theme="sakura">樱花</button>
+                            <button class="bg-preset-btn" data-theme="bamboo">竹影</button>
+                            <button class="bg-preset-btn" data-theme="snow">雪景</button>
+                            <button class="bg-preset-btn" data-theme="dusk">黄昏</button>
+                            <button class="bg-preset-btn" data-theme="night">夜晚</button>
+                        </div>
+                        <div class="bg-custom-field">
+                            <input type="file" id="bg-upload" accept="image/*">
+                            <button id="bg-reset-btn" class="btn-sm">恢复默认</button>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <h3>⚙️ 其他设置</h3>
+                        <div style="display:flex; gap:14px; flex-wrap:wrap;">
+                            <div style="flex:1; min-width:160px;">
+                                <label style="font-size:13px; color:var(--text-muted);">头像</label>
+                                <input type="file" id="avatar-upload" accept="image/*" style="margin-top:6px;">
+                                <button id="reset-avatar-btn" class="btn-sm" style="margin-top:6px;">恢复默认</button>
+                            </div>
+                            <div style="flex:1; min-width:160px;">
+                                <label style="font-size:13px; color:var(--text-muted);">声线</label>
+                                <select id="voice-select" style="margin-top:6px;">
+                                    <option value="zh-CN-XiaoxiaoNeural">温柔女声</option>
+                                    <option value="zh-CN-YunxiNeural">成熟男声</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    <button id="save-settings-btn" class="btn-sm" style="margin-top:4px;">💾 保存设置</button>
+                </div>
+            </div>
+
+            <!-- Right: Chat Sidebar -->
+            <div class="chat-sidebar">
+                <div class="sidebar-header">
+                    <div class="sidebar-title">📜 聊天记录</div>
+                    <div class="sidebar-subtitle">— AI 全能私教 —</div>
+                </div>
+                <div id="conversation">
+                    <div class="bubble teacher">欢迎来到 AI 全能私教 🎓</div>
+                    <div class="bubble teacher">输入课程主题开始备课吧！<br>也可点击左侧角色互动 ✨</div>
+                </div>
+            </div>
+
         </div>
-        <form id="new-course-form">
-          <div class="config-section">
-            <h3>学习内容</h3>
-            <div class="field-grid">
-              <label>
-                <span>课程主题</span>
-                <input id="nc-topic" type="text" value="Python 基础" placeholder="例：Python 基础、高中数学" />
-              </label>
-              <label>
-                <span>教师名称</span>
-                <input id="nc-assistant-name" type="text" value="艾琳老师" />
-              </label>
-            </div>
-          </div>
 
-          <div class="config-section">
-            <h3>教师人格</h3>
-            <label class="wide-field">
-              <span>人格提示词</span>
-              <textarea id="nc-personality" rows="3">你是一位温柔、专业、耐心的 AI 学习导师。请以启发式提问方式指导学生，先解释概念，再给出例子和练习。</textarea>
-            </label>
-          </div>
+        <!-- Bottom Input Area -->
+        <div class="input-area">
+            <textarea id="message-input" rows="1" placeholder="输入你的问题..."></textarea>
+            <button id="send-btn" class="btn btn-primary">发送</button>
+            <button id="play-btn" class="btn btn-icon" title="朗读">🔊</button>
+        </div>
 
-          <div class="config-section">
-            <h3>模型与音色</h3>
-            <div class="field-grid">
-              <label>
-                <span>备课模型</span>
-                <select id="nc-model-select">
-                  <option value="">使用全局设置</option>
-                  <option value="deepseek-ai/DeepSeek-V3">DeepSeek-V3（硅基）</option>
-                  <option value="deepseek-chat">deepseek-chat（DeepSeek 原生）</option>
-                  <option value="Qwen/Qwen2.5-72B-Instruct">Qwen2.5-72B（硅基）</option>
-                  <option value="gpt-4o-mini">gpt-4o-mini（OpenAI）</option>
-                  <option value="custom">自定义</option>
-                </select>
-                <input id="nc-model-custom" type="text" placeholder="自定义模型名（选择自定义后填写）" class="hidden" />
-              </label>
-              <label>
-                <span>语音音色</span>
-                <select id="nc-voice">
-                  <option value="">使用全局设置</option>
-                  <option value="claire">claire · 温柔女声</option>
-                  <option value="anna">anna · 沉稳女声</option>
-                  <option value="bella">bella · 激情女声</option>
-                  <option value="diana">diana · 欢快女声</option>
-                  <option value="alex">alex · 沉稳男声</option>
-                  <option value="benjamin">benjamin · 低沉男声</option>
-                  <option value="charles">charles · 磁性男声</option>
-                  <option value="david">david · 欢快男声</option>
-                </select>
-              </label>
-            </div>
-          </div>
-
-          <div class="modal-actions">
-            <button type="submit" class="primary-btn">开始备课</button>
-          </div>
-        </form>
-      </div>
     </div>
 
-    <div id="completion-modal" class="modal hidden">
-      <div class="modal-card completion-card">
-        <div class="completion-icon">🎓</div>
-        <h2>恭喜完成全部课程！</h2>
-        <p id="completion-text">你已经完成了所有章节的学习和测验，太棒了！</p>
-        <div class="modal-actions">
-          <button id="completion-back-btn" class="ghost-btn">返回菜单</button>
-          <button id="completion-close-btn" class="primary-btn">继续探索</button>
-        </div>
-      </div>
-    </div>
+    <script>
+        (function() {
+            'use strict';
 
-    <div id="scene-screen" class="screen hidden">
-      <button id="back-menu-btn" class="floating-btn left">返回菜单</button>
+            // ============================
+            // 1. DOM 引用 & 状态
+            // ============================
+            const navBtns = document.querySelectorAll('.nav-btn');
+            const viewContents = {
+                chat: document.getElementById('view-chat'),
+                exam: document.getElementById('view-exam'),
+                resource: document.getElementById('view-resource'),
+                lesson: document.getElementById('view-lesson'),
+                settings: document.getElementById('view-settings')
+            };
 
-      <div class="top-icons">
-        <button id="scene-config-btn" class="icon-btn" title="设置" aria-label="设置">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="3"/>
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-          </svg>
-        </button>
-      </div>
+            // 首页菜单
+            const menuScreen = document.getElementById('menu-screen');
+            const menuLessonList = document.getElementById('menu-lesson-list');
+            const menuCreateBtn = document.getElementById('menu-create-btn');
+            const menuSettingsBtn = document.getElementById('menu-settings-btn');
+            const backToMenuBtn = document.getElementById('back-to-menu-btn');
 
-      <div id="unit-progress" class="unit-progress hidden">
-        <div class="unit-progress-bar">
-          <div id="unit-progress-fill" class="unit-progress-fill" style="width: 0%"></div>
-        </div>
-        <div class="unit-progress-text">
-          <span id="unit-progress-label">第 1 课 / 共 1 课</span>
-          <span id="unit-progress-title" class="unit-progress-title"></span>
-        </div>
-      </div>
+            const conversation = document.getElementById('conversation');
+            const messageInput = document.getElementById('message-input');
+            const sendBtn = document.getElementById('send-btn');
+            const playBtn = document.getElementById('play-btn');
 
-      <div id="toast-container" class="toast-container"></div>
+            // Galgame 对话条
+            const dialogueBar = document.getElementById('dialogue-bar');
+            const dialogueContent = document.getElementById('dialogue-content');
+            const dialogueIndicator = document.getElementById('dialogue-indicator');
+            let dialogueSegments = [];    // 分段文本数组
+            let dialogueSegIdx = -1;      // 当前展示到第几段
+            let dialogueStreaming = false;// 是否仍在流式接收
+            let dialogueTypeTimer = null; // 打字机定时器
 
-      <div class="teacher-portrait-wrap">
-        <img id="portrait" class="teacher-portrait" src="{{ url_for('static', filename='images/teacher.svg') }}" alt="teacher portrait" />
-      </div>
+            const examList = document.getElementById('exam-list');
+            const examGenerateBtn = document.getElementById('exam-generate-btn');
+            const examSubmitBtn = document.getElementById('exam-submit-btn');
+            const examTopic = document.getElementById('exam-topic');
 
-      <!-- 右侧滑入面板（聊天历史 / 资料 / 测验） -->
-      <div id="side-panel" class="side-panel">
-        <div class="side-panel-tabs">
-          <button class="side-tab active" data-panel="chat">聊天记录</button>
-          <button class="side-tab" data-panel="resources">课程资料</button>
-          <button class="side-tab" data-panel="exam">随堂测验</button>
-        </div>
+            const resourceList = document.getElementById('resource-list');
+            const downloadBtn = document.getElementById('download-btn');
 
-        <div class="side-panel-body">
-          <div class="side-panel-tab active" data-panel="chat">
-            <div class="side-panel-header">
-              <h3>对话历史</h3>
-            </div>
-            <div class="conversation-history" id="conversation-history"></div>
-          </div>
+            const lessonList = document.getElementById('lesson-list');
+            const createLessonBtn = document.getElementById('create-lesson-btn');
 
-          <div class="side-panel-tab" data-panel="resources">
-            <div class="side-panel-header">
-              <h3>课程资料</h3>
-              <button id="download-btn" class="small-btn primary">下载所选</button>
-            </div>
-            <div id="resource-list" class="resource-list"></div>
-          </div>
+            // 板书
+            const boardUpload = document.getElementById('board-upload');
+            const boardDeleteBtn = document.getElementById('board-delete-btn');
+            const boardPreview = document.getElementById('board-preview');
+            const boardCanvas = document.getElementById('board-canvas');
+            const boardEmpty = document.getElementById('board-empty');
+            let boardKeypoints = [];   // 识别的关键点 [{x,y,w,h}]
+            let boardImageEl = null;   // 板书图片元素
 
-          <div class="side-panel-tab" data-panel="exam">
-            <div class="side-panel-header">
-              <h3>随堂测验</h3>
-              <button id="exam-btn" class="small-btn primary">生成题目</button>
-            </div>
-            <div id="exam-list" class="exam-list"></div>
-            <div id="exam-actions" class="exam-actions hidden"></div>
-          </div>
-        </div>
-      </div>
+            // 板书覆盖层（控制台 showBoard() 强制展示）
+            const boardOverlay = document.getElementById('board-overlay');
+            const boardOverlayCanvas = document.getElementById('board-overlay-canvas');
+            const boardOverlayClose = document.getElementById('board-overlay-close');
+            let boardOverlayKeypoints = [];
 
-      <!-- Galgame 风格底部对话框 -->
-      <div class="dialogue-bar" id="dialogue-bar">
-        <div class="dialogue-speaker-tag" id="dialogue-speaker-tag">
-          <span id="dialogue-speaker-name">艾琳老师</span>
-        </div>
-        <div class="dialogue-content">
-          <div id="typing-indicator" class="typing-indicator hidden">
-            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-          </div>
-          <div id="dialogue-text" class="dialogue-text"></div>
-        </div>
-        <div class="dialogue-input-row">
-          <div class="input-row message-row">
-            <textarea id="message-input" rows="1" placeholder="你想和私教聊什么？（输入 /help 查看命令）"></textarea>
-            <button id="send-btn" class="primary-btn">送</button>
-          </div>
-        </div>
-      </div>
-    </div>
+            const avatarUpload = document.getElementById('avatar-upload');
+            const resetAvatarBtn = document.getElementById('reset-avatar-btn');
+            const voiceSelect = document.getElementById('voice-select');
+            const saveSettingsBtn = document.getElementById('save-settings-btn');
 
-    <div id="config-modal" class="modal hidden">
-      <div class="modal-card">
-        <div class="modal-header">
-          <h2>本地配置</h2>
-          <button id="close-config-btn" class="ghost-btn">关闭</button>
-        </div>
+            // 角色外观 & 背景设置
+            const portraitPosX = document.getElementById('portrait-pos-x');
+            const portraitPosY = document.getElementById('portrait-pos-y');
+            const portraitScale = document.getElementById('portrait-scale');
+            const portraitPosXVal = document.getElementById('portrait-pos-x-val');
+            const portraitPosYVal = document.getElementById('portrait-pos-y-val');
+            const portraitScaleVal = document.getElementById('portrait-scale-val');
+            const bgPresetBtns = document.querySelectorAll('.bg-preset-btn');
+            const bgUpload = document.getElementById('bg-upload');
+            const bgResetBtn = document.getElementById('bg-reset-btn');
 
-        <form id="config-form">
-          <div id="lesson-config-banner" class="lesson-config-banner hidden">
-            <span class="lesson-config-icon">📚</span>
-            <span id="lesson-config-banner-text">正在编辑课程独立配置</span>
-            <span class="lesson-config-hint">（仅影响当前课程）</span>
-            <button type="button" id="reset-to-global-btn" class="small-btn ghost-btn" style="display:none;margin-left:auto;">重置为全局设置</button>
-          </div>
+            // Live2D 外观配置（从后端读取，用于模型位置/缩放）
+            const LIVE2D_DEFAULTS = { posX: 50, posY: 50, scale: 32, bgTheme: 'warm', bgUrl: '' };
+            let live2dSettings = Object.assign({}, LIVE2D_DEFAULTS);
 
-          <div class="config-section">
-            <h3>本地模型（Ollama）</h3>
-            <div class="field-grid">
-              <label>
-                <span>Ollama 地址</span>
-                <input id="ollama_base_url" type="text" value="http://127.0.0.1:11434" />
-              </label>
-              <label>
-                <span>Ollama 模型</span>
-                <input id="ollama_model" type="text" value="qwen2.5" />
-              </label>
-              <label>
-                <span>上下文长度 num_ctx</span>
-                <input id="ollama_num_ctx" type="number" min="2048" step="1024" value="16384" />
-              </label>
-              <label>
-                <span>温度 temperature</span>
-                <input id="ollama_temperature" type="number" min="0" max="2" step="0.1" value="0.7" />
-              </label>
-              <label>
-                <span>最大生成长度 num_predict</span>
-                <input id="ollama_num_predict" type="number" min="64" step="64" value="1024" />
-              </label>
-            </div>
-            <label class="toggle-row">
-              <input id="enable_local_ollama" type="checkbox" checked />
-              <span>启用本地 Ollama（关闭则只用云端对话）</span>
-            </label>
-          </div>
+            let isStreaming = false;
+            let currentLesson = 'default';
 
-          <div class="config-section">
-            <h3>语音 TTS</h3>
-            <div class="field-grid">
-              <label>
-                <span>TTS 方案</span>
-                <select id="tts_provider">
-                  <option value="local">本地 TTS（edge-tts 服务）</option>
-                  <option value="cloud">云端 TTS（硅基 CosyVoice2）</option>
-                </select>
-              </label>
-              <label>
-                <span>本地 TTS 地址</span>
-                <input id="tts_base_url" type="text" value="http://127.0.0.1:8000" />
-              </label>
-              <label>
-                <span>本地 TTS 音色</span>
-                <input id="tts_voice" type="text" value="zh-CN-XiaoxiaoNeural" placeholder="Azure/edge-tts 音色名" />
-              </label>
-              <label>
-                <span>云端 TTS 模型</span>
-                <select id="tts_cloud_model_select">
-                  <option value="FunAudioLLM/CosyVoice2-0.5B">FunAudioLLM/CosyVoice2-0.5B</option>
-                  <option value="fishaudio/fish-speech-1.5">fishaudio/fish-speech-1.5</option>
-                  <option value="custom">自定义模型</option>
-                </select>
-                <input id="tts_cloud_model" type="text" value="FunAudioLLM/CosyVoice2-0.5B" />
-              </label>
-              <label>
-                <span>云端 TTS 音色</span>
-                <select id="tts_cloud_voice">
-                  <option value="anna">anna · 沉稳女声</option>
-                  <option value="bella">bella · 激情女声</option>
-                  <option value="claire">claire · 温柔女声</option>
-                  <option value="diana">diana · 欢快女声</option>
-                  <option value="alex">alex · 沉稳男声</option>
-                  <option value="benjamin">benjamin · 低沉男声</option>
-                  <option value="charles">charles · 磁性男声</option>
-                  <option value="david">david · 欢快男声</option>
-                </select>
-              </label>
-              <label>
-                <span>音频格式</span>
-                <select id="tts_cloud_response_format">
-                  <option value="mp3">mp3（推荐，体积小）</option>
-                  <option value="wav">wav（无损）</option>
-                  <option value="opus">opus</option>
-                  <option value="pcm">pcm</option>
-                </select>
-              </label>
-            </div>
-            <label class="toggle-row">
-              <input id="tts_enabled" type="checkbox" />
-              <span>启用本地 TTS（关闭时本地方案会回退到云端）</span>
-            </label>
-            <label class="toggle-row">
-              <input id="auto_play_tts" type="checkbox" checked />
-              <span>回复后自动播放语音</span>
-            </label>
-          </div>
+            // ============================
+            // 2. Live2D 动作系统
+            let live2dModel = null;
+            let live2dApp = null;
 
-          <div class="config-section">
-            <h3>云端备课模型（开始备课时调用）</h3>
-            <div class="field-grid">
-              <label>
-                <span>服务商 / 类型</span>
-                <select id="cloud_provider">
-                  <option value="siliconflow">SiliconFlow（硅基流动）</option>
-                  <option value="deepseek">DeepSeek 原生 API</option>
-                  <option value="openai_compatible">OpenAI 兼容（填任意原生地址）</option>
-                </select>
-              </label>
-              <label>
-                <span>API 基础地址 Base URL</span>
-                <input id="cloud_base_url" type="text" placeholder="https://api.siliconflow.cn/v1 或 https://api.deepseek.com/v1" />
-              </label>
-              <label>
-                <span id="cloud_api_key_label">API Key</span>
-                <input id="siliconflow_api_key" type="password" placeholder="在此填写云端 API Key" />
-              </label>
-              <label>
-                <span>备课模型（快速选择）</span>
-                <select id="cloud_model_select">
-                  <option value="deepseek-ai/DeepSeek-V3">deepseek-ai/DeepSeek-V3（硅基）</option>
-                  <option value="deepseek-chat">deepseek-chat（DeepSeek 原生）</option>
-                  <option value="deepseek-ai/DeepSeek-R1">deepseek-ai/DeepSeek-R1（硅基推理）</option>
-                  <option value="Qwen/Qwen2.5-72B-Instruct">Qwen/Qwen2.5-72B-Instruct（硅基）</option>
-                  <option value="gpt-4o-mini">gpt-4o-mini（OpenAI）</option>
-                  <option value="moonshotai/kimi-k2-0901-preview">moonshotai/kimi-k2（硅基）</option>
-                  <option value="custom">自定义（在下方文本框填）</option>
-                </select>
-                <input id="siliconflow_model" type="text" placeholder="自定义模型名" />
-              </label>
-            </div>
-            <label class="toggle-row">
-              <input id="enable_search" type="checkbox" checked />
-              <span>备课请求启用联网搜索（仅支持硅基/百川等实现了 enable_search 的服务）</span>
-            </label>
-          </div>
+            // 预设动作映射：语义化动作名 → 模型动作组
+            const ACTION_MAP = {
+                'point': 'think',       // 指向 → 思考动作
+                'blackboard': 'speak',  // 拉黑板 → 说话动作
+                'greet': 'hello',       // 打招呼
+                'idle': 'idle',
+                'listen': 'listen',
+                'speak': 'speak',
+                'think': 'think',
+            };
 
-          <div class="config-section">
-            <h3>云端对话模型（聊天生成时调用，留空则回退到备课那组）</h3>
-            <div class="field-grid">
-              <label>
-                <span>服务商 / 类型</span>
-                <select id="chat_provider">
-                  <option value="openai_compatible">OpenAI 兼容（原生通用）</option>
-                  <option value="siliconflow">SiliconFlow（硅基流动）</option>
-                  <option value="deepseek">DeepSeek 原生</option>
-                  <option value="openai">OpenAI 官方</option>
-                </select>
-              </label>
-              <label>
-                <span>对话 Base URL（留空 = 复用备课地址）</span>
-                <input id="chat_base_url" type="text" placeholder="例：https://api.deepseek.com/v1" />
-              </label>
-              <label>
-                <span id="chat_api_key_label">对话 API Key（留空 = 复用备课 Key）</span>
-                <input id="chat_api_key" type="password" placeholder="留空则复用备课 API Key" />
-              </label>
-              <label>
-                <span>对话模型（留空 = 复用备课模型）</span>
-                <select id="chat_model_select">
-                  <option value="">（不填）使用备课模型</option>
-                  <option value="deepseek-chat">deepseek-chat（DeepSeek 原生）</option>
-                  <option value="deepseek-reasoner">deepseek-reasoner（DeepSeek R1 原生）</option>
-                  <option value="deepseek-ai/DeepSeek-V3">deepseek-ai/DeepSeek-V3（硅基）</option>
-                  <option value="Qwen/Qwen2.5-72B-Instruct">Qwen/Qwen2.5-72B-Instruct（硅基）</option>
-                  <option value="gpt-4o-mini">gpt-4o-mini（OpenAI）</option>
-                  <option value="gpt-4.1">gpt-4.1（OpenAI）</option>
-                  <option value="custom">自定义（在下方文本框填）</option>
-                </select>
-                <input id="chat_model" type="text" placeholder="自定义对话模型名" />
-              </label>
-            </div>
-            <label class="toggle-row">
-              <input id="chat_enable_search" type="checkbox" />
-              <span>对话请求启用联网搜索（默认关闭，避免原生 DeepSeek/OpenAI 报错）</span>
-            </label>
-          </div>
+            // 动作索引表：{ 动作组名: 该组动作数量 }
+            let motionIndex = {};
+            let availableMotions = [];
+            let motionIndexLoaded = false;
 
-          <div class="config-section">
-            <h3>教师人格 / 默认主题</h3>
-            <div class="field-grid">
-              <label>
-                <span>默认教师名称</span>
-                <input id="assistant_name" type="text" value="艾琳老师" />
-              </label>
-              <label>
-                <span>默认主题</span>
-                <input id="default_topic" type="text" value="Python 基础" />
-              </label>
-              <label class="wide-field">
-                <span>默认人格提示词</span>
-                <textarea id="personality_prompt" rows="3">你是一位温柔、专业、耐心的 AI 学习导师。请以启发式提问方式指导学生，先解释概念，再给出例子和练习。</textarea>
-              </label>
-            </div>
-          </div>
+            // 从 model3.json 读取动作索引（页面加载时执行，作为后备数据源）
+            function loadMotionIndex() {
+                fetch('/static/models/my_teacher/female_01Arkit_6.model3.json')
+                    .then(r => r.json())
+                    .then(data => {
+                        const motions = (data.FileReferences && data.FileReferences.Motions) || {};
+                        const names = Object.keys(motions);
+                        if (names.length) {
+                            availableMotions = names;
+                            names.forEach(name => {
+                                motionIndex[name] = (motions[name] || []).length;
+                            });
+                            motionIndexLoaded = true;
+                        }
+                        console.log('Live2D: 动作索引 =', availableMotions.map(n => n + '(' + motionIndex[n] + ')').join(', '));
+                    })
+                    .catch(err => console.warn('Live2D: 无法读取动作索引', err));
+            }
+            loadMotionIndex();
 
-          <div class="config-section">
-            <h3>教师头像</h3>
-            <input id="avatar-file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml" hidden />
-            <div class="avatar-field">
-              <img id="avatar-preview" class="avatar-preview" src="{{ url_for('static', filename='images/teacher.svg') }}" alt="头像预览" />
-              <div class="avatar-actions">
-                <button type="button" id="avatar-upload-btn" class="small-btn primary">选择图片上传</button>
-                <button type="button" id="avatar-reset-btn" class="small-btn ghost-btn">恢复默认</button>
-                <span class="avatar-hint">支持 PNG / JPG / GIF / WebP / SVG，将显示在对话场景左侧</span>
-              </div>
-            </div>
-          </div>
+            // 模型加载成功后从 motionManager 直接读取动作（最可靠，保证时序）
+            function loadMotionIndexFromModel(model) {
+                try {
+                    const mm = model.internalModel && model.internalModel.motionManager;
+                    if (mm && mm.definitions) {
+                        const defs = mm.definitions;
+                        const names = Object.keys(defs);
+                        if (names.length) {
+                            availableMotions = names;
+                            names.forEach(name => {
+                                motionIndex[name] = (defs[name] || []).length;
+                            });
+                            motionIndexLoaded = true;
+                            console.log('Live2D: 模型动作索引 =', names.map(n => n + '(' + motionIndex[n] + ')').join(', '));
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Live2D: 无法从模型读取动作', e);
+                }
+            }
 
-          <div class="config-section">
-            <h3>立绘位置与动画</h3>
-            <div class="portrait-controls">
-              <label class="slider-row">
-                <span class="slider-label">水平位置 <b id="portrait-pos-x-val">50</b>%</span>
-                <input id="portrait-pos-x" type="range" min="0" max="100" value="50" step="1" />
-              </label>
-              <label class="slider-row">
-                <span class="slider-label">垂直位置 <b id="portrait-pos-y-val">44</b>%</span>
-                <input id="portrait-pos-y" type="range" min="0" max="100" value="44" step="1" />
-              </label>
-              <label class="slider-row">
-                <span class="slider-label">缩放大小 <b id="portrait-scale-val">1.15</b>x</span>
-                <input id="portrait-scale" type="range" min="0.5" max="3.0" value="1.15" step="0.05" />
-              </label>
-              <label class="slider-row">
-                <span class="slider-label">浮动幅度 <b id="portrait-float-val">8</b>px</span>
-                <input id="portrait-float-amp" type="range" min="0" max="40" value="8" step="1" />
-              </label>
-              <label class="slider-row toggle-row">
-                <input id="portrait-float-enabled" type="checkbox" checked />
-                <span>启用浮动呼吸动画</span>
-              </label>
-              <div class="portrait-actions">
-                <button type="button" id="portrait-reset-btn" class="small-btn ghost-btn">恢复默认</button>
-              </div>
-            </div>
-          </div>
+            // 检查动作是否可用（索引未加载时放行，避免时序竞态误拒）
+            function isMotionAvailable(motionName) {
+                if (!motionIndexLoaded) return true;
+                return motionIndex[motionName] > 0;
+            }
 
-          <div class="config-section">
-            <h3>场景背景（对话界面）</h3>
-            <input id="bg-file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
-            <div class="bg-preset-grid">
-              <button type="button" class="bg-preset-btn active" data-theme="warm">
-                <span class="bg-preset-name">暖色和室</span>
-              </button>
-              <button type="button" class="bg-preset-btn" data-theme="sakura">
-                <span class="bg-preset-name">樱花庭院</span>
-              </button>
-              <button type="button" class="bg-preset-btn" data-theme="bamboo">
-                <span class="bg-preset-name">竹林翠影</span>
-              </button>
-              <button type="button" class="bg-preset-btn" data-theme="snow">
-                <span class="bg-preset-name">雪景冬夜</span>
-              </button>
-              <button type="button" class="bg-preset-btn" data-theme="dusk">
-                <span class="bg-preset-name">黄昏夕照</span>
-              </button>
-              <button type="button" class="bg-preset-btn" data-theme="night">
-                <span class="bg-preset-name">夜幕星辰</span>
-              </button>
-            </div>
-            <div class="bg-custom-field">
-              <button type="button" id="bg-upload-btn" class="small-btn primary">上传自定义背景</button>
-              <button type="button" id="bg-reset-btn" class="small-btn ghost-btn">恢复默认主题</button>
-              <span class="avatar-hint">支持 PNG / JPG / GIF / WebP，自定义背景叠加暖色暗色遮罩，保持 UI 可读性</span>
-            </div>
-          </div>
+            // 动作队列：连续触发排队播放，避免抢占
+            let motionQueue = [];
+            let motionPlaying = false;
+            let onActionCallback = null;
 
-          <div class="config-section">
-            <h3>主页背景（菜单界面）</h3>
-            <input id="menu-bg-file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
-            <div class="bg-preset-grid" id="menu-bg-preset-grid">
-              <button type="button" class="bg-preset-btn menu-bg-preset active" data-theme="warm">
-                <span class="bg-preset-name">暖色和室</span>
-              </button>
-              <button type="button" class="bg-preset-btn menu-bg-preset" data-theme="sakura">
-                <span class="bg-preset-name">樱花庭院</span>
-              </button>
-              <button type="button" class="bg-preset-btn menu-bg-preset" data-theme="bamboo">
-                <span class="bg-preset-name">竹林翠影</span>
-              </button>
-              <button type="button" class="bg-preset-btn menu-bg-preset" data-theme="snow">
-                <span class="bg-preset-name">雪景冬夜</span>
-              </button>
-              <button type="button" class="bg-preset-btn menu-bg-preset" data-theme="dusk">
-                <span class="bg-preset-name">黄昏夕照</span>
-              </button>
-              <button type="button" class="bg-preset-btn menu-bg-preset" data-theme="night">
-                <span class="bg-preset-name">夜幕星辰</span>
-              </button>
-            </div>
-            <div class="bg-custom-field">
-              <button type="button" id="menu-bg-upload-btn" class="small-btn primary">上传自定义背景</button>
-              <button type="button" id="menu-bg-reset-btn" class="small-btn ghost-btn">恢复默认主题</button>
-              <span class="avatar-hint">设置独立于对话界面的主页背景</span>
-            </div>
-          </div>
+            // 等待当前动作播放完成（轮询，最多 10 秒防卡死）
+            function waitForMotionEnd() {
+                return new Promise(function(resolve) {
+                    if (!live2dModel || !live2dModel.internalModel || !live2dModel.internalModel.motionManager) {
+                        resolve();
+                        return;
+                    }
+                    const mm = live2dModel.internalModel.motionManager;
+                    let tries = 0;
+                    const check = function() {
+                        tries++;
+                        try {
+                            if (mm.isFinished() || tries > 100) {
+                                resolve();
+                            } else {
+                                setTimeout(check, 100);
+                            }
+                        } catch (e) {
+                            resolve();
+                        }
+                    };
+                    check();
+                });
+            }
 
-          <div class="modal-actions">
-            <button type="button" id="test-ollama-btn" class="ghost-btn">测试 Ollama</button>
-            <button type="button" id="test-tts-btn" class="ghost-btn">测试 TTS</button>
-            <button type="submit" class="primary-btn">保存配置</button>
-          </div>
-        </form>
-      </div>
-    </div>
+            // 动作队列处理器：依次播放队列中的动作
+            async function processMotionQueue() {
+                if (motionPlaying) return;
+                motionPlaying = true;
+                while (motionQueue.length) {
+                    const item = motionQueue.shift();
+                    try {
+                        const result = await live2dModel.motion(item, 0, 3); // FORCE 优先级
+                        console.log('Live2D: 开始播放', item, '| motion()结果:', result);
+                        await waitForMotionEnd();
+                        console.log('Live2D: 动作完成', item);
+                    } catch (e) {
+                        console.warn('Live2D: 动作播放失败', item, e);
+                    }
+                }
+                motionPlaying = false;
+            }
 
-    <script src="{{ url_for('static', filename='js/app.js') }}?v=20260804v"></script>
-  </body>
+            // 触发动作接口：供点击 / 对话 / 外部模块调用
+            function triggerAction(actionName) {
+                if (!live2dModel) {
+                    console.warn('Live2D not loaded, cannot trigger:', actionName);
+                    return;
+                }
+                const motion = ACTION_MAP[actionName] || actionName;
+                if (!isMotionAvailable(motion)) {
+                    console.warn('Live2D: 动作不存在:', motion, '| 可用:', availableMotions);
+                }
+                // 加入队列播放（校验失败也尝试，motion() 内部会自行拒绝不存在的组）
+                motionQueue.push(motion);
+                processMotionQueue();
+                console.log('Live2D 触发动作:', actionName, '→', motion, '| 队列长度:', motionQueue.length);
+                if (typeof onActionCallback === 'function') {
+                    onActionCallback(actionName, motion);
+                }
+            }
+
+            // 暴露到全局，供外部调用
+            window.triggerLive2DAction = triggerAction;
+            window.setLive2DActionCallback = function(cb) { onActionCallback = cb; };
+            window.getLive2DAvailableMotions = function() { return availableMotions.slice(); };
+            window.setLive2DEmotion = setEmotion;
+
+            // 表情同步：将 AI 情绪映射到模型表情参数
+            let _emotionTimer = null;
+            function resetEmotionParams() {
+                if (!live2dModel || !live2dModel.internalModel || !live2dModel.internalModel.coreModel) return;
+                try {
+                    const core = live2dModel.internalModel.coreModel;
+                    const defaults = {
+                        'ParamMouthSmile': 0, 'ParamEyeLSmile': 0, 'ParamEyeRSmile': 0,
+                        'ParamBrowLAngle': 0, 'ParamBrowRAngle': 0,
+                        'ParamBrowLForm': 0, 'ParamBrowRForm': 0,
+                        'ParamEyeLOpen': 1, 'ParamEyeROpen': 1,
+                        'ParamEyeBallX': 0, 'ParamEyeBallY': 0,
+                        'ParamJawOpen': 0, 'ParamMouthOpenY': 0,
+                        'MouthFrownLeft': 0, 'MouthFrownRight': 0,
+                    };
+                    Object.keys(defaults).forEach(id => {
+                        const idx = core.getParamIndex(id);
+                        if (idx >= 0) core.setParamFloat(idx, defaults[id]);
+                    });
+                } catch (e) {}
+            }
+            function setEmotion(emotion, duration) {
+                if (!live2dModel || !live2dModel.internalModel || !live2dModel.internalModel.coreModel) return;
+                const core = live2dModel.internalModel.coreModel;
+                const set = function(id, val) {
+                    const idx = core.getParamIndex(id);
+                    if (idx >= 0) core.setParamFloat(idx, val);
+                };
+                resetEmotionParams();
+                switch (emotion) {
+                    case 'happy':
+                        set('ParamMouthSmile', 8);
+                        set('ParamEyeLSmile', 3);
+                        set('ParamEyeRSmile', 3);
+                        break;
+                    case 'think':
+                        set('ParamBrowLAngle', 5);
+                        set('ParamBrowRAngle', 5);
+                        set('ParamEyeBallX', 3);
+                        set('ParamEyeBallY', 2);
+                        break;
+                    case 'surprised':
+                        set('ParamEyeLOpen', 1.5);
+                        set('ParamEyeROpen', 1.5);
+                        set('ParamJawOpen', 6);
+                        set('ParamBrowLForm', 2);
+                        set('ParamBrowRForm', 2);
+                        break;
+                    case 'angry':
+                        set('ParamBrowLAngle', 8);
+                        set('ParamBrowRAngle', 8);
+                        set('MouthFrownLeft', 4);
+                        set('MouthFrownRight', 4);
+                        break;
+                    case 'sad':
+                        set('ParamBrowLForm', 4);
+                        set('ParamBrowRForm', 4);
+                        set('MouthFrownLeft', 3);
+                        set('MouthFrownRight', 3);
+                        break;
+                    default:
+                        break; // neutral
+                }
+                // 持续 duration 毫秒后恢复中性表情
+                const d = duration || 4000;
+                if (_emotionTimer) clearTimeout(_emotionTimer);
+                if (emotion !== 'neutral') {
+                    _emotionTimer = setTimeout(function() {
+                        if (live2dModel && live2dModel.internalModel && live2dModel.internalModel.coreModel) {
+                            resetEmotionParams();
+                        }
+                        _emotionTimer = null;
+                    }, d);
+                }
+                console.log('Live2D 表情:', emotion || 'neutral');
+            }
+
+            // 口型同步（Lipsync）：播放 TTS 音频时按音量驱动嘴巴开合
+            let _audioCtx = null;
+            let _analyser = null;
+            let _lipSyncRAF = null;
+            let _currentAudio = null;
+
+            function startLipSync(audioEl) {
+                if (!live2dModel || !live2dModel.internalModel || !live2dModel.internalModel.coreModel) return;
+                try {
+                    if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                    if (_audioCtx.state === 'suspended') _audioCtx.resume();
+                    const src = _audioCtx.createMediaElementSource(audioEl);
+                    _analyser = _audioCtx.createAnalyser();
+                    _analyser.fftSize = 256;
+                    _analyser.smoothingTimeConstant = 0.7;
+                    src.connect(_analyser);
+                    _analyser.connect(_audioCtx.destination);
+                    const data = new Uint8Array(_analyser.frequencyBinCount);
+                    const core = live2dModel.internalModel.coreModel;
+                    const jawIdx = core.getParamIndex('ParamJawOpen');
+                    const mouthIdx = core.getParamIndex('ParamMouthOpenY');
+
+                    const loop = function() {
+                        _analyser.getByteFrequencyData(data);
+                        let sum = 0;
+                        for (let i = 0; i < data.length; i++) sum += data[i];
+                        const avg = sum / data.length;
+                        // 音量 0-255 → 嘴巴开合 0-10
+                        const mouth = Math.min(10, (avg / 255) * 14);
+                        if (jawIdx >= 0) core.setParamFloat(jawIdx, mouth);
+                        if (mouthIdx >= 0) core.setParamFloat(mouthIdx, mouth);
+                        _lipSyncRAF = requestAnimationFrame(loop);
+                    };
+                    loop();
+                } catch (e) {
+                    console.warn('Lipsync 初始化失败:', e);
+                }
+            }
+
+            function stopLipSync() {
+                if (_lipSyncRAF) { cancelAnimationFrame(_lipSyncRAF); _lipSyncRAF = null; }
+                if (live2dModel && live2dModel.internalModel && live2dModel.internalModel.coreModel) {
+                    const core = live2dModel.internalModel.coreModel;
+                    const jawIdx = core.getParamIndex('ParamJawOpen');
+                    const mouthIdx = core.getParamIndex('ParamMouthOpenY');
+                    if (jawIdx >= 0) core.setParamFloat(jawIdx, 0);
+                    if (mouthIdx >= 0) core.setParamFloat(mouthIdx, 0);
+                }
+            }
+
+            // 播放教师 TTS 音频（支持口型同步）
+            function playTeacherAudio(url) {
+                if (!url) return;
+                if (_currentAudio) {
+                    _currentAudio.pause();
+                    _currentAudio = null;
+                }
+                const audio = new Audio(url);
+                _currentAudio = audio;
+                audio.play().catch(function(e) {
+                    console.warn('TTS 播放失败:', e);
+                });
+                audio.addEventListener('ended', function() {
+                    stopLipSync();
+                    _currentAudio = null;
+                });
+                audio.addEventListener('error', function() {
+                    stopLipSync();
+                    _currentAudio = null;
+                });
+                startLipSync(audio);
+            }
+
+            // 应用 Live2D 位置/缩放设置到模型
+            function applyLive2DSettings() {
+                if (!live2dModel || !live2dApp) return;
+                const s = live2dSettings;
+                live2dModel.x = live2dApp.screen.width * (s.posX / 100);
+                live2dModel.y = live2dApp.screen.height * (s.posY / 100);
+                live2dModel.scale.set(s.scale / 100);
+            }
+
+            // 眨眼反馈：临时闭合双眼再睁开
+            let _blinkTimer = null;
+            function playBlink(duration) {
+                if (!live2dModel || !live2dModel.internalModel || !live2dModel.internalModel.coreModel) return;
+                try {
+                    const core = live2dModel.internalModel.coreModel;
+                    const idxL = core.getParamIndex('ParamEyeLOpen');
+                    const idxR = core.getParamIndex('ParamEyeROpen');
+                    if (idxL < 0 || idxR < 0) return;
+                    const d = duration || 150;
+                    core.setParamFloat(idxL, 0);
+                    core.setParamFloat(idxR, 0);
+                    if (_blinkTimer) clearTimeout(_blinkTimer);
+                    _blinkTimer = setTimeout(function() {
+                        if (live2dModel && live2dModel.internalModel && live2dModel.internalModel.coreModel) {
+                            live2dModel.internalModel.coreModel.setParamFloat(idxL, 1);
+                            live2dModel.internalModel.coreModel.setParamFloat(idxR, 1);
+                        }
+                        _blinkTimer = null;
+                    }, d);
+                } catch (e) { /* 眨眼失败不影响主功能 */ }
+            }
+
+            // 画布坐标 → PIXI 世界坐标（处理 devicePixelRatio / autoDensity）
+            function canvasToWorld(clientX, clientY, canvasEl, app) {
+                const r = canvasEl.getBoundingClientRect();
+                const sx = app.screen.width / r.width;
+                const sy = app.screen.height / r.height;
+                return { x: (clientX - r.left) * sx, y: (clientY - r.top) * sy };
+            }
+
+            // 应用背景主题到 #app
+            const VALID_BG_THEMES = ['warm', 'sakura', 'bamboo', 'snow', 'dusk', 'night', 'custom'];
+            function applyBgTheme(theme, bgUrl) {
+                const appEl = document.getElementById('app');
+                if (!appEl) return;
+                const t = VALID_BG_THEMES.includes(theme) ? theme : 'warm';
+                VALID_BG_THEMES.forEach(tn => appEl.classList.remove('theme-' + tn));
+                appEl.classList.add('theme-' + t);
+                if (t === 'custom' && bgUrl) {
+                    appEl.style.backgroundImage = 'linear-gradient(180deg, rgba(8,5,3,0.25), rgba(4,2,1,0.55)), url("' + bgUrl + '")';
+                    appEl.style.backgroundSize = 'cover';
+                    appEl.style.backgroundPosition = 'center';
+                    appEl.style.backgroundRepeat = 'no-repeat';
+                } else {
+                    appEl.style.backgroundImage = '';
+                }
+                // 高亮预设按钮
+                bgPresetBtns.forEach(btn => {
+                    btn.classList.toggle('active', btn.dataset.theme === (t === 'custom' ? 'custom' : t));
+                });
+                live2dSettings.bgTheme = t;
+                live2dSettings.bgUrl = t === 'custom' ? (bgUrl || '') : '';
+            }
+
+            // 数值钳制工具
+            function clampNum(val, min, max, fallback) {
+                const n = parseFloat(val);
+                if (isNaN(n)) return fallback;
+                return Math.min(max, Math.max(min, n));
+            }
+
+            function initLive2D() {
+                const canvas = document.getElementById('live2d-canvas');
+                const portraitWrapper = document.getElementById('portrait-wrapper');
+                if (!canvas || !portraitWrapper) return;
+
+                // Diagnostics
+                console.log('Live2D: init, PIXI=' + (typeof PIXI !== 'undefined') +
+                    ', PIXI.live2d=' + (typeof PIXI !== 'undefined' && typeof PIXI.live2d !== 'undefined') +
+                    ', Live2DCubismCore=' + (typeof Live2DCubismCore !== 'undefined'));
+
+                if (typeof PIXI === 'undefined' || typeof PIXI.live2d === 'undefined') {
+                    console.error('Live2D: Required libraries not loaded!');
+                    return;
+                }
+
+                const rect = portraitWrapper.getBoundingClientRect();
+                const width = Math.max(rect.width, 400);
+                const height = Math.max(rect.height, 500);
+
+                try {
+                    const app = new PIXI.Application({
+                        view: canvas,
+                        width: width,
+                        height: height,
+                        backgroundAlpha: 0,
+                        autoDensity: true,
+                        resolution: 1,   // 降低渲染分辨率，减少 WebGL 负载
+                        antialias: true,
+                        powerPreference: 'high-performance',
+                    });
+                    live2dApp = app;
+                    console.log('Live2D: app created, size=' + width + 'x' + height);
+
+                    const modelPath = '/static/models/my_teacher/female_01Arkit_6.model3.json';
+                    PIXI.live2d.Live2DModel.from(modelPath)
+                        .then(model => {
+                            live2dModel = model;
+                            app.stage.addChild(model);
+
+                            model.anchor.set(0.5, 0.5);
+                            applyLive2DSettings();
+
+                            // 模型加载后从 motionManager 读取动作索引
+                            loadMotionIndexFromModel(model);
+
+                            model.motion('idle');
+
+                            // 打印 drawable IDs，验证 HitAreas 是否匹配
+                            try {
+                                const ids = model.internalModel.getDrawableIDs();
+                                console.log('Live2D: drawables =', ids.length, '个');
+                                console.log('Live2D: hitAreas =', Object.keys(model.hitAreas || {}));
+                            } catch (e) {
+                                console.warn('Live2D: 无法读取 drawable 列表', e);
+                            }
+
+                            // 鼠标追踪（眼神跟随）
+                            canvas.addEventListener('mousemove', (e) => {
+                                const r = canvas.getBoundingClientRect();
+                                const x = e.clientX - r.left;
+                                const y = e.clientY - r.top;
+                                if (model.focus) model.focus(x, y);
+                            });
+
+                            // 预设动作映射：点击手/头（上半部）→ point，点击身体（下半部）→ blackboard
+                            canvas.addEventListener('click', (e) => {
+                                const r = canvas.getBoundingClientRect();
+                                const clickY = e.clientY - r.top;
+                                // 以模型锚点（posY 配置）为分界线：上方 → 指向，下方 → 拉黑板
+                                const anchorY = (live2dSettings.posY / 100) * r.height;
+                                if (clickY < anchorY) {
+                                    triggerAction('point');       // 手/头 → 指向
+                                } else {
+                                    triggerAction('blackboard');  // 身体 → 拉黑板
+                                }
+                            });
+
+                            console.log('Live2D: model loaded OK, scale=' + live2dSettings.scale);
+                        })
+                        .catch(err => {
+                            console.error('Live2D: model error -', err.message || err, err);
+                            const ctx = canvas.getContext('2d');
+                            if (ctx) {
+                                ctx.fillStyle = '#8a7560';
+                                ctx.font = '14px "Noto Serif SC", serif';
+                                ctx.textAlign = 'center';
+                                ctx.fillText('模型加载失败: ' + (err.message || '未知错误'), canvas.width/2, canvas.height/2);
+                            }
+                        });
+                } catch (e) {
+                    console.error('Live2D: PIXI error -', e.message || e, e);
+                }
+
+                let resizeTimer;
+                window.addEventListener('resize', () => {
+                    clearTimeout(resizeTimer);
+                    resizeTimer = setTimeout(() => {
+                        if (!live2dApp || !portraitWrapper) return;
+                        const r2 = portraitWrapper.getBoundingClientRect();
+                        if (r2.width <= 0 || r2.height <= 0) return;
+                        live2dApp.renderer.resize(r2.width, r2.height);
+                        if (live2dModel) {
+                            applyLive2DSettings();
+                        }
+                    }, 150);
+                });
+            }
+
+            window.addEventListener('DOMContentLoaded', initLive2D);
+            if (document.readyState === 'interactive' || document.readyState === 'complete') {
+                setTimeout(initLive2D, 100);
+            }
+
+            // ============================
+            // 3. 视图切换
+            // ============================
+            function switchView(viewName) {
+                navBtns.forEach(btn => btn.classList.toggle('active', btn.dataset.view === viewName));
+                Object.keys(viewContents).forEach(key => viewContents[key].classList.toggle('active', key === viewName));
+                if (viewName === 'lesson') { loadLessons(); loadBoard(); }
+                if (viewName === 'resource') loadResources();
+            }
+
+            // 面板可隐藏：点击导航再次点击关闭；× 按钮直接关闭
+            navBtns.forEach(btn => {
+                btn.addEventListener('click', function() {
+                    const v = this.dataset.view;
+                    if (viewContents[v].classList.contains('active')) {
+                        viewContents[v].classList.remove('active');
+                        this.classList.remove('active');
+                    } else {
+                        switchView(v);
+                    }
+                });
+            });
+            document.querySelectorAll('.view-close').forEach(btn => {
+                btn.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    const v = this.dataset.view;
+                    viewContents[v].classList.remove('active');
+                    navBtns.forEach(b => {
+                        if (b.dataset.view === v) b.classList.remove('active');
+                    });
+                });
+            });
+
+            // ============================
+            // 3.5 首页菜单逻辑
+            // ============================
+            function showMenu() {
+                menuScreen.classList.remove('hidden');
+                renderMenuLessons();
+            }
+            function hideMenu() {
+                menuScreen.classList.add('hidden');
+            }
+
+            // 渲染首页课程卡片
+            function renderMenuLessons() {
+                fetch('/api/lessons')
+                    .then(r => r.json())
+                    .then(data => {
+                        const lessons = data.lessons || [];
+                        if (!lessons.length) {
+                            menuLessonList.innerHTML = '<div class="menu-empty">还没有课程，点击下方「创建课程」开始吧</div>';
+                            return;
+                        }
+                        menuLessonList.innerHTML = lessons.map(lesson => `
+                            <div class="menu-lesson-card" data-name="${lesson.name}">
+                                <div class="m-arrow">➜</div>
+                                <div class="m-name">${lesson.name}</div>
+                                <div class="m-meta">🕒 ${lesson.last_access || '未开始'}</div>
+                                <div class="m-meta">📚 ${lesson.units_count ? '共 ' + lesson.units_count + ' 课' : '单课课程'}</div>
+                            </div>
+                        `).join('');
+                        document.querySelectorAll('.menu-lesson-card').forEach(card => {
+                            card.addEventListener('click', function() {
+                                enterLesson(this.dataset.name);
+                            });
+                        });
+                    })
+                    .catch(() => {
+                        menuLessonList.innerHTML = '<div class="menu-empty">课程加载失败，请确认后端服务已启动</div>';
+                    });
+            }
+
+            // 进入课程（加载课程 → 关闭菜单 → 进入主界面）
+            function enterLesson(name) {
+                fetch('/api/switch_lesson', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ lesson_folder: name })
+                }).then(r => r.json()).then(data => {
+                    currentLesson = name;
+                    const history = data.conversation || data.history || [];
+                    if (history.length) {
+                        conversation.innerHTML = '';
+                        history.forEach(msg => {
+                            const bubble = addBubble(msg.content, msg.role === 'user' ? 'user' : 'teacher');
+                            if (msg.role === 'assistant') bubble.innerHTML = renderMarkdown(msg.content);
+                        });
+                    } else {
+                        conversation.innerHTML = `<div class="bubble teacher">已切换到「${name}」，开始学习吧！</div>`;
+                    }
+                    hideMenu();
+                    switchView('chat');
+                    loadLessons();
+                    loadBoard();
+                }).catch(err => alert('进入课程失败: ' + err.message));
+            }
+
+            // 创建课程（输入主题 → AI 备课 → 进入）
+            menuCreateBtn.addEventListener('click', function() {
+                const topic = prompt('请输入课程主题，AI 将自动备课：\n\n例如：初中物理牛顿定律 / Python 入门 / Alevel 数学 M1P1');
+                if (topic && topic.trim()) {
+                    prepareAndEnter(topic.trim());
+                }
+            });
+
+            // AI 备课并进入课程
+            function prepareAndEnter(topic) {
+                // 显示备课中状态
+                menuLessonList.innerHTML = '<div class="menu-loading">⏳ 正在备课「' + topic + '」...<br><small style="color:var(--text-dim);">AI 正在生成课程大纲、知识点与随堂测验，约需 1-3 分钟</small></div>';
+                menuCreateBtn.disabled = true;
+                const originalText = menuCreateBtn.textContent;
+                menuCreateBtn.textContent = '备课中…';
+
+                fetch('/api/prepare_lesson', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ topic: topic })
+                }).then(r => r.json()).then(data => {
+                    menuCreateBtn.disabled = false;
+                    menuCreateBtn.textContent = originalText;
+                    if (data.lesson_folder) {
+                        enterLesson(data.lesson_folder);
+                    } else {
+                        alert('备课失败: ' + (data.error || '未知错误'));
+                        renderMenuLessons();
+                    }
+                }).catch(err => {
+                    menuCreateBtn.disabled = false;
+                    menuCreateBtn.textContent = originalText;
+                    alert('备课失败: ' + err.message);
+                    renderMenuLessons();
+                });
+            }
+
+            // 首页 → 设置
+            menuSettingsBtn.addEventListener('click', function() {
+                hideMenu();
+                switchView('settings');
+            });
+
+            // 主界面 → 返回首页
+            backToMenuBtn.addEventListener('click', function() {
+                showMenu();
+            });
+
+            // ============================
+            // 4. 工具函数
+            // ============================
+            // 彻底清除分段符 \c 与指令标签（模型输出/历史存档可能残留）
+            function cleanSeg(text) {
+                if (!text) return '';
+                return String(text)
+                    .replace(/\\+c/g, '')                       // \c / \\c 分段符
+                    .replace(/\[(ACTION|EMOTION|TOOL):[^\]]*\]/gi, '')  // [ACTION:xxx] [EMOTION:xxx] [TOOL:xxx]
+                    .replace(/【(ACTION|EMOTION|TOOL):[^】]*】/gi, '');   // 中文括号变体
+            }
+
+            function renderMarkdown(text) {
+                if (!text) return '';
+                return DOMPurify.sanitize(marked.parse(cleanSeg(text)));
+            }
+
+            function addBubble(text, sender) {
+                const bubble = document.createElement('div');
+                bubble.className = `bubble ${sender}`;
+                bubble.textContent = cleanSeg(text);
+                conversation.appendChild(bubble);
+                conversation.scrollTop = conversation.scrollHeight;
+                return bubble;
+            }
+
+            // ============================
+            // 5. 对话功能
+            // ============================
+            sendBtn.addEventListener('click', sendMessage);
+            messageInput.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendMessage();
+                }
+            });
+            // Auto-resize textarea
+            messageInput.addEventListener('input', function() {
+                this.style.height = 'auto';
+                this.style.height = Math.min(this.scrollHeight, 140) + 'px';
+            });
+
+            function sendMessage() {
+                const text = messageInput.value.trim();
+                if (!text || isStreaming) return;
+                // 斜杠命令：/exam /next /board 等
+                const slashMatch = text.match(/^\/(\w+)\s*(.*)$/);
+                if (slashMatch) {
+                    handleSlashCommand(slashMatch[1].toLowerCase(), slashMatch[2].trim());
+                    messageInput.value = '';
+                    messageInput.style.height = 'auto';
+                    return;
+                }
+                // 未选择课程时提示
+                if (!currentLesson || currentLesson === 'default') {
+                    addBubble('请先在首页选择或创建课程，再开始对话。', 'teacher');
+                    messageInput.value = '';
+                    return;
+                }
+                messageInput.value = '';
+                messageInput.style.height = 'auto';
+                addBubble(text, 'user');
+
+                // 重置 Galgame 对话条
+                dialogueSegments = [];
+                dialogueSegIdx = -1;
+                dialogueStreaming = true;
+                dialogueBar.style.display = 'block';
+                dialogueContent.textContent = '……';
+                dialogueContent.classList.remove('type-caret');
+                dialogueIndicator.textContent = '老师思考中';
+                dialogueIndicator.classList.remove('hidden');
+
+                const teacherBubble = addBubble('', 'teacher');
+                isStreaming = true;
+                sendBtn.disabled = true;
+
+                // Trigger speak animation
+                if (live2dModel) {
+                    try { live2dModel.motion('speak', 0, 3); } catch (e) {}
+                }
+
+                fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: text, lesson_folder: currentLesson })
+                }).then(response => {
+                    if (!response.body) throw new Error('No response body');
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let fullText = '';
+                    let finished = false;
+
+                    function finishDialogue() {
+                        if (finished) return;
+                        finished = true;
+                        isStreaming = false;
+                        sendBtn.disabled = false;
+                        dialogueStreaming = false;
+                        if (live2dModel) {
+                            try { live2dModel.motion('idle'); } catch (e) {}
+                        }
+                        // 流式结束后：Galgame 逐段打字机播放
+                        startGalgamePlayback();
+                    }
+
+                    function read() {
+                        reader.read().then(({ done, value }) => {
+                            if (done) {
+                                teacherBubble.innerHTML = renderMarkdown(fullText);
+                                conversation.scrollTop = conversation.scrollHeight;
+                                finishDialogue();
+                                return;
+                            }
+                            const chunk = decoder.decode(value);
+                            const lines = chunk.split('\n');
+                            for (const line of lines) {
+                                if (line.startsWith('data: ')) {
+                                    const payload = line.replace('data: ', '').trim();
+                                    if (payload === '[DONE]') {
+                                        teacherBubble.innerHTML = renderMarkdown(fullText);
+                                        conversation.scrollTop = conversation.scrollHeight;
+                                        finishDialogue();
+                                        return;
+                                    }
+                                    try {
+                                        const data = JSON.parse(payload);
+                                        // 按 segment 分组存储（分段展示，流式中不实时滚动，结束后逐段播放）
+                                        if (data.content && !data.done) {
+                                            const seg = data.segment !== undefined ? data.segment : 0;
+                                            dialogueSegments[seg] = cleanSeg(data.content);
+                                            fullText = dialogueSegments.filter(s => s).join('\n\n');
+                                            teacherBubble.textContent = fullText;
+                                            conversation.scrollTop = conversation.scrollHeight;
+                                        }
+                                        // done 帧：用完整内容更新侧边栏
+                                        if (data.done && data.content) {
+                                            fullText = data.content;
+                                            teacherBubble.innerHTML = renderMarkdown(fullText);
+                                            conversation.scrollTop = conversation.scrollHeight;
+                                        }
+                                        // AI 联动：收到动作指令 → 触发 Live2D 动作
+                                        if (data.action) {
+                                            triggerAction(data.action);
+                                            console.log('AI 触发动作:', data.action);
+                                        }
+                                        // AI 联动：收到情绪 → 设置表情
+                                        if (data.emotion) {
+                                            setEmotion(data.emotion);
+                                        }
+                                        // AI 联动：收到 TTS 音频 → 播放 + 口型同步
+                                        if (data.audio_url && data.done) {
+                                            playTeacherAudio(data.audio_url);
+                                        }
+                                        // 收到 done 帧 → 结束流式
+                                        if (data.done) {
+                                            finishDialogue();
+                                            return;
+                                        }
+                                    } catch (e) {}
+                                }
+                            }
+                            read();
+                        });
+                    }
+                    read();
+                }).catch(err => {
+                    teacherBubble.textContent = '\u274c ' + err.message;
+                    isStreaming = false;
+                    sendBtn.disabled = false;
+                    dialogueStreaming = false;
+                    dialogueBar.style.display = 'none';
+                    if (live2dModel) {
+                        try { live2dModel.motion('idle'); } catch (e) {}
+                    }
+                });
+            }
+
+            // ---- 聊天斜杠命令：/exam /next /board ----
+            function handleSlashCommand(cmd, args) {
+                switch (cmd) {
+                    case 'exam':
+                        // 强制开始测验：生成题目并切到测验视图
+                        addBubble('📝 强制开始随堂测验，正在出题...', 'teacher');
+                        if (typeof examGenerateBtn !== 'undefined' && examGenerateBtn) {
+                            examGenerateBtn.click();
+                        } else {
+                            examGenerateBtn = document.getElementById('exam-generate-btn');
+                            if (examGenerateBtn) examGenerateBtn.click();
+                        }
+                        switchView('exam');
+                        break;
+                    case 'next':
+                        // 强制进入下一课
+                        if (!currentLesson || currentLesson === 'default') {
+                            addBubble('请先选择课程再使用 /next', 'teacher');
+                            return;
+                        }
+                        addBubble('⏩ 正在进入下一课...', 'teacher');
+                        fetch('/api/lesson/next_unit', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ folder: currentLesson })
+                        }).then(r => r.json()).then(data => {
+                            if (data.success) {
+                                addBubble('✅ 已进入下一课', 'teacher');
+                                enterLesson(currentLesson);
+                            } else {
+                                addBubble('⚠️ ' + (data.message || '无法进入下一课'), 'teacher');
+                            }
+                        }).catch(err => addBubble('❌ /next 失败: ' + err.message, 'teacher'));
+                        break;
+                    case 'board':
+                        // 强制显示板书
+                        addBubble('📋 强制显示板书', 'teacher');
+                        showBoard();
+                        break;
+                    default:
+                        addBubble('❓ 未知命令 /' + cmd + '，可用：/exam /next /board', 'teacher');
+                }
+            }
+
+            // ---- Galgame 对话条：逐段打字机播放 ----
+            function startGalgamePlayback() {
+                if (!dialogueSegments.length) {
+                    dialogueBar.style.display = 'none';
+                    return;
+                }
+                dialogueSegIdx = -1;
+                dialogueBar.style.display = 'block';
+                dialogueIndicator.classList.remove('hidden');
+                advanceDialogue();
+            }
+
+            function advanceDialogue() {
+                dialogueSegIdx++;
+                if (dialogueSegIdx >= dialogueSegments.length) {
+                    // 全部播完：保留 2 秒后淡出
+                    dialogueIndicator.textContent = '✓ 已记录';
+                    setTimeout(function() {
+                        dialogueBar.style.display = 'none';
+                    }, 1800);
+                    return;
+                }
+                typeDialogue(dialogueSegments[dialogueSegIdx]);
+            }
+
+            function typeDialogue(text) {
+                if (dialogueTypeTimer) clearInterval(dialogueTypeTimer);
+                const chars = text.split('');
+                dialogueContent.textContent = '';
+                dialogueContent.classList.add('type-caret');
+                dialogueIndicator.textContent = '▼';
+                dialogueIndicator.classList.add('hidden');
+                let i = 0;
+                dialogueTypeTimer = setInterval(function() {
+                    if (i < chars.length) {
+                        dialogueContent.textContent = chars.slice(0, i + 1).join('');
+                        dialogueContent.scrollTop = dialogueContent.scrollHeight;
+                        i++;
+                    } else {
+                        clearInterval(dialogueTypeTimer);
+                        dialogueTypeTimer = null;
+                        dialogueContent.classList.remove('type-caret');
+                        dialogueIndicator.textContent = '▼ 按 Enter 继续';
+                        dialogueIndicator.classList.remove('hidden');
+                    }
+                }, 28);
+            }
+
+            // 点击对话条 → 跳过打字/下一段
+            dialogueBar.addEventListener('click', function() {
+                if (dialogueStreaming) return;
+                advanceDialogueOrSkip();
+            });
+
+            // 按 Enter 才显示下一段（捕获阶段拦截，输入框也不会发送）
+            document.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter' && !dialogueStreaming &&
+                    dialogueBar.style.display !== 'none' && dialogueBar.style.display !== '') {
+                    // 仅当还有未播完的段落（打字中 或 还有后续段）才拦截；
+                    // 全部播完后 Enter 恢复正常（可发送消息/命令）
+                    const hasPending = dialogueTypeTimer || dialogueSegIdx < dialogueSegments.length;
+                    if (hasPending) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        advanceDialogueOrSkip();
+                    }
+                }
+            }, true);
+
+            function advanceDialogueOrSkip() {
+                if (dialogueTypeTimer) {
+                    clearInterval(dialogueTypeTimer);
+                    dialogueTypeTimer = null;
+                    const segText = dialogueSegments[dialogueSegIdx] || '';
+                    dialogueContent.textContent = segText;
+                    dialogueContent.classList.remove('type-caret');
+                    dialogueIndicator.textContent = '▼ 按 Enter 继续';
+                    dialogueIndicator.classList.remove('hidden');
+                    return;
+                }
+                advanceDialogue();
+            }
+
+// ============================
+            // 6. 语音朗读
+            // ============================
+            playBtn.addEventListener('click', function() {
+                const last = conversation.querySelector('.bubble.teacher:last-child');
+                if (last && last.textContent) {
+                    const utter = new SpeechSynthesisUtterance(last.textContent);
+                    utter.lang = 'zh-CN';
+                    utter.rate = 1.0;
+                    speechSynthesis.speak(utter);
+                }
+            });
+
+            // ============================
+            // 7. 测验功能
+            // ============================
+            examGenerateBtn.addEventListener('click', function() {
+                const topic = examTopic.value.trim() || '通用';
+                examGenerateBtn.textContent = '生成中...';
+                examGenerateBtn.disabled = true;
+                fetch('/api/exam/generate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ topic, num_questions: 3 })
+                }).then(r => r.json()).then(data => {
+                    examGenerateBtn.textContent = '生成题目';
+                    examGenerateBtn.disabled = false;
+                    if (data.questions && data.questions.length) {
+                        renderExamQuestions(data.questions);
+                        examSubmitBtn.style.display = 'inline-block';
+                    } else {
+                        examList.innerHTML = '<span style="color:var(--text-dim);">暂无题目</span>';
+                        examSubmitBtn.style.display = 'none';
+                    }
+                }).catch(err => {
+                    examGenerateBtn.textContent = '生成题目';
+                    examGenerateBtn.disabled = false;
+                    examList.innerHTML = '<span style="color:#e07060;">失败: ' + err.message + '</span>';
+                });
+            });
+
+            function renderExamQuestions(questions) {
+                examList.innerHTML = questions.map((q, idx) => `
+                    <div class="exam-question" data-idx="${idx}">
+                        <div class="q-title">第 ${idx+1} 题（${q.type || '单选'}）</div>
+                        <div style="margin-bottom:6px; font-size:14px; color:var(--text-primary);">${renderMarkdown(q.question)}</div>
+                        <div class="q-options">
+                            ${q.options ? q.options.map((opt, oi) => `
+                                <label>
+                                    <input type="${q.type === '多选' ? 'checkbox' : 'radio'}" name="q${idx}" value="${String.fromCharCode(65+oi)}">
+                                    ${renderMarkdown(opt)}
+                                </label>
+                            `).join('') : ''}
+                        </div>
+                        <div class="q-explanation" style="display:none;"></div>
+                    </div>
+                `).join('');
+            }
+
+            examSubmitBtn.addEventListener('click', function() {
+                const questions = document.querySelectorAll('.exam-question');
+                const answers = {};
+                questions.forEach((qDiv, idx) => {
+                    const inputs = qDiv.querySelectorAll('input:checked');
+                    answers[idx] = Array.from(inputs).map(i => i.value);
+                });
+                fetch('/api/exam/submit', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ answers })
+                }).then(r => r.json()).then(data => {
+                    if (data.details) {
+                        document.querySelectorAll('.exam-question').forEach((qDiv, idx) => {
+                            const expl = qDiv.querySelector('.q-explanation');
+                            if (data.details[idx]) {
+                                expl.textContent = '得分: ' + data.details[idx].score + ' | ' + (data.details[idx].explanation || '');
+                                expl.style.display = 'block';
+                            }
+                        });
+                    }
+                    alert('得分: ' + (data.score || 0) + ' / ' + (data.total || 0));
+                }).catch(err => alert('提交失败: ' + err.message));
+            });
+
+            // ============================
+            // 8. 资源功能
+            // ============================
+            function loadResources() {
+                fetch('/api/list_resources')
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.resources && data.resources.length) {
+                            resourceList.innerHTML = data.resources.map((r, idx) => `
+                                <div class="resource-item">
+                                    <label>
+                                        <input type="checkbox" value="${idx}" checked>
+                                        <span><strong>${r.title}</strong> <small>${r.type} · ${r.description || ''}</small></span>
+                                    </label>
+                                </div>
+                            `).join('');
+                        } else {
+                            resourceList.innerHTML = '<span style="color:var(--text-dim);">暂无资源</span>';
+                        }
+                    })
+                    .catch(() => { resourceList.innerHTML = '<span style="color:var(--text-dim);">加载失败</span>'; });
+            }
+
+            downloadBtn.addEventListener('click', function() {
+                const checked = document.querySelectorAll('#resource-list input:checked');
+                if (!checked.length) { alert('请选择至少一个资源'); return; }
+                const selected = Array.from(checked).map(cb => parseInt(cb.value, 10));
+                downloadBtn.disabled = true;
+                downloadBtn.textContent = '下载中…';
+                // 内联状态提示（不遮挡输入框）
+                let statusEl = document.getElementById('download-status');
+                if (!statusEl) {
+                    statusEl = document.createElement('div');
+                    statusEl.id = 'download-status';
+                    statusEl.style.cssText = 'font-size:12px; color:var(--text-muted); margin-top:8px; line-height:1.6;';
+                    downloadBtn.parentNode.insertBefore(statusEl, downloadBtn.nextSibling);
+                }
+                statusEl.textContent = '⏳ 正在下载 ' + selected.length + ' 个资源…';
+                fetch('/api/download_resources', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ selected: selected, lesson_folder: currentLesson })
+                }).then(r => r.json()).then(data => {
+                    downloadBtn.disabled = false;
+                    downloadBtn.textContent = '⬇ 下载选中';
+                    if (data.status === 'ok') {
+                        const downloads = data.downloads || [];
+                        const failed = downloads.filter(d => d.status === 'error');
+                        const okList = downloads.filter(d => d.status === 'ok');
+                        if (failed.length === downloads.length) {
+                            statusEl.textContent = '❌ 下载失败：' + (failed[0].error || '未知错误');
+                        } else if (failed.length) {
+                            statusEl.innerHTML = '⚠️ 部分成功：' + okList.map(d => d.title).join('、') + '；失败：' + failed.map(d => d.title).join('、');
+                        } else {
+                            statusEl.innerHTML = '✅ 下载完成：' + okList.map(d => d.title).join('、') + '<br><small style="color:var(--text-dim);">保存在课程目录 lessons/' + (data.lesson_folder || '') + '/</small>';
+                        }
+                    } else {
+                        statusEl.textContent = '❌ 下载失败: ' + (data.error || '未知错误');
+                    }
+                    setTimeout(() => { statusEl.textContent = ''; }, 8000);
+                }).catch(err => {
+                    downloadBtn.disabled = false;
+                    downloadBtn.textContent = '⬇ 下载选中';
+                    statusEl.textContent = '❌ 下载失败: ' + err.message;
+                });
+            });
+
+            // ============================
+            // 9. 课程功能
+            // ============================
+            function loadLessons() {
+                fetch('/api/lessons')
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.lessons && data.lessons.length) {
+                            lessonList.innerHTML = data.lessons.map(lesson => `
+                                <div class="lesson-card" data-name="${lesson.name}">
+                                    <div class="name">${lesson.name}</div>
+                                    <div class="meta">${lesson.last_access || '未学习'} · ${lesson.progress || 0}%</div>
+                                    <div class="progress-bar"><div class="fill" style="width:${lesson.progress || 0}%"></div></div>
+                                </div>
+                            `).join('');
+                            document.querySelectorAll('.lesson-card').forEach(card => {
+                                card.addEventListener('click', function() {
+                                    const name = this.dataset.name;
+                                    fetch('/api/switch_lesson', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ lesson_folder: name })
+                                    }).then(r => r.json()).then(data => {
+                                        currentLesson = name;
+                                        const history = data.conversation || data.history || [];
+                                        if (history.length) {
+                                            conversation.innerHTML = '';
+                                            history.forEach(msg => {
+                                                const bubble = addBubble(msg.content, msg.role === 'user' ? 'user' : 'teacher');
+                                                if (msg.role === 'assistant') {
+                                                    bubble.innerHTML = renderMarkdown(msg.content);
+                                                }
+                                            });
+                                        } else {
+                                            conversation.innerHTML = '<div class="bubble teacher">已切换到「' + name + '」</div>';
+                                        }
+                                        switchView('chat');
+                                    }).catch(err => alert('切换失败: ' + err.message));
+                                });
+                            });
+                        } else {
+                            lessonList.innerHTML = '<span style="color:var(--text-dim);">暂无课程</span>';
+                        }
+                    })
+                    .catch(() => { lessonList.innerHTML = '<span style="color:var(--text-dim);">加载失败</span>'; });
+            }
+
+            createLessonBtn.addEventListener('click', function() {
+                const topic = prompt('请输入课程主题，AI 将自动备课：\n\n例如：初中物理牛顿定律 / Python 入门 / Alevel 数学 M1P1');
+                if (topic && topic.trim()) {
+                    prepareAndEnter(topic.trim());
+                }
+            });
+
+            // ============================
+            // 9.5 板书功能（Canvas 投影法识别文字区域 + 角色指向）
+            // ============================
+
+            // 投影法识别板书中的文字/内容区域（OpenCV 投影法的纯 JS 实现）
+            function detectBoardKeypoints(imgEl, canvas) {
+                const ctx = canvas.getContext('2d');
+                canvas.width = imgEl.naturalWidth;
+                canvas.height = imgEl.naturalHeight;
+                ctx.drawImage(imgEl, 0, 0);
+                const w = canvas.width, h = canvas.height;
+                if (w === 0 || h === 0) return [];
+                let imageData;
+                try {
+                    imageData = ctx.getImageData(0, 0, w, h);
+                } catch (e) {
+                    console.warn('无法读取图片像素（跨域？）', e);
+                    return [];
+                }
+                const data = imageData.data;
+
+                // 1. 灰度 + 二值化（暗像素 = 内容）
+                const binary = new Uint8Array(w * h);
+                for (let i = 0; i < w * h; i++) {
+                    const r = data[i*4], g = data[i*4+1], b = data[i*4+2];
+                    const gray = 0.299*r + 0.587*g + 0.114*b;
+                    binary[i] = gray < 140 ? 1 : 0;
+                }
+
+                // 2. 水平投影：统计每行暗像素数 → 找文字行
+                const rowProj = new Array(h).fill(0);
+                for (let y = 0; y < h; y++) {
+                    let count = 0;
+                    for (let x = 0; x < w; x++) count += binary[y*w+x];
+                    rowProj[y] = count;
+                }
+                const rowThreshold = Math.max(w * 0.03, 3);
+                const rowRanges = [];
+                let inRow = false, rowStart = 0;
+                for (let y = 0; y < h; y++) {
+                    if (rowProj[y] > rowThreshold && !inRow) { inRow = true; rowStart = y; }
+                    else if (rowProj[y] <= rowThreshold && inRow) {
+                        inRow = false;
+                        if (y - rowStart >= 6) rowRanges.push([rowStart, y]);
+                    }
+                }
+                if (inRow && h - rowStart >= 6) rowRanges.push([rowStart, h-1]);
+
+                // 3. 对每个文字行做垂直投影 → 找文字块
+                const keypoints = [];
+                rowRanges.forEach(function(rr) {
+                    const y1 = rr[0], y2 = rr[1];
+                    const colProj = new Array(w).fill(0);
+                    for (let y = y1; y <= y2; y++) {
+                        for (let x = 0; x < w; x++) colProj[x] += binary[y*w+x];
+                    }
+                    const colThreshold = Math.max((y2-y1) * 0.25, 2);
+                    let inBlock = false, blockStart = 0;
+                    for (let x = 0; x < w; x++) {
+                        if (colProj[x] > colThreshold && !inBlock) { inBlock = true; blockStart = x; }
+                        else if (colProj[x] <= colThreshold && inBlock) {
+                            inBlock = false;
+                            if (x - blockStart >= 12) {
+                                keypoints.push({ x: Math.round((blockStart+x)/2), y: Math.round((y1+y2)/2), w: x-blockStart, h: y2-y1 });
+                            }
+                        }
+                    }
+                    if (inBlock && w - blockStart >= 12) {
+                        keypoints.push({ x: Math.round((blockStart+w)/2), y: Math.round((y1+y2)/2), w: w-blockStart, h: y2-y1 });
+                    }
+                });
+
+                // 4. 在 Canvas 上绘制关键点标记
+                ctx.strokeStyle = 'rgba(232, 90, 90, 0.9)';
+                ctx.fillStyle = 'rgba(232, 90, 90, 0.35)';
+                ctx.lineWidth = 3;
+                keypoints.forEach(function(kp) {
+                    ctx.beginPath();
+                    ctx.rect(kp.x - kp.w/2, kp.y - kp.h/2, kp.w, kp.h);
+                    ctx.fill();
+                    ctx.stroke();
+                });
+                return keypoints;
+            }
+
+            // 角色看向板书关键点（头部朝向）
+            function lookAtKeypoint(kp, canvasEl) {
+                if (!live2dModel || !live2dModel.internalModel || !live2dModel.internalModel.coreModel || !live2dApp) return;
+                const rect = canvasEl.getBoundingClientRect();
+                // 关键点在画布中的比例位置
+                const kpRatioX = kp.x / canvasEl.width;
+                const kpRatioY = kp.y / canvasEl.height;
+                const kpScreenX = rect.left + kpRatioX * rect.width;
+                const kpScreenY = rect.top + kpRatioY * rect.height;
+                // 角色锚点在画布中的位置
+                const modelX = live2dApp.screen.width * (live2dSettings.posX / 100);
+                const modelY = live2dApp.screen.height * (live2dSettings.posY / 100);
+                const dx = kpScreenX - modelX;
+                const dy = kpScreenY - modelY;
+                // 偏移量 → 头部角度（clamp ±25）
+                const angleX = Math.max(-25, Math.min(25, dx * 0.08));
+                const angleY = Math.max(-20, Math.min(20, dy * 0.08));
+                const core = live2dModel.internalModel.coreModel;
+                const setP = function(id, val) {
+                    const idx = core.getParamIndex(id);
+                    if (idx >= 0) core.setParamFloat(idx, val);
+                };
+                setP('ParamAngleX', angleX);
+                setP('ParamAngleY', angleY);
+                triggerAction('point'); // 指向动作
+                // 2 秒后恢复
+                setTimeout(function() {
+                    setP('ParamAngleX', 0);
+                    setP('ParamAngleY', 0);
+                }, 2000);
+                console.log('角色指向关键点:', Math.round(kp.x), Math.round(kp.y), '角度:', Math.round(angleX), Math.round(angleY));
+            }
+
+            // 加载并显示板书
+            function loadBoard() {
+                console.log('[BOARD] loadBoard, currentLesson =', currentLesson);
+                if (!currentLesson) return;
+                fetch('/api/lesson/' + encodeURIComponent(currentLesson) + '/board')
+                    .then(r => r.json())
+                    .then(data => {
+                        console.log('[BOARD] API 返回:', data);
+                        if (data.board_url) {
+                            const img = new Image();
+                            // 同源请求无需 CORS；设置 crossOrigin 反而会被无 CORS 头的响应拒绝
+                            img.onload = function() {
+                                console.log('[BOARD] 图片加载成功:', data.board_url, img.naturalWidth + 'x' + img.naturalHeight);
+                                boardImageEl = img;
+                                boardKeypoints = detectBoardKeypoints(img, boardCanvas);
+                                console.log('[BOARD] 检测到关键点:', boardKeypoints.length, boardKeypoints);
+                                boardPreview.style.display = 'block';
+                                boardEmpty.style.display = 'none';
+                                // 点击 Canvas 上的关键点 → 角色指向
+                                boardCanvas.onclick = function(e) {
+                                    const rect = boardCanvas.getBoundingClientRect();
+                                    const px = (e.clientX - rect.left) / rect.width * boardCanvas.width;
+                                    const py = (e.clientY - rect.top) / rect.height * boardCanvas.height;
+                                    // 找最近的关键点
+                                    let nearest = null, minDist = Infinity;
+                                    boardKeypoints.forEach(function(kp) {
+                                        const d = Math.hypot(px - kp.x, py - kp.y);
+                                        if (d < minDist) { minDist = d; nearest = kp; }
+                                    });
+                                    if (nearest && minDist < 150) lookAtKeypoint(nearest, boardCanvas);
+                                };
+                            };
+                            img.onerror = function() {
+                                boardPreview.style.display = 'none';
+                                boardEmpty.style.display = 'block';
+                            };
+                            img.src = data.board_url;
+                        } else {
+                            boardPreview.style.display = 'none';
+                            boardEmpty.style.display = 'block';
+                        }
+                    })
+                    .catch(() => {
+                        boardPreview.style.display = 'none';
+                        boardEmpty.style.display = 'block';
+                    });
+            }
+
+            // ============================
+            // 板书覆盖层：控制台命令 showBoard() / hideBoard()
+            // ============================
+            // showBoard(url?)：强制在立绘区展示板书
+            //   - 不传 url：加载当前课程的 board_url（config.json 里记录）
+            //   - 传 url：直接加载指定路径（如 '/api/lesson/20260804_Python/asset/board.png'）
+            function showBoard(url) {
+                if (boardOverlay.style.display !== 'none') return;
+                const loadUrl = url || null;
+                if (loadUrl) {
+                    renderBoardOverlay(loadUrl);
+                    return;
+                }
+                if (!currentLesson) {
+                    console.warn('[BOARD] 未选择课程，请先选择课程');
+                    return;
+                }
+                fetch('/api/lesson/' + encodeURIComponent(currentLesson) + '/board')
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.board_url) renderBoardOverlay(data.board_url);
+                        else console.warn('[BOARD] 当前课程没有板书，可先上传或直接 showBoard("/path/to.png")');
+                    })
+                    .catch(err => console.warn('[BOARD] 获取板书失败', err));
+            }
+
+            function renderBoardOverlay(url) {
+                console.log('[BOARD] 强制展示:', url);
+                const img = new Image();
+                img.onload = function() {
+                    boardOverlayKeypoints = detectBoardKeypoints(img, boardOverlayCanvas);
+                    console.log('[BOARD] 覆盖层关键点:', boardOverlayKeypoints.length);
+                    boardOverlay.style.display = 'flex';
+                    boardOverlayCanvas.onclick = function(e) {
+                        const rect = boardOverlayCanvas.getBoundingClientRect();
+                        const px = (e.clientX - rect.left) / rect.width * boardOverlayCanvas.width;
+                        const py = (e.clientY - rect.top) / rect.height * boardOverlayCanvas.height;
+                        let nearest = null, minDist = Infinity;
+                        boardOverlayKeypoints.forEach(function(kp) {
+                            const d = Math.hypot(px - kp.x, py - kp.y);
+                            if (d < minDist) { minDist = d; nearest = kp; }
+                        });
+                        if (nearest && minDist < 150) lookAtKeypoint(nearest, boardOverlayCanvas);
+                    };
+                };
+                img.onerror = function() {
+                    console.warn('[BOARD] 图片加载失败:', url);
+                };
+                img.src = url;
+            }
+
+            function hideBoard() {
+                boardOverlay.style.display = 'none';
+            }
+
+            // 暴露到全局控制台
+            window.showBoard = showBoard;
+            window.hideBoard = hideBoard;
+
+            boardOverlayClose.addEventListener('click', hideBoard);
+
+            // 上传板书
+            boardUpload.addEventListener('change', function() {
+                if (this.files && this.files[0]) {
+                    if (!currentLesson) { alert('请先选择课程'); return; }
+                    const formData = new FormData();
+                    formData.append('board', this.files[0]);
+                    fetch('/api/lesson/' + encodeURIComponent(currentLesson) + '/board', {
+                        method: 'POST',
+                        body: formData
+                    }).then(r => r.json()).then(data => {
+                        if (data.ok) {
+                            alert('板书已上传！');
+                            loadBoard();
+                        } else {
+                            alert('上传失败: ' + (data.message || '未知错误'));
+                        }
+                    }).catch(err => alert('上传失败: ' + err.message));
+                }
+                this.value = '';
+            });
+
+            // 删除板书
+            boardDeleteBtn.addEventListener('click', function() {
+                if (!currentLesson) { alert('请先选择课程'); return; }
+                fetch('/api/lesson/' + encodeURIComponent(currentLesson) + '/board', { method: 'DELETE' })
+                    .then(r => r.json()).then(data => {
+                        if (data.ok) {
+                            boardPreview.style.display = 'none';
+                            boardEmpty.style.display = 'block';
+                            alert('板书已删除');
+                        }
+                    }).catch(err => alert('删除失败: ' + err.message));
+            });
+
+            // ============================
+            // 10. 设置功能（角色外观 / 背景 / 声线）
+            // ============================
+
+            // 同步滑块显示值 + 实时应用到 Live2D
+            function syncPortraitUI() {
+                portraitPosXVal.textContent = portraitPosX.value + '%';
+                portraitPosYVal.textContent = portraitPosY.value + '%';
+                portraitScaleVal.textContent = (parseInt(portraitScale.value) / 100).toFixed(2);
+                live2dSettings.posX = parseInt(portraitPosX.value);
+                live2dSettings.posY = parseInt(portraitPosY.value);
+                live2dSettings.scale = parseInt(portraitScale.value);
+                applyLive2DSettings();
+            }
+
+            portraitPosX.addEventListener('input', syncPortraitUI);
+            portraitPosY.addEventListener('input', syncPortraitUI);
+            portraitScale.addEventListener('input', syncPortraitUI);
+
+            // 从后端加载配置并应用
+            function loadTeacherSettings() {
+                fetch('/api/config')
+                    .then(r => r.json())
+                    .then(config => {
+                        // 声线（兼容 voice / tts_voice 字段）
+                        const savedVoice = config.tts_voice || config.voice;
+                        if (savedVoice && Array.from(voiceSelect.options).some(o => o.value === savedVoice)) {
+                            voiceSelect.value = savedVoice;
+                        }
+                        // 位置（0-100）
+                        live2dSettings.posX = clampNum(config.portrait_pos_x, 0, 100, 50);
+                        live2dSettings.posY = clampNum(config.portrait_pos_y, 0, 100, 55);
+                        // 缩放：仅接受合理 Live2D 范围 (0.1-0.8)，否则用默认 0.32
+                        const sc = parseFloat(config.portrait_scale);
+                        live2dSettings.scale = (sc >= 0.1 && sc <= 0.8) ? Math.round(sc * 100) : 32;
+                        // 背景
+                        live2dSettings.bgTheme = config.bg_theme || 'warm';
+                        live2dSettings.bgUrl = config.bg_url || '';
+
+                        // 填充 UI
+                        portraitPosX.value = live2dSettings.posX;
+                        portraitPosY.value = live2dSettings.posY;
+                        portraitScale.value = live2dSettings.scale;
+                        syncPortraitUI();
+                        applyBgTheme(live2dSettings.bgTheme, live2dSettings.bgUrl);
+                    })
+                    .catch(() => {});
+            }
+
+            // 背景预设按钮
+            bgPresetBtns.forEach(btn => {
+                btn.addEventListener('click', function() {
+                    const theme = this.dataset.theme;
+                    fetch('/api/set_background_theme', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ bg_theme: theme })
+                    }).then(r => r.json()).then(data => {
+                        if (data.ok) {
+                            applyBgTheme(data.bg_theme, data.bg_url || '');
+                        } else {
+                            alert('背景切换失败: ' + (data.message || '未知错误'));
+                        }
+                    }).catch(err => alert('背景切换失败: ' + err.message));
+                });
+            });
+
+            // 上传自定义背景
+            bgUpload.addEventListener('change', function() {
+                if (this.files && this.files[0]) {
+                    const formData = new FormData();
+                    formData.append('background', this.files[0]);
+                    fetch('/api/upload_background', { method: 'POST', body: formData })
+                        .then(r => r.json())
+                        .then(data => {
+                            if (data.ok) {
+                                applyBgTheme('custom', data.bg_url || '');
+                                alert('自定义背景已应用！');
+                            } else {
+                                alert('上传失败: ' + (data.message || '未知错误'));
+                            }
+                        })
+                        .catch(err => alert('上传失败: ' + err.message));
+                }
+                this.value = '';
+            });
+
+            // 恢复默认背景
+            bgResetBtn.addEventListener('click', function() {
+                fetch('/api/reset_background', { method: 'POST' })
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.ok) {
+                            applyBgTheme('warm', '');
+                            alert('已恢复默认背景');
+                        }
+                    })
+                    .catch(err => alert('恢复失败: ' + err.message));
+            });
+
+            avatarUpload.addEventListener('change', function() {
+                if (this.files && this.files[0]) {
+                    const formData = new FormData();
+                    formData.append('avatar', this.files[0]);
+                    fetch('/api/upload_avatar', { method: 'POST', body: formData })
+                        .then(r => r.json())
+                        .then(data => { if (data.url) alert('头像更新成功！'); })
+                        .catch(err => alert('上传失败: ' + err.message));
+                }
+            });
+
+            resetAvatarBtn.addEventListener('click', function() {
+                fetch('/api/reset_avatar', { method: 'POST' })
+                    .then(r => r.json())
+                    .then(() => alert('已恢复默认头像'))
+                    .catch(err => alert('重置失败: ' + err.message));
+            });
+
+            saveSettingsBtn.addEventListener('click', function() {
+                const payload = {
+                    portrait_pos_x: parseInt(portraitPosX.value),
+                    portrait_pos_y: parseInt(portraitPosY.value),
+                    portrait_scale: parseInt(portraitScale.value) / 100,
+                    tts_voice: voiceSelect.value,
+                    bg_theme: live2dSettings.bgTheme,
+                    bg_url: live2dSettings.bgUrl,
+                };
+                fetch('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                }).then(r => r.json())
+                    .then(() => alert('设置已保存！'))
+                    .catch(err => alert('保存失败: ' + err.message));
+            });
+
+            // ============================
+            // 11. 初始化
+            // ============================
+            loadTeacherSettings();
+            showMenu();   // 启动时显示首页菜单
+            console.log('AI 全能私教已启动');
+        })();
+    </script>
+</body>
 </html>
-  

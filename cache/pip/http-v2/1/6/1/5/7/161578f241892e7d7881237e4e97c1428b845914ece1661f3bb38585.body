@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: comfyui-workflow-templates-media-other
+Version: 0.3.229
+Summary: Media bundle containing audio/3D/misc workflow assets
+License-Expression: MIT
+Requires-Python: >=3.9
+Description-Content-Type: text/plain
+
+Media bundle containing audio, 3D, and other workflow assets for ComfyUI.

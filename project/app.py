@@ -376,6 +376,8 @@ def build_system_prompt(lesson_folder: str | None) -> str:
             "- 当你判断课程内容已讲解充分（核心要点都已覆盖并举例），可在回复末尾单独输出标记 `[TOOL:start_exam]` 触发随堂测验。",
             "- 随堂测验由系统自动出题，你无需自行出题；学生答完后系统会反馈成绩，你可基于错题做简短点评。",
             "- 标记必须独占一行或位于回复末尾，且仅出现一次；不要把标记嵌在代码块或表格里。",
+            "- 需要肢体动作配合教学时，可在回复末尾单独输出动作标记 `[ACTION:point]`（指向）、`[ACTION:blackboard]`（拉黑板）、`[ACTION:hello]`（打招呼）、`[ACTION:think]`（思考）、`[ACTION:listen]`（倾听）、`[ACTION:speak]`（说话）。动作标记不显示给学生，仅触发教师角色的动画。严禁在正文中用文字描述动作过程（如“我拿出黑板”“老师指向”“转过身”等），动作只能通过标记触发，正文只讲课程内容。",
+            "- 需要表达情绪时，可在回复末尾输出情绪标记 `[EMOTION:happy]`（高兴）、`[EMOTION:think]`（思考）、`[EMOTION:surprised]`（惊讶）、`[EMOTION:angry]`（生气）、`[EMOTION:sad]`（难过）、`[EMOTION:neutral]`（平静）。情绪标记同样不显示给学生，仅控制教师角色的表情。",
         ]
         try:
             context = load_course_context(lesson_folder)
@@ -455,6 +457,8 @@ def build_system_prompt(lesson_folder: str | None) -> str:
             "- 测验结束后，若学生表示想继续/进入下一课，你可在回复末尾单独输出标记 `[TOOL:next_unit]`，系统会自动切换到下一课。"
         )
     tool_lines.append("- 标记必须独占一行或位于回复末尾，且仅出现一次；不要把标记嵌在代码块或表格里。")
+    tool_lines.append("- 需要肢体动作配合教学时，可在回复末尾单独输出动作标记 `[ACTION:point]`（指向）、`[ACTION:blackboard]`（拉黑板）、`[ACTION:hello]`（打招呼）、`[ACTION:think]`（思考）、`[ACTION:listen]`（倾听）、`[ACTION:speak]`（说话）。动作标记不显示给学生，仅触发教师角色的动画。严禁在正文中用文字描述动作过程（如“我拿出黑板”“老师指向”“转过身”等），动作只能通过标记触发，正文只讲课程内容。")
+    tool_lines.append("- 需要表达情绪时，可在回复末尾输出情绪标记 `[EMOTION:happy]`（高兴）、`[EMOTION:think]`（思考）、`[EMOTION:surprised]`（惊讶）、`[EMOTION:angry]`（生气）、`[EMOTION:sad]`（难过）、`[EMOTION:neutral]`（平静）。情绪标记同样不显示给学生，仅控制教师角色的表情。")
     parts.append("\n".join(tool_lines))
 
     # 教学行为指引：开课时先系统讲解知识点
@@ -525,20 +529,41 @@ def local_ollama_reply(prompt: str, lesson_folder: str | None = None, history: L
     """
     cfg = load_config()
     base_url = (cfg.get("ollama_base_url") or "http://127.0.0.1:11434").rstrip("/")
-    model = (cfg.get("ollama_model") or "qwen2.5:7B").strip()
+    model = (cfg.get("ollama_model") or "qwen2.5:7b").strip()
     if not cfg.get("enable_local_ollama", True):
         return ""
+
+    # 模型名容错：配置的模型可能不存在/大小写不符，自动匹配 Ollama 实际可用模型
+    try:
+        tags_resp = requests.get(f"{base_url}/api/tags", timeout=8)
+        if tags_resp.ok:
+            available = [m.get("name", "") for m in (tags_resp.json().get("models") or [])]
+            if available:
+                normalized = {n.lower(): n for n in available}
+                if model.lower() not in normalized:
+                    # 依次尝试：配置名 → qwen2.5 → qwen2.5vl → qwen2.5-coder
+                    for fallback in ["qwen2.5", "qwen2.5vl", "qwen2.5-coder"]:
+                        if fallback in normalized:
+                            print(f"[ollama] 模型 '{model}' 不存在，自动改用 '{normalized[fallback]}'", flush=True)
+                            model = normalized[fallback]
+                            break
+                else:
+                    model = normalized[model.lower()]  # 统一为实际大小写
+    except Exception as exc:
+        print(f"[ollama] 获取模型列表失败: {exc}", flush=True)
+
     messages = _build_chat_messages(prompt, lesson_folder, history)
 
     # 统一从配置读取生成参数（避免魔法数；分课后 system prompt 较长，默认 16384）
     options: Dict[str, Any] = {
         "temperature": float(cfg.get("ollama_temperature", 0.7) or 0.7),
         "num_ctx": int(cfg.get("ollama_num_ctx", 16384) or 16384),
-        "num_predict": int(cfg.get("ollama_num_predict", 1024) or 1024),
+        "num_predict": int(cfg.get("ollama_num_predict", 600) or 600),
     }
 
     # 主路径：/api/chat（带 messages，由 Ollama 按模型自带模板渲染）
     try:
+        print(f"[AI-REQUEST] 对话请求 → Ollama: {base_url}/api/chat | model: {model}", flush=True)
         response = requests.post(
             f"{base_url}/api/chat",
             json={
@@ -629,6 +654,8 @@ def cloud_llm_reply(prompt: str, lesson_folder: str | None = None, history: List
         "model": model,
         "messages": messages,
         "temperature": 0.7,
+        # 控制回复长度：对话回复保持精炼（备课/测验另有独立配置）
+        "max_tokens": int(cfg.get("chat_max_tokens", 600) or 600),
     }
     # 只有硅基/百川等明确支持联网搜索的服务才加 enable_search，
     # 原生 OpenAI/DeepSeek 等不认这个字段会报错 → 仅当 enable_search=True 时才附加
@@ -636,6 +663,7 @@ def cloud_llm_reply(prompt: str, lesson_folder: str | None = None, history: List
         payload["enable_search"] = True
 
     try:
+        print(f"[AI-REQUEST] 对话请求 → 云端: {url} | model: {model}", flush=True)
         response = requests.post(
             url,
             headers={
@@ -646,11 +674,13 @@ def cloud_llm_reply(prompt: str, lesson_folder: str | None = None, history: List
             timeout=120,
         )
         if not response.ok:
+            print(f"[AI-REQUEST] 云端请求失败 HTTP {response.status_code}: {response.text[:200]}", flush=True)
             return ""
         data = response.json()
         content = data.get("choices", [{}])[0].get("message", {}).get("content") or ""
         return str(content).strip() or ""
-    except Exception:
+    except Exception as exc:
+        print(f"[AI-REQUEST] 云端请求异常: {type(exc).__name__}: {exc}", flush=True)
         return ""
 
 
@@ -911,6 +941,99 @@ def api_upload_avatar():
     config["avatar_url"] = avatar_url
     save_config({"avatar_url": avatar_url})
     return jsonify({"ok": True, "avatar_url": avatar_url, "config": config})
+
+
+@app.route("/api/lesson/<path:lesson_folder>/board", methods=["POST"])
+def api_upload_board(lesson_folder: str):
+    """上传课程板书图片（存到 lessons/<folder>/images/board.*）。"""
+    if not lesson_folder or "/" in lesson_folder or "\\" in lesson_folder or ".." in lesson_folder:
+        return jsonify({"ok": False, "message": "非法的课程名"}), 400
+    lesson_dir = LESSONS_DIR / lesson_folder
+    if not lesson_dir.exists():
+        return jsonify({"ok": False, "message": "课程不存在"}), 404
+    if "board" not in request.files:
+        return jsonify({"ok": False, "message": "未选择文件"}), 400
+    file = request.files["board"]
+    if not file or not file.filename:
+        return jsonify({"ok": False, "message": "文件名为空"}), 400
+
+    file.seek(0, 2)
+    file_size = file.tell()
+    file.seek(0)
+    if file_size > MAX_UPLOAD_SIZE:
+        return jsonify({"ok": False, "message": f"文件过大（{file_size // 1024}KB），最大支持 {MAX_UPLOAD_SIZE // 1024 // 1024}MB"}), 400
+
+    ext = _get_file_ext(file, ALLOWED_AVATAR_EXT)
+    if not ext:
+        return jsonify({"ok": False, "message": "不支持的图片格式"}), 400
+
+    images_dir = lesson_dir / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    # 清理旧板书
+    for stale in images_dir.glob("board.*"):
+        try:
+            stale.unlink()
+        except Exception:
+            pass
+    filename = f"board{ext}"
+    save_path = images_dir / filename
+    file.save(save_path)
+    board_url = f"/api/lesson/{lesson_folder}/asset/{filename}?v={int(time.time())}"
+
+    ensure_lesson_files(lesson_folder)
+    config_path = lesson_dir / "config.json"
+    current = {}
+    if config_path.exists():
+        try:
+            current = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            current = {}
+    current["board_url"] = board_url
+    config_path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+    if ACTIVE_LESSON.get("folder") == lesson_folder:
+        ACTIVE_LESSON["metadata"] = current
+    return jsonify({"ok": True, "board_url": board_url, "lesson_folder": lesson_folder, "config": current})
+
+
+@app.route("/api/lesson/<path:lesson_folder>/board", methods=["DELETE"])
+def api_delete_board(lesson_folder: str):
+    """删除课程板书图片。"""
+    if not lesson_folder or "/" in lesson_folder or "\\" in lesson_folder or ".." in lesson_folder:
+        return jsonify({"ok": False, "message": "非法的课程名"}), 400
+    lesson_dir = LESSONS_DIR / lesson_folder
+    images_dir = lesson_dir / "images"
+    if images_dir.exists():
+        for stale in images_dir.glob("board.*"):
+            try:
+                stale.unlink()
+            except Exception:
+                pass
+    config_path = lesson_dir / "config.json"
+    if config_path.exists():
+        try:
+            current = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            current = {}
+        current.pop("board_url", None)
+        config_path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify({"ok": True, "board_url": ""})
+
+
+@app.route("/api/lesson/<path:lesson_folder>/board", methods=["GET"])
+def api_get_board(lesson_folder: str):
+    """获取课程板书信息。"""
+    if not lesson_folder or "/" in lesson_folder or "\\" in lesson_folder or ".." in lesson_folder:
+        return jsonify({"ok": False, "message": "非法的课程名"}), 400
+    lesson_dir = LESSONS_DIR / lesson_folder
+    config_path = lesson_dir / "config.json"
+    board_url = ""
+    if config_path.exists():
+        try:
+            current = json.loads(config_path.read_text(encoding="utf-8"))
+            board_url = current.get("board_url", "")
+        except Exception:
+            pass
+    return jsonify({"ok": True, "board_url": board_url, "lesson_folder": lesson_folder})
 
 
 @app.route("/api/reset_avatar", methods=["POST"])
@@ -1361,8 +1484,11 @@ def api_download_resources():
 
     for index, resource in enumerate(selected_resources):
         file_name = f"resource{index + 1}"
-        path = download_resource(resource, target_dir, file_name)
-        statuses.append({"index": index, "title": resource.get("title", "unnamed"), "path": str(path), "status": "ok", "unit_index": unit_index})
+        try:
+            path = download_resource(resource, target_dir, file_name)
+            statuses.append({"index": index, "title": resource.get("title", "unnamed"), "path": str(path), "status": "ok", "unit_index": unit_index})
+        except Exception as exc:
+            statuses.append({"index": index, "title": resource.get("title", "unnamed"), "path": "", "status": "error", "error": str(exc), "unit_index": unit_index})
 
     # 仅在全局下载（unit_index<0）时回写 metadata.downloaded，避免覆盖 units 结构
     if unit_index < 0:
@@ -1778,6 +1904,51 @@ def extract_tool_call(text: str) -> tuple[str, str | None]:
     return cleaned.strip(), tool_event
 
 
+# 动作调用标记正则：匹配 [ACTION:point] / [ACTION:blackboard] 等
+_ACTION_RE = re.compile(r"\[ACTION:\s*([a-zA-Z_]+)\s*\]", re.IGNORECASE)
+
+
+def extract_action_call(text: str) -> tuple[str, str | None]:
+    """从 LLM 回复中剥离动作指令标记。
+
+    Returns:
+        (clean_text, action) — action 为 'point' / 'blackboard' / 'hello' / 'think' / 'listen' / 'speak' / None。
+    """
+    if not text:
+        return text, None
+    m = _ACTION_RE.search(text)
+    if not m:
+        return text, None
+    action = m.group(1).lower()
+    cleaned = _ACTION_RE.sub("", text, count=1)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip() + ("\n" if cleaned.endswith("\n") else "")
+    return cleaned.strip(), action
+
+
+# 情绪标记正则：匹配 [EMOTION:happy] / [EMOTION:think] 等
+_EMOTION_RE = re.compile(r"\[EMOTION:\s*([a-zA-Z_]+)\s*\]", re.IGNORECASE)
+VALID_EMOTIONS = {"happy", "think", "surprised", "angry", "sad", "neutral"}
+
+
+def extract_emotion_call(text: str) -> tuple[str, str | None]:
+    """从 LLM 回复中剥离情绪标记。
+
+    Returns:
+        (clean_text, emotion) — emotion 为 happy/think/surprised/angry/sad/neutral 或 None。
+    """
+    if not text:
+        return text, None
+    m = _EMOTION_RE.search(text)
+    if not m:
+        return text, None
+    emotion = m.group(1).lower()
+    if emotion not in VALID_EMOTIONS:
+        emotion = "neutral"
+    cleaned = _EMOTION_RE.sub("", text, count=1)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip() + ("\n" if cleaned.endswith("\n") else "")
+    return cleaned.strip(), emotion
+
+
 @app.route("/api/chat", methods=["POST"])
 def api_chat():
     payload = request.get_json(silent=True) or {}
@@ -1837,6 +2008,34 @@ def api_chat():
 
         # 解析工具调用标记：剥离后得到对外展示的纯文本；tool_event 推送给前端
         clean_answer, tool_event = extract_tool_call(generated_answer)
+
+        # 解析动作指令标记：剥离后推送 action 给前端触发 Live2D 动作
+        clean_answer, live2d_action = extract_action_call(clean_answer)
+        print(f"[ACTION-DEBUG] live2d_action={live2d_action or 'NONE'}", flush=True)
+
+        # 解析情绪标记：剥离后推送 emotion 给前端设置表情
+        clean_answer, live2d_emotion = extract_emotion_call(clean_answer)
+        if live2d_emotion:
+            print(f"[EMOTION-DEBUG] live2d_emotion={live2d_emotion}", flush=True)
+
+        # 清洗：剥离模型误加的整段代码块包裹（如 ```plaintext ... ```），
+        # 否则分段会切在代码块中间导致格式错乱。仅当整段首尾都被 ``` 包裹时处理，
+        # 正常内嵌代码块不受影响。
+        if clean_answer.strip().startswith("```") and clean_answer.strip().endswith("```"):
+            stripped = re.sub(r"^```[a-zA-Z0-9_-]*\s*\n?", "", clean_answer.strip())
+            stripped = re.sub(r"\n?\s*```\s*$", "", stripped)
+            if stripped.strip():
+                clean_answer = stripped.strip()
+                print("[FORMAT-DEBUG] 已剥离整段代码块包裹", flush=True)
+
+        # 清洗：剥离动作描述从句（如"艾琳老师拉过黑板，""老师指着黑板，"），
+        # 动作只能通过 [ACTION:] 标记触发，正文不出现动作过程描述
+        _ACTION_CLAUSE_RE = re.compile(
+            r"[^。\n，,]{0,20}?(?:拉过黑板|拿出黑板|指着黑板|指向黑板|转过身|拍了拍手|拿出教具|转向黑板|敲了敲黑板|拉开黑板)[^。\n，,]{0,4}[，,]?"
+        )
+        if _ACTION_CLAUSE_RE.search(clean_answer):
+            clean_answer = _ACTION_CLAUSE_RE.sub("", clean_answer)
+            print("[ACTION-DEBUG] 已剥离动作描述从句", flush=True)
 
         # [DEBUG] 工具调用检测日志
         meta_debug = load_lesson_metadata(lesson_folder)
@@ -1933,6 +2132,10 @@ def api_chat():
         ACTIVE_LESSON["progress"] = load_progress(lesson_folder)
 
         done_payload: Dict[str, Any] = {"content": clean_answer_stored, "done": True, "audio_url": audio_url, "segment_count": len(segments)}
+        if live2d_action:
+            done_payload["action"] = live2d_action
+        if live2d_emotion:
+            done_payload["emotion"] = live2d_emotion
         if tool_event:
             done_payload["tool_event"] = tool_event
             # 附带最新进度，便于前端刷新进度条
@@ -2243,6 +2446,19 @@ def api_lesson_reset():
     progress = {"current_unit": 0, "completed_units": [], "started_at": now_iso()}
     save_progress(folder, progress)
     return jsonify({"success": True, "message": "进度已重置", "progress": progress})
+
+
+@app.route("/api/create_lesson", methods=["POST"])
+def api_create_lesson():
+    """创建一门空课程（不触发备课，仅建立目录与基础文件）。"""
+    payload = request.get_json(silent=True) or {}
+    lesson_folder = (payload.get("lesson_folder") or payload.get("name") or "").strip()
+    if not lesson_folder:
+        return jsonify({"error": "课程名不能为空"}), 400
+    if "/" in lesson_folder or "\\" in lesson_folder or ".." in lesson_folder:
+        return jsonify({"error": "非法的课程名"}), 400
+    ensure_lesson_files(lesson_folder)
+    return jsonify({"ok": True, "lesson_folder": lesson_folder, "message": "课程创建成功"})
 
 
 @app.route("/api/switch_lesson", methods=["POST"])

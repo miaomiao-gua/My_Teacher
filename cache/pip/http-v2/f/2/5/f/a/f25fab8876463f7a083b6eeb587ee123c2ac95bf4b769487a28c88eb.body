@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: comfyui-workflow-templates-media-video
+Version: 0.3.101
+Summary: Media bundle containing video workflow assets
+License-Expression: MIT
+Requires-Python: >=3.9
+Description-Content-Type: text/plain
+
+Media bundle containing video workflow assets for ComfyUI.
