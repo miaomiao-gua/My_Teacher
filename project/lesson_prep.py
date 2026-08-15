@@ -12,6 +12,37 @@ DEFAULT_MODEL = "deepseek-ai/DeepSeek-V3"
 # 单课资料正文最大长度（截断防 token 爆炸）
 MAX_UNIT_CONTENT_CHARS = 8000
 
+# 备课 system prompt（云端 / 本地 Ollama 共用）
+_LESSON_SYSTEM_PROMPT = (
+    "你是一位顶级学科专家与课程设计师。请针对用户给定的主题，搜索最新、权威的资料，"
+    "并将内容拆分为若干个可循序渐进教学的「课」（unit）。\n"
+    "请严格以 JSON 格式返回以下字段（不要输出任何额外文字）：\n"
+    "{\n"
+    '  "topic": "主题",\n'
+    '  "syllabus": "整体章节大纲（Markdown 格式，列出全部 unit 标题与简要内容）",\n'
+    '  "key_points": ["全局核心概念1", "全局核心概念2", ...],\n'
+    '  "units": [\n'
+    '    {\n'
+    '      "title": "第 1 课标题",\n'
+    '      "summary": "本课要点概述（1-2 句）",\n'
+    '      "key_points": ["本课要点1", "本课要点2", "本课要点3", "本课要点4"],\n'
+    '      "source_files": [\n'
+    '        {"title": "资源标题", "url": "下载链接", "type": "pdf|docx|webpage", '
+    '"description": "简短说明", "markdown_content": "可选：若资源是公开文本，直接提供 Markdown 正文"}\n'
+    '      ]\n'
+    '    }\n'
+    '  ],\n'
+    '  "resources": ["全局备用资源（可选，结构与 source_files 一致）"]\n'
+    "}\n"
+    "要求：\n"
+    "1. units 至少 12 课，最多 20 课，由浅入深、循序渐进。每课标题需明确体现该课的教学内容。\n"
+    "2. 每个 unit 的 key_points 至少 4 个，source_files 至少 1 个真实可访问的下载链接（PDF 教材、官方文档等），type 字段必须是 pdf/docx/webpage 之一。\n"
+    "3. markdown_content 字段若资源是公开网页/文本，请直接给出关键段落 Markdown 正文（不超过 2000 字）。\n"
+    "4. syllabus 字段需包含全部课时的标题列表，使用 ### 标记每课，格式为 ### 第N课：标题，并附上1-2句简要说明。\n"
+    "5. key_points（全局）至少 5 个核心概念。\n"
+    "6. resources（全局）至少 3 个高质量学习资源链接。"
+)
+
 
 def _fallback_lesson(topic: str) -> Dict[str, Any]:
     """本地兜底教案：单课结构，含一个示例 unit（不含题目，题目由模型单独生成）。"""
@@ -75,35 +106,7 @@ def _call_siliconflow(topic: str, config: Dict[str, Any] | None = None) -> Dict[
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "你是一位顶级学科专家与课程设计师。请针对用户给定的主题，搜索最新、权威的资料，"
-                    "并将内容拆分为若干个可循序渐进教学的「课」（unit）。\n"
-                    "请严格以 JSON 格式返回以下字段（不要输出任何额外文字）：\n"
-                    "{\n"
-                    '  "topic": "主题",\n'
-                    '  "syllabus": "整体章节大纲（Markdown 格式，列出全部 unit 标题与简要内容）",\n'
-                    '  "key_points": ["全局核心概念1", "全局核心概念2", ...],\n'
-                    '  "units": [\n'
-                    '    {\n'
-                    '      "title": "第 1 课标题",\n'
-                    '      "summary": "本课要点概述（1-2 句）",\n'
-                    '      "key_points": ["本课要点1", "本课要点2", "本课要点3", "本课要点4"],\n'
-                    '      "source_files": [\n'
-                    '        {"title": "资源标题", "url": "下载链接", "type": "pdf|docx|webpage", '
-                    '"description": "简短说明", "markdown_content": "可选：若资源是公开文本，直接提供 Markdown 正文"}\n'
-                    '      ]\n'
-                    '    }\n'
-                    '  ],\n'
-                    '  "resources": ["全局备用资源（可选，结构与 source_files 一致）"]\n'
-                    "}\n"
-                    "要求：\n"
-                    "1. units 至少 12 课，最多 20 课，由浅入深、循序渐进。每课标题需明确体现该课的教学内容。\n"
-                    "2. 每个 unit 的 key_points 至少 4 个，source_files 至少 1 个真实可访问的下载链接（PDF 教材、官方文档等），type 字段必须是 pdf/docx/webpage 之一。\n"
-                    "3. markdown_content 字段若资源是公开网页/文本，请直接给出关键段落 Markdown 正文（不超过 2000 字）。\n"
-                    "4. syllabus 字段需包含全部课时的标题列表，使用 ### 标记每课，格式为 ### 第N课：标题，并附上1-2句简要说明。\n"
-                    "5. key_points（全局）至少 5 个核心概念。\n"
-                    "6. resources（全局）至少 3 个高质量学习资源链接。"
-                ),
+                "content": (config or {}).get("lesson_prompt") or _LESSON_SYSTEM_PROMPT,
             },
             {"role": "user", "content": f"请为【{topic}】设计一份分课教案，至少12课，每课独立含资源与要点。"},
         ],
@@ -144,6 +147,47 @@ def _call_siliconflow(topic: str, config: Dict[str, Any] | None = None) -> Dict[
 
     print(f"[PREP-DEBUG] falling back to _fallback_lesson(topic={topic})", flush=True)
     return _fallback_lesson(topic)
+
+
+def _call_ollama_lesson(topic: str, config: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """用本地 Ollama 生成分课教案（与云端共用同一 system prompt，去掉 enable_search）。"""
+    config = config or {}
+    base_url = (config.get("ollama_base_url") or "http://127.0.0.1:11434").rstrip("/")
+    model = (config.get("ollama_model") or "qwen2.5:7b").strip()
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": (config or {}).get("lesson_prompt") or _LESSON_SYSTEM_PROMPT},
+            {"role": "user", "content": f"请为【{topic}】设计一份分课教案，至少12课，每课独立含资源与要点。"},
+        ],
+        "stream": False,
+        "options": {
+            "temperature": 0.6,
+            "num_ctx": int(config.get("ollama_num_ctx", 16384) or 16384),
+            "num_predict": int(config.get("ollama_num_predict", 8192) or 8192),
+        },
+    }
+    try:
+        print(f"[PREP-DEBUG] calling Ollama: {base_url}/api/chat | model={model}", flush=True)
+        resp = requests.post(f"{base_url}/api/chat", json=payload, timeout=300)
+        if not resp.ok:
+            print(f"[PREP-DEBUG] Ollama HTTP {resp.status_code}: {resp.text[:300]}", flush=True)
+            return None
+        content = (resp.json().get("message", {}).get("content") or "").strip()
+        print(f"[PREP-DEBUG] Ollama raw_content_len={len(content)}, preview={content[:200]}", flush=True)
+        if not content:
+            return None
+        text = _strip_code_fence(content)
+        data = json.loads(text)
+        if isinstance(data, dict):
+            units = data.get("units", [])
+            print(f"[PREP-DEBUG] Ollama parsed OK, units={len(units) if isinstance(units, list) else 'N/A'}", flush=True)
+            return data
+    except json.JSONDecodeError as exc:
+        print(f"[PREP-DEBUG] Ollama JSON decode error: {exc}", flush=True)
+    except Exception as exc:
+        print(f"[PREP-DEBUG] Ollama error: {type(exc).__name__}: {exc}", flush=True)
+    return None
 
 
 def _normalize_unit(unit: Dict[str, Any], fallback_index: int) -> Dict[str, Any]:
@@ -193,7 +237,16 @@ def prepare_lesson(topic: str, config: Dict[str, Any] | None = None) -> Dict[str
         其中 units 是分课数组，每项含 title/summary/key_points/source_files/quiz_preset。
         旧字段 syllabus/key_points/resources/quiz_preset 保留兼容。
     """
-    data = _call_siliconflow(topic, config=config)
+    provider = (str((config or {}).get("lesson_provider") or "cloud")).strip().lower()
+    if provider == "ollama":
+        # 本地 Ollama 备课，失败回退云端
+        data = _call_ollama_lesson(topic, config=config)
+        if not data:
+            print("[PREP-DEBUG] Ollama 备课失败，回退云端", flush=True)
+            data = _call_siliconflow(topic, config=config)
+    else:
+        # cloud / auto：云端备课（失败时内部回退到本地兜底教案）
+        data = _call_siliconflow(topic, config=config)
     data.setdefault("topic", topic)
     data.setdefault("syllabus", f"# {topic}\n\n请根据实际课程内容补充。")
     data.setdefault("key_points", ["基础概念", "核心原理", "实践应用"])

@@ -9,6 +9,9 @@
 | 功能 | 说明 |
 |------|------|
 | **智能对话** | 支持本地 Ollama 模型 + 云端模型（硅基流动 / DeepSeek / OpenAI 兼容 API）双通道，自动回退，SSE 流式输出 |
+| **可视化模型配置** | 设置面板内自由选择对话 / 备课 / TTS / 识图模型（云端 / 本地 Ollama），API Key 可视化填写，一键连通性测试 |
+| **聊天附件上传** | 对话中可上传图片与文本文件：图片自动走识图模型理解、文本文件自动注入上下文 |
+| **自定义提示词** | 老师人格提示词与备课（分课教案）提示词均可前端编辑，留空自动回退内置默认 |
 | **AI 备课系统** | 输入主题自动生成课程大纲、分课教学、知识点与预设测验题，可预览编辑后确认创建 |
 | **Galgame 对话体验** | 老师回复分段输出，按 Enter 逐段展开；对话条可实时控制口型同步 |
 | **Live2D 虚拟老师** | 内置「艾琳老师」模型（表情 7 种 / 动作 9 组），说话口型同步、眨眼、动作切换 |
@@ -96,14 +99,15 @@ My_Teacher/
     ├── requirements.txt        ← Python 依赖
     ├── config.json             ← 全局配置（不入库，运行时生成）
     ├── templates/
-    │   └── index.html          ← 前端单页应用（内联全部 CSS / JS）
+    │   └── index.html          ← 前端单页应用（HTML 结构）
     ├── static/
-    │   ├── css/style.css       ← 备用外部样式
-    │   ├── js/pl2d.js          ← Live2D Cubism 运行时（pixi-live2d-display）
-    │   ├── images/             ← 头像 / 背景图片
-    │   └── models/
-    │       ├── my_teacher/     ← 内置 Live2D 默认模型（艾琳老师）
-    │       └── uploads/        ← 用户上传的模型（不入库）
+    │   ├── css/style.css       ← 全局样式（拆分自 index.html）
+    │   └── js/
+    │       ├── base.js         ← 基础状态 / 动作 / 表情 / Live2D 引擎
+    │       ├── interact.js     ← 视图切换 / 菜单 / 聊天 / 终端 / 图片
+    │       ├── settings.js     ← AI 工具 / 设置加载 / 备课预览 / 初始化
+    │       ├── pl2d.js         ← Live2D Cubism 运行时（pixi-live2d-display）
+    │       └── ...             ← images / models（艾琳老师）等资源
     └── lessons/                ← 所有已创建的课程（不入库）
 ```
 
@@ -122,6 +126,7 @@ My_Teacher/
 | 上传 | `POST /api/upload_avatar` | 教师头像 |
 | | `POST /api/upload_background` | 背景图 |
 | | `POST /api/set_background_theme` | 切换背景主题 |
+| | `POST /api/upload_file` | 聊天附件上传（图片 / 文本文件） |
 | 课程 | `POST /api/prepare_lesson` | AI 备课 |
 | | `POST /api/apply_lesson` | 确认创建课程 |
 | | `GET /api/lessons` | 课程列表 |
@@ -158,6 +163,7 @@ My_Teacher/
 
 | 版本 | 分支 | 亮点 |
 |------|------|------|
+| v3.1 | `v3` | 模型 / API 可视化配置（对话 / 备课 / TTS / 识图四通道自由切换云端或本地 Ollama）；聊天附件上传与图片识图；备课与人格提示词前端可自定义；前端代码拆分（CSS 与 JS 独立文件）；终端执行记录与聊天记录分离 |
 | v3.0 | `v3` | 内置新版 Live2D 默认模型；支持自定义模型上传（Cubism 2.1~5 全格式）；全局主题跟随背景；界面美化与聊天交互优化 |
 | v2.0 | `v2.0` | 环境变量配置；.gitignore 项目隔离；功能大幅扩展 |
 | v1.0 | `main` | 基础版本 |

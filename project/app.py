@@ -1,4 +1,5 @@
 import ast
+import base64
 import io
 import json
 import logging
@@ -217,14 +218,24 @@ def default_config() -> Dict[str, Any]:
         "cloud_model": "deepseek-ai/DeepSeek-V3",
         "enable_search": True,
         # 云端模型 - 对话聊天用（独立配置；未填写时回退到 cloud_*）
-        "chat_provider": "openai_compatible",
+        # chat_provider: auto（本地 Ollama 优先，失败回退云端）/ ollama（只用本地）/ cloud（只用云端）
+        "chat_provider": "auto",
         "chat_base_url": "",
         "chat_api_key": "",
         "chat_model": "",
         "chat_enable_search": False,
+        # 备课模型提供方：cloud（云端）/ ollama（本地）/ auto（云端优先，失败回退本地）
+        "lesson_provider": "cloud",
+        # 识图模型（可选）：OpenAI 兼容 vision API；启用后聊天上传的图片会先经它识别再交给对话模型
+        "vision_enabled": False,
+        "vision_base_url": "",
+        "vision_api_key": "",
+        "vision_model": "",
         "auto_play_tts": True,
         "assistant_name": "艾琳老师",
         "personality_prompt": "你是一位温柔、专业、耐心的 AI 学习导师。请以启发式提问方式指导学生，先解释概念，再给出例子和练习。",
+        # 备课（分课教案生成）system 提示词，用户可在设置页自定义；与 lesson_prep._LESSON_SYSTEM_PROMPT 保持一致
+        "lesson_prompt": "你是一位顶级学科专家与课程设计师。请针对用户给定的主题，搜索最新、权威的资料，并将内容拆分为若干个可循序渐进教学的「课」（unit）。\n请严格以 JSON 格式返回以下字段（不要输出任何额外文字）：\n{\n  \"topic\": \"主题\",\n  \"syllabus\": \"整体章节大纲（Markdown 格式，列出全部 unit 标题与简要内容）\",\n  \"key_points\": [\"全局核心概念1\", \"全局核心概念2\", ...],\n  \"units\": [\n    {\n      \"title\": \"第 1 课标题\",\n      \"summary\": \"本课要点概述（1-2 句）\",\n      \"key_points\": [\"本课要点1\", \"本课要点2\", \"本课要点3\", \"本课要点4\"],\n      \"source_files\": [\n        {\"title\": \"资源标题\", \"url\": \"下载链接\", \"type\": \"pdf|docx|webpage\", \"description\": \"简短说明\", \"markdown_content\": \"可选：若资源是公开文本，直接提供 Markdown 正文\"}\n      ]\n    }\n  ],\n  \"resources\": [\"全局备用资源（可选，结构与 source_files 一致）\"]\n}\n要求：\n1. units 至少 12 课，最多 20 课，由浅入深、循序渐进。每课标题需明确体现该课的教学内容。\n2. 每个 unit 的 key_points 至少 4 个，source_files 至少 1 个真实可访问的下载链接（PDF 教材、官方文档等），type 字段必须是 pdf/docx/webpage 之一。\n3. markdown_content 字段若资源是公开网页/文本，请直接给出关键段落 Markdown 正文（不超过 2000 字）。\n4. syllabus 字段需包含全部课时的标题列表，使用 ### 标记每课，格式为 ### 第N课：标题，并附上1-2句简要说明。\n5. key_points（全局）至少 5 个核心概念。\n6. resources（全局）至少 3 个高质量学习资源链接。",
         "default_topic": "Python 基础",
         "default_voice": "zh-CN-XiaoxiaoNeural",
         "avatar_url": "/static/images/teacher.svg",
@@ -1015,6 +1026,192 @@ def cloud_tts_audio(text: str) -> str | None:
     except Exception as exc:
         print(f"[tts] 云端 TTS 异常: {exc}", flush=True)
         return None
+
+
+# ============== 聊天附件上传 + 识图模型（可选） ==============
+CHAT_UPLOAD_DIR = BASE_DIR / "static" / "uploads" / "chat"
+IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
+TEXT_EXT = {
+    ".txt", ".md", ".py", ".js", ".ts", ".jsx", ".tsx", ".json", ".csv", ".log",
+    ".html", ".htm", ".css", ".xml", ".yaml", ".yml", ".ini", ".cfg", ".conf",
+    ".sh", ".bat", ".ps1", ".c", ".cpp", ".h", ".java", ".go", ".rs", ".sql",
+    ".ipynb", ".toml", ".env", ".gitignore",
+}
+_MIME_BY_EXT = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+}
+
+
+def _guess_mime_by_ext(ext: str) -> str:
+    return _MIME_BY_EXT.get((ext or "").lower(), "image/jpeg")
+
+
+def _load_image_b64(image_url: str) -> str | None:
+    """读取图片（本地 /static/ 或远程 URL）→ 压缩到最长边 1024 并转 JPEG base64。
+
+    压缩避免超大分辨率图片（如 4K 贴图）超出模型显存/内存。
+    返回 None 表示读取失败。
+    """
+    mime = "image/jpeg"
+    raw: bytes | None = None
+    if image_url.startswith("/static/"):
+        rel = image_url.split("?", 1)[0][len("/static/"):]
+        local_path = BASE_DIR / "static" / rel
+        if not local_path.exists():
+            print(f"[vision] 本地图片不存在: {local_path}", flush=True)
+            return None
+        mime = _guess_mime_by_ext(local_path.suffix)
+        raw = local_path.read_bytes()
+    elif image_url.startswith("data:"):
+        # 已是 data URL，直接透传
+        return image_url.split(",", 1)[1] if "," in image_url else None
+    else:
+        try:
+            resp = requests.get(image_url, timeout=60)
+            if not resp.ok:
+                print(f"[vision] 远程图片获取失败 HTTP {resp.status_code}", flush=True)
+                return None
+            raw = resp.content
+        except Exception as exc:
+            print(f"[vision] 远程图片获取异常: {type(exc).__name__}: {exc}", flush=True)
+            return None
+    try:
+        from PIL import Image
+        import io as _io
+        img = Image.open(_io.BytesIO(raw))
+        img.thumbnail((1024, 1024), Image.LANCZOS)
+        buf = _io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=85)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except ImportError:
+        # 无 PIL 时原样 base64
+        return base64.b64encode(raw).decode("ascii")
+    except Exception as exc:
+        print(f"[vision] 图片处理失败: {type(exc).__name__}: {exc}", flush=True)
+        try:
+            return base64.b64encode(raw).decode("ascii")
+        except Exception:
+            return None
+
+
+def vision_describe(image_url: str, name: str = "") -> str:
+    """用识图模型描述图片内容（可选功能）。
+
+    - 本地 Ollama（base_url 含 127.0.0.1/localhost）→ 走原生 /api/chat（images 数组）
+    - 其他 OpenAI 兼容端点 → /chat/completions（image_url data URL）
+    图片统一压缩到最长边 1024，避免超大图超出模型内存。
+    未启用或配置不完整时返回空字符串（调用方按“无法识别”处理）。
+    """
+    cfg = load_config()
+    if not cfg.get("vision_enabled", False):
+        return ""
+    key = (cfg.get("vision_api_key") or "").strip()
+    base_url = (cfg.get("vision_base_url") or "").rstrip("/").strip()
+    model = (cfg.get("vision_model") or "").strip()
+    if not key or not base_url or not model:
+        print("[vision] 识图模型未配置完整（需 api_key + base_url + model），跳过识图", flush=True)
+        return ""
+    img_b64 = _load_image_b64(image_url)
+    if not img_b64:
+        return ""
+    is_ollama = "11434" in base_url or "127.0.0.1" in base_url or "localhost" in base_url
+    try:
+        if is_ollama:
+            # Ollama 原生多模态格式
+            api_url = base_url
+            if api_url.endswith("/v1"):
+                api_url = api_url[:-3]
+            print(f"[vision] 识图请求(Ollama) → {api_url}/api/chat | model: {model}", flush=True)
+            response = requests.post(
+                f"{api_url}/api/chat",
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "user", "content": "请用中文详细描述这张图片的内容，包括主体、文字、图表等关键信息。", "images": [img_b64]}
+                    ],
+                    "stream": False,
+                },
+                timeout=180,
+            )
+            if not response.ok:
+                print(f"[vision] 识图失败(Ollama) HTTP {response.status_code}: {response.text[:300]}", flush=True)
+                return ""
+            content = (response.json().get("message") or {}).get("content") or ""
+            return str(content).strip() or ""
+        # OpenAI 兼容格式
+        data_url = f"data:image/jpeg;base64,{img_b64}"
+        url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
+        print(f"[vision] 识图请求 → {url} | model: {model}", flush=True)
+        response = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "请用中文详细描述这张图片的内容，包括主体、文字、图表等关键信息。"},
+                            {"type": "image_url", "image_url": {"url": data_url}},
+                        ],
+                    }
+                ],
+                "max_tokens": 800,
+                "temperature": 0.2,
+            },
+            timeout=90,
+        )
+        if not response.ok:
+            print(f"[vision] 识图失败 HTTP {response.status_code}: {response.text[:300]}", flush=True)
+            return ""
+        data = response.json()
+        content = data.get("choices", [{}])[0].get("message", {}).get("content") or ""
+        return str(content).strip() or ""
+    except Exception as exc:
+        print(f"[vision] 识图异常: {type(exc).__name__}: {exc}", flush=True)
+        return ""
+
+
+@app.route("/api/upload_file", methods=["POST"])
+def api_upload_file():
+    """聊天附件上传：保存到 /static/uploads/chat/。
+
+    返回 {ok, url, name, type, size, content}：
+      - 图片 → type=image
+      - 文本类（py/md/txt/json 等）→ type=file 且附带前 50KB 文本内容
+      - 其他 → type=file
+    """
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify({"ok": False, "message": "未收到文件"}), 400
+    safe = secure_filename(f.filename)
+    if not safe:
+        return jsonify({"ok": False, "message": "非法文件名"}), 400
+    ext = Path(safe).suffix.lower()
+    data = f.read(MAX_UPLOAD_SIZE + 1)
+    if len(data) > MAX_UPLOAD_SIZE:
+        return jsonify({"ok": False, "message": f"文件过大，最大支持 {MAX_UPLOAD_SIZE // 1024 // 1024}MB"}), 400
+    CHAT_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    file_name = f"{int(time.time() * 1000)}_{safe}"
+    file_path = CHAT_UPLOAD_DIR / file_name
+    file_path.write_bytes(data)
+    att_type = "image" if ext in IMAGE_EXT else "file"
+    content = ""
+    if ext in TEXT_EXT:
+        try:
+            content = data[:50 * 1024].decode("utf-8", errors="replace")
+        except Exception:
+            content = ""
+    print(f"[upload_file] 已保存 {safe} → {file_path.name} ({len(data)} bytes, type={att_type})", flush=True)
+    return jsonify({
+        "ok": True,
+        "url": f"/static/uploads/chat/{file_name}",
+        "name": safe,
+        "type": att_type,
+        "size": len(data),
+        "content": content,
+    })
 
 
 def local_tts_audio(text: str) -> str | None:
@@ -3223,6 +3420,7 @@ def api_chat():
     lesson_folder = payload.get("lesson_folder") or ACTIVE_LESSON.get("folder")
     force_cloud = payload.get("force_cloud", False)
     explain_mode = payload.get("explain_mode", "")
+    attachments = payload.get("attachments") or []
     if not message:
         return jsonify({"error": "message is required"}), 400
     if not lesson_folder:
@@ -3259,17 +3457,57 @@ def api_chat():
         if "工具调用规则" not in system_prompt:
             print(f"[TOOL-DEBUG] >>> 警告: 系统提示词中缺少工具调用规则！", flush=True)
 
-        # 选择模型：强制云端时跳过本地模型
+        # 处理聊天附件：图片走识图模型提取内容，文本文件直接读取，合并进提问
+        effective_message = message
+        if attachments:
+            extra_parts = []
+            for att in attachments:
+                att_type = (att.get("type") or "file").strip().lower()
+                att_url = (att.get("url") or "").strip()
+                att_name = (att.get("name") or "").strip() or "附件"
+                att_content = (att.get("content") or "").strip()
+                if att_type == "image":
+                    desc = vision_describe(att_url, att_name)
+                    extra_parts.append(
+                        f"[用户上传图片：{att_name}]\n图片内容：{desc or '（未能识别图片内容）'}"
+                    )
+                else:
+                    body = att_content or "（文件内容为空或无法读取）"
+                    extra_parts.append(f"[用户上传文件：{att_name}]\n{body}")
+            if extra_parts:
+                effective_message = (
+                    "用户上传了以下附件，请结合附件内容回答用户的问题：\n\n"
+                    + "\n\n".join(extra_parts)
+                    + f"\n\n用户问题：{message}"
+                )
+
+        # 选择模型：按 chat_provider 提供方决定链路
+        #   auto → 本地 Ollama 优先，失败回退云端
+        #   ollama → 只用本地
+        #   cloud / openai_compatible（旧配置兼容）→ 只用云端
+        #   force_cloud（斜杠指令强制）→ 云端优先，失败回退本地
+        chat_cfg = load_config()
+        chat_provider = (chat_cfg.get("chat_provider") or "auto").strip().lower()
         if force_cloud:
             generated_answer = (
-                cloud_llm_reply(message, lesson_folder, history=history)
-                or local_ollama_reply(message, lesson_folder, history=history)
+                cloud_llm_reply(effective_message, lesson_folder, history=history)
+                or local_ollama_reply(effective_message, lesson_folder, history=history)
                 or fallback_answer
             )
-        else:
+        elif chat_provider in ("cloud", "openai_compatible"):
             generated_answer = (
-                local_ollama_reply(message, lesson_folder, history=history)
-                or cloud_llm_reply(message, lesson_folder, history=history)
+                cloud_llm_reply(effective_message, lesson_folder, history=history)
+                or fallback_answer
+            )
+        elif chat_provider == "ollama":
+            generated_answer = (
+                local_ollama_reply(effective_message, lesson_folder, history=history)
+                or fallback_answer
+            )
+        else:  # auto
+            generated_answer = (
+                local_ollama_reply(effective_message, lesson_folder, history=history)
+                or cloud_llm_reply(effective_message, lesson_folder, history=history)
                 or fallback_answer
             )
 
@@ -3416,7 +3654,7 @@ def api_chat():
         audio_url = local_tts_audio(clean_answer[:500]) if clean_answer else None
 
         conversation = load_conversation(lesson_folder)
-        conversation.append({"role": "user", "content": message, "timestamp": now_iso()})
+        conversation.append({"role": "user", "content": effective_message, "timestamp": now_iso()})
         # 存档：若有工具事件，不把 teacher 的工具触发语存进对话历史（避免下次对话里重复出现）
         if not tool_event and clean_answer_stored:
             conversation.append({"role": "assistant", "content": clean_answer_stored, "timestamp": now_iso()})
@@ -3557,11 +3795,12 @@ def api_exam_generate():
         }
         # 读取本课聊天记录，让题目基于真实对话内容动态生成
         chat_history = load_conversation(lesson_folder) if lesson_folder else []
+        lesson_provider = (cfg.get("lesson_provider") or "cloud").strip().lower()
         ollama_config = {
             "ollama_base_url": cfg.get("ollama_base_url", ""),
             "ollama_model": cfg.get("ollama_model", ""),
         }
-        if cfg.get("enable_local_ollama", True):
+        if lesson_provider == "ollama":
             generated = generate_quiz_with_ollama(
                 unit_content, personality_prompt, ollama_config, chat_history
             )

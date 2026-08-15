@@ -24,6 +24,7 @@ project/static/images/bg.upload.*
 project/static/images/avatar.upload.*
 project/static/audio/
 project/static/models/uploads/
+project/static/uploads/
 
 # ====== 缓存 / 日志 / 临时 ======
 cache/
