@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -234,6 +234,7 @@ def generate_quiz_with_model(
     unit_content: Dict[str, Any],
     personality_prompt: str = "",
     config: Dict[str, Any] | None = None,
+    chat_history: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Use the model to generate quiz questions in the personality style.
 
@@ -241,6 +242,8 @@ def generate_quiz_with_model(
         unit_content: Dict with unit title, summary, key_points, source_files.
         personality_prompt: Personality style prompt.
         config: Cloud config dict.
+        chat_history: Recent conversation history, used to make questions
+            reflect what was actually discussed.
 
     Returns:
         List of quiz question dicts.
@@ -274,6 +277,20 @@ def generate_quiz_with_model(
                 md_contents.append(f"### 资源：{sf.get('title', '')}\n{sf['markdown_content'][:3000]}")
         if md_contents:
             context_parts.append("\n".join(md_contents))
+
+    # 注入聊天记录：让题目基于本课师生实际对话内容动态生成
+    if chat_history:
+        recent = chat_history[-20:]
+        lines = []
+        for m in recent:
+            role = "学生" if m.get("role") == "user" else "老师"
+            content = (m.get("content") or "").strip()
+            if content:
+                if len(content) > 400:
+                    content = content[:400] + "…"
+                lines.append(f"{role}：{content}")
+        if lines:
+            context_parts.append("### 本课对话摘要\n" + "\n".join(lines))
 
     context_text = "\n\n".join(context_parts)
 
@@ -431,6 +448,7 @@ def generate_quiz_with_ollama(
     unit_content: Dict[str, Any],
     personality_prompt: str = "",
     config: Dict[str, Any] | None = None,
+    chat_history: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Use local Ollama model to generate quiz questions using exam_prompt_template."""
     config = config or {}
@@ -457,6 +475,21 @@ def generate_quiz_with_ollama(
                 md_contents.append(sf["markdown_content"][:3000])
         if md_contents:
             context_parts.append("参考资料全文：\n" + "\n---\n".join(md_contents))
+
+    # 注入聊天记录：让题目基于本课师生实际对话内容动态生成
+    if chat_history:
+        recent = chat_history[-20:]  # 只取最近 20 条，避免 prompt 过长
+        lines = []
+        for m in recent:
+            role = "学生" if m.get("role") == "user" else "老师"
+            content = (m.get("content") or "").strip()
+            if content:
+                # 截断过长的单条消息
+                if len(content) > 400:
+                    content = content[:400] + "…"
+                lines.append(f"{role}：{content}")
+        if lines:
+            context_parts.append("本课师生对话摘要（用于出题参考，应反映对话中讨论的知识点）：\n" + "\n".join(lines))
 
     context_text = "\n".join(context_parts)
     topic = unit_title or "课程测验"

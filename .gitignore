@@ -23,6 +23,7 @@ project/lessons/
 project/static/images/bg.upload.*
 project/static/images/avatar.upload.*
 project/static/audio/
+project/static/models/uploads/
 
 # ====== 缓存 / 日志 / 临时 ======
 cache/
@@ -34,8 +35,9 @@ cache/
 # ====== 外部工具（如果放在项目内） ======
 Textoon/
 ComfyUI/
-
+cache/
 # ====== IDE / 系统 ======
+
 .vscode/
 .idea/
 .DS_Store

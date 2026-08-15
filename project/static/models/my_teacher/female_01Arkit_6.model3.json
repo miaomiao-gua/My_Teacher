@@ -15,28 +15,6 @@
 		],
 		"Physics": "female_01Arkit_6.physics3.json",
 		"DisplayInfo": "female_01Arkit_6.cdi3.json",
-		"HitAreas": [
-			{
-				"Name": "Head",
-				"Id": "Part5"
-			},
-			{
-				"Name": "Body",
-				"Id": "Part7"
-			},
-			{
-				"Name": "Legs",
-				"Id": "Part8"
-			},
-			{
-				"Name": "HandR",
-				"Id": "Part9"
-			},
-			{
-				"Name": "HandL",
-				"Id": "Part10"
-			}
-		],
 		"Expressions": [
 			{
 				"Name": "expression1",
@@ -111,10 +89,7 @@
 		{
 			"Target": "Parameter",
 			"Name": "EyeBlink",
-			"Ids": [
-				"ParamEyeLOpen",
-				"ParamEyeROpen"
-			]
+			"Ids": []
 		},
 		{
 			"Target": "Parameter",

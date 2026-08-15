@@ -1,8 +1,13 @@
 import json
+import logging
 import os
 import random
 import re
+import shutil
+import sys
 import time
+import traceback
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
@@ -27,7 +32,7 @@ from file_utils import (
     sanitize_topic,
     unit_dir,
 )
-from lesson_prep import prepare_lesson, generate_quiz_with_model, generate_quiz_with_ollama
+from lesson_prep import _normalize_unit, prepare_lesson, generate_quiz_with_model, generate_quiz_with_ollama
 
 app = Flask(__name__)
 
@@ -38,10 +43,119 @@ def no_cache_headers(response):
     response.headers['Expires'] = '0'
     return response
 
+
+# ============================
+# 全局请求/错误日志
+# ============================
+@app.before_request
+def _log_request():
+    """每个 HTTP 请求进来时记一条（POST/PUT/DELETE 也带上 body 摘要）。"""
+    try:
+        method = request.method
+        path = request.path
+        # 只记 API + 静态资源忽略
+        if not path.startswith("/api/"):
+            return
+        # 不记 SSE 长连接（会刷屏）
+        if path.startswith("/api/chat"):
+            app.logger.debug(f"📥 {method} {path}")
+            return
+        body_summary = ""
+        if method in ("POST", "PUT", "DELETE", "PATCH"):
+            try:
+                raw = request.get_data(cache=True, as_text=True)[:500]
+                body_summary = f"  body={raw}" if raw else ""
+            except Exception:
+                pass
+        app.logger.info(f"📥 {method} {path}{body_summary}")
+    except Exception as exc:
+        app.logger.warning(f"_log_request failed: {exc}")
+
+
+@app.after_request
+def _log_response(response):
+    """每个 HTTP 请求返回时记一条状态码。"""
+    try:
+        path = request.path
+        if not path.startswith("/api/"):
+            return response
+        if path.startswith("/api/chat"):
+            return response
+        status = response.status_code
+        if status >= 500:
+            app.logger.error(f"📤 {status} {request.method} {path}")
+        elif status >= 400:
+            app.logger.warning(f"📤 {status} {request.method} {path}")
+        else:
+            app.logger.info(f"📤 {status} {request.method} {path}")
+    except Exception:
+        pass
+    return response
+
+
+@app.errorhandler(Exception)
+def _handle_exception(exc):
+    """捕获所有未处理异常，记录堆栈 + 返回 500。"""
+    tb = traceback.format_exc()
+    app.logger.error(f"❌ 未处理异常 ({request.method} {request.path}): {exc}")
+    app.logger.error(tb)
+    # 返回 JSON
+    if request.path.startswith("/api/"):
+        return jsonify({"error": f"{type(exc).__name__}: {exc}", "traceback": tb.splitlines()[-3:]}), 500
+    # HTML 路由返回简单错误页
+    return Response(f"<h1>500</h1><pre>{tb}</pre>", status=500, mimetype="text/html")
+
 BASE_DIR = Path(__file__).resolve().parent
 LESSONS_DIR = BASE_DIR / "lessons"
 LESSONS_DIR.mkdir(exist_ok=True)
 CONFIG_PATH = BASE_DIR / "config.json"
+
+# ============================
+# 结构化日志（输出到 stdout + 文件）
+# ============================
+LOG_DIR = BASE_DIR.parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+LOG_FILE = LOG_DIR / "app.log"
+
+# 自定义 formatter：带颜色 + 时间戳 + 模块 + 行号
+class _ColorFormatter(logging.Formatter):
+    COLORS = {
+        logging.DEBUG:    "\033[90m",   # 灰
+        logging.INFO:     "\033[36m",   # 青
+        logging.WARNING:  "\033[33m",   # 黄
+        logging.ERROR:    "\033[31m",   # 红
+        logging.CRITICAL: "\033[1;31m", # 粗红
+    }
+    RESET = "\033[0m"
+    def format(self, record):
+        color = self.COLORS.get(record.levelno, "")
+        ts = datetime.fromtimestamp(record.created).strftime("%H:%M:%S.%f")[:-3]
+        msg = super().format(record)
+        return f"{color}[{ts}]{self.RESET} {msg}"
+
+_console_handler = logging.StreamHandler(sys.stdout)
+_console_handler.setFormatter(_ColorFormatter("%(levelname)-7s %(name)s:%(lineno)d  %(message)s"))
+
+_file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+_file_handler.setFormatter(logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d  %(message)s"
+))
+
+app.logger.handlers.clear()
+app.logger.addHandler(_console_handler)
+app.logger.addHandler(_file_handler)
+app.logger.setLevel(logging.DEBUG)
+
+logging.getLogger("werkzeug").handlers.clear()
+logging.getLogger("werkzeug").addHandler(_console_handler)
+logging.getLogger("werkzeug").addHandler(_file_handler)
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
+app.logger.info("=" * 60)
+app.logger.info("🚀 My Teacher app started")
+app.logger.info(f"📝 日志文件: {LOG_FILE}")
+app.logger.info(f"📂 课程目录: {LESSONS_DIR}")
+app.logger.info("=" * 60)
 
 ACTIVE_LESSON = {
     "folder": None,
@@ -50,6 +164,8 @@ ACTIVE_LESSON = {
     "prepared": {},
     "conversation": [],
     "progress": {},
+    "preview_plan": None,   # 备课预览时的临时数据（用户确认后才写入磁盘）
+    "preview_topic": None,  # 预览对应的课程主题
 }
 
 
@@ -119,6 +235,19 @@ def default_config() -> Dict[str, Any]:
         "portrait_scale": 1.15,      # 缩放倍率（0.5-3.0）
         "portrait_float_amplitude": 8,  # 上下浮动幅度（像素 0-40）
         "portrait_float_enabled": True,  # 是否启用浮动动画
+        # 情绪映射（Open-LLM-VTuber 协议）：emotion 名 → 模型 expression index
+        # 在前端设置面板可调整；留空则用默认映射
+        "emotion_map": {},
+        # 回复分段（Galgame 逐段展示）：
+        # segment_marker 为纯文本分段符，模型在回复中用它把内容切成多段；
+        # 它【不是】Markdown 代码块语言标记，提示词中已强制要求模型不要误用。
+        "segment_enabled": True,
+        "segment_marker": "\\c",
+        "segment_max_lines": 6,
+        # 右侧聊天侧栏宽度（百分比 25-60，CSS 用 flex-basis 应用）
+        "sidebar_width": 36,
+        # 自定义 Live2D 模型（上传后更新此 URL；空则用内置默认模型）
+        "live2d_model_url": "/static/models/my_teacher/female_01Arkit_6.model3.json",
     }
 
 
@@ -341,6 +470,40 @@ def load_lesson_metadata(lesson_folder: str | None) -> Dict[str, Any]:
         return {}
 
 
+def _ai_tool_rules() -> List[str]:
+    """AI 参数化工具（终端/图片/黑板）调用规则，注入系统提示词。"""
+    return [
+        "- 需要展示代码/演示运行结果时，可在回复末尾输出工具标记 `[TOOL:{\"type\":\"show_terminal\",\"language\":\"python\",\"code\":\"print('Hello')\"}]` 弹出终端。language 为代码语言（python/java/c/cpp/javascript/shell 等），code 为示例代码。",
+        "- 需要展示图片时，可在回复末尾输出 `[TOOL:{\"type\":\"show_image\",\"index\":1}]` 或 `[TOOL:{\"type\":\"show_image\",\"filename\":\"xxx.png\"}]` 弹出图片面板。index 为当前单元图片库序号（从 0 开始，省略则显示第一张）；filename 为图片文件名，会从当前单元图片中按文件名匹配（匹配不到则显示第一张）。",
+        "- 需要板书推导或画图时，可在回复末尾输出 `[TOOL:{\"type\":\"show_board\",\"content\":\"推导：\\\\n$$E=mc^2$$\\\\n{graph:y=x^2,x:-2..2}\"}]` 弹出黑板。content 支持：普通文本（打字机逐字显示）；`$$...$$` 数学公式（LaTeX）；`{graph:y=表达式,x:最小值..最大值}` 函数曲线；`{line:x1,y1-x2,y2}` 线段（坐标 0-100）。",
+        "- 工具标记必须整体独占一行且仅出现一次；`[TOOL:{...}]` 内部不要换行（换行用 \\n 表示）。",
+    ]
+
+
+def _ai_emotion_rules() -> List[str]:
+    """情绪标签（Open-LLM-VTuber 协议）使用规则，注入系统提示词。
+
+    让本地模型按语义在回复中插入情绪标签，前端据此自动切换 Live2D 表情与动作。
+    """
+    return [
+        "- 你可以在回复的合适位置（句首或段落开头）插入情绪标签，让角色表情自然变化。",
+        "- 支持两种格式（任选其一即可，不要混用）：",
+        "  * 简写：`[joy]` / `[sadness]` / `[anger]` / `[surprise]` / `[fear]` / `[disgust]` / `[neutral]` / `[smirk]`",
+        "  * 长写：`[EMOTION:happy]` / `[EMOTION:sad]` / `[EMOTION:angry]` / `[EMOTION:think]` / `[EMOTION:surprised]`",
+        "- 标签必须独占一整行（前后各留空行），方便流式解析。",
+        "- 标签语义：",
+        "  * `joy`/`happy`：开心、鼓励、夸赞、答对题时",
+        "  * `sadness`/`sad`：遗憾、同情、安慰",
+        "  * `anger`/`angry`：生气、纠正、严肃提醒",
+        "  * `surprise`/`surprised`：惊讶、恍然大悟",
+        "  * `think`：讲解推导、停顿思考",
+        "  * `neutral`：默认平静状态",
+        "  * `smirk`：俏皮、轻嘲",
+        "  * `fear`/`disgust`：极少用",
+        "- 一段回复内一般 0-2 个标签就够，不要刷屏。",
+    ]
+
+
 def build_system_prompt(lesson_folder: str | None) -> str:
     metadata = load_lesson_metadata(lesson_folder)
     cfg = load_config()
@@ -379,6 +542,8 @@ def build_system_prompt(lesson_folder: str | None) -> str:
             "- 需要肢体动作配合教学时，可在回复末尾单独输出动作标记 `[ACTION:point]`（指向）、`[ACTION:blackboard]`（拉黑板）、`[ACTION:hello]`（打招呼）、`[ACTION:think]`（思考）、`[ACTION:listen]`（倾听）、`[ACTION:speak]`（说话）。动作标记不显示给学生，仅触发教师角色的动画。严禁在正文中用文字描述动作过程（如“我拿出黑板”“老师指向”“转过身”等），动作只能通过标记触发，正文只讲课程内容。",
             "- 需要表达情绪时，可在回复末尾输出情绪标记 `[EMOTION:happy]`（高兴）、`[EMOTION:think]`（思考）、`[EMOTION:surprised]`（惊讶）、`[EMOTION:angry]`（生气）、`[EMOTION:sad]`（难过）、`[EMOTION:neutral]`（平静）。情绪标记同样不显示给学生，仅控制教师角色的表情。",
         ]
+        tool_lines.extend(_ai_tool_rules())
+        tool_lines.extend(_ai_emotion_rules())
         try:
             context = load_course_context(lesson_folder)
             if context:
@@ -459,9 +624,16 @@ def build_system_prompt(lesson_folder: str | None) -> str:
     tool_lines.append("- 标记必须独占一行或位于回复末尾，且仅出现一次；不要把标记嵌在代码块或表格里。")
     tool_lines.append("- 需要肢体动作配合教学时，可在回复末尾单独输出动作标记 `[ACTION:point]`（指向）、`[ACTION:blackboard]`（拉黑板）、`[ACTION:hello]`（打招呼）、`[ACTION:think]`（思考）、`[ACTION:listen]`（倾听）、`[ACTION:speak]`（说话）。动作标记不显示给学生，仅触发教师角色的动画。严禁在正文中用文字描述动作过程（如“我拿出黑板”“老师指向”“转过身”等），动作只能通过标记触发，正文只讲课程内容。")
     tool_lines.append("- 需要表达情绪时，可在回复末尾输出情绪标记 `[EMOTION:happy]`（高兴）、`[EMOTION:think]`（思考）、`[EMOTION:surprised]`（惊讶）、`[EMOTION:angry]`（生气）、`[EMOTION:sad]`（难过）、`[EMOTION:neutral]`（平静）。情绪标记同样不显示给学生，仅控制教师角色的表情。")
+    tool_lines.extend(_ai_tool_rules())
+    tool_lines.extend(_ai_emotion_rules())
     parts.append("\n".join(tool_lines))
 
     # 教学行为指引：开课时先系统讲解知识点
+    # 分段标记从配置读取（纯文本分段符，非代码块语言标记）
+    segment_enabled = cfg.get("segment_enabled", True)
+    segment_marker = (cfg.get("segment_marker") or "\\c").replace("\\n", "\n")
+    segment_max_lines = int(cfg.get("segment_max_lines", 6) or 6)
+
     teach_guide = [
         "【教学行为指引】",
         "- 当学生请求「开始上课」「讲下一课」或这是新单元的首次对话时，你必须先系统性地讲解本课的全部主要知识点。",
@@ -470,21 +642,28 @@ def build_system_prompt(lesson_folder: str | None) -> str:
         "- 全部知识点讲完后，询问学生是否有疑问；若学生表示理解，再输出 `[TOOL:start_exam]` 触发测验。",
         "- 不要跳跃式教学，不要只抛问题不给答案，先讲透知识再互动。",
         "- 当学生问的问题超出当前课时范围时，可适当涉及相关的前后知识点，但要保持以当前课时为重点。",
-        "- 【分段输出（重要）】你必须使用 `\\c` 标记将回复分成多个小段，每段只讲一个知识点或一个完整意思。",
-        "  规则：",
-        "  1. 每讲完一个知识点、一个公式、或一个示例后，必须插入 `\\c`。",
-        "  2. 每段控制在 3~6 行以内，不要一次性输出大段文字。",
-        "  3. `\\c` 必须独占一行（前后有换行），不要嵌在句子中间。",
-        "  4. LaTeX 公式必须完整地在同一段内输出，绝不能在公式中间插入 `\\c`。",
-        "  5. 代码块（```...```）、表格（|...|）、HTML 标签必须完整闭合后才能插入 `\\c`。",
-        "  6. 列表项必须整组完成后才能插入 `\\c`，不要在列表中间插入。",
-        "  7. 插入 `\\c` 前请自检：当前是否有未闭合的 `$`、`$$`、`\\(`、`\\[`、``` 、`|` 等标记？如果有，必须先闭合再插入 `\\c`。",
-        "  8. 最后一段末尾不需要 `\\c`。",
-        "  示例：",
-        "  第一段：讲解概念A\\c",
-        "  第二段：给出公式和示例\\c",
-        "  第三段：总结并提问",
     ]
+    if segment_enabled:
+        teach_guide.extend([
+            f"- 【分段输出（重要）】你必须使用纯文本分段标记 {segment_marker} 将回复分成多个小段，每段只讲一个知识点或一个完整意思。",
+            "  规则：",
+            f"  1. 每讲完一个知识点、一个公式、或一个示例后，必须插入 {segment_marker}。",
+            f"  2. 每段控制在 1~{segment_max_lines} 行以内，不要一次性输出大段文字。",
+            f"  3. {segment_marker} 必须独占一行（前后有换行），不要嵌在句子中间。",
+            f"  4. LaTeX 公式必须完整地在同一段内输出，绝不能在公式中间插入 {segment_marker}。",
+            f"  5. 代码块（```...```）、表格（|...|）、HTML 标签必须完整闭合后才能插入 {segment_marker}。",
+            f"  6. 列表项必须整组完成后才能插入 {segment_marker}，不要在列表中间插入。",
+            f"  7. 插入 {segment_marker} 前请自检：当前是否有未闭合的 `$`、`$$`、`\\(`、`\\[`、``` 、`|` 等标记？如果有，必须先闭合再插入 {segment_marker}。",
+            f"  8. 最后一段末尾不需要 {segment_marker}。",
+            "  ⚠️【易错警告 - 必须遵守】",
+            f"  分段标记 {segment_marker} 是【纯文本分隔符】（由两个字符组成：反斜杠 \\ 和字母 c），【不是】 Markdown 代码块的语言标记！",
+            "  - 严禁输出 ```c、```、```python 等反引号围栏（```）作为分段符，那会破坏前端 Markdown 渲染。",
+            "  - 代码示例请正常使用成对的反引号围栏（```语言 ... ```），但分段时【只能】用 \\c 单独成行。",
+            f"  示例：",
+            f"  第一段：讲解概念A{segment_marker}",
+            f"  第二段：给出公式和示例{segment_marker}",
+            f"  第三段：总结并提问",
+        ])
     parts.append("\n".join(teach_guide))
 
     return "\n\n".join(parts)
@@ -796,6 +975,63 @@ def api_config_set():
     return jsonify({"status": "ok", "config": config})
 
 
+# 默认 Live2D 模型 URL（与前端 templates/index.html 中的硬编码保持一致）
+_DEFAULT_LIVE2D_MODEL_URL = "/static/models/my_teacher/female_01Arkit_6.model3.json"
+
+
+def _resolve_live2d_model_path(model_url: str) -> Path | None:
+    """把 URL 形式的模型路径解析到磁盘路径。"""
+    if not model_url:
+        model_url = _DEFAULT_LIVE2D_MODEL_URL
+    # 去掉 query string
+    clean = model_url.split("?", 1)[0]
+    if not clean.startswith("/static/"):
+        return None
+    rel = clean[len("/static/"):]
+    return (BASE_DIR / "static" / rel).resolve()
+
+
+@app.route("/api/live2d/model_info", methods=["GET"])
+def api_live2d_model_info():
+    """返回当前 Live2D 模型可用的 expressions 和 motions，供前端 emotionMap 配置用。"""
+    model_url = (request.args.get("url") or _DEFAULT_LIVE2D_MODEL_URL).strip()
+    model_path = _resolve_live2d_model_path(model_url)
+    if not model_path or not model_path.exists():
+        return jsonify({"error": "model not found", "url": model_url}), 404
+    try:
+        data = json.loads(model_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        return jsonify({"error": f"parse failed: {e}"}), 500
+    fr = data.get("FileReferences", {}) or {}
+    expressions: list[dict] = []
+    for idx, e in enumerate(fr.get("Expressions", []) or []):
+        expressions.append({
+            "index": idx,
+            "name": e.get("Name") or f"expression{idx}",
+            "file": e.get("File") or "",
+        })
+    motions: dict[str, list[dict]] = {}
+    motions_raw = fr.get("Motions", {}) or {}
+    for group, items in motions_raw.items():
+        motions[group] = [
+            {"index": i, "file": (it.get("File") or "")} for i, it in enumerate(items or [])
+        ]
+    hit_areas: list[dict] = []
+    for h in fr.get("HitAreas", []) or []:
+        hit_areas.append({"name": h.get("Name", ""), "id": h.get("Id", "")})
+    return jsonify({
+        "url": model_url,
+        "expressions": expressions,
+        "motions": motions,
+        "hit_areas": hit_areas,
+        # Open-LLM-VTuber 默认情绪映射（与文档一致）
+        "default_emotion_map": {
+            "neutral": 0, "happy": 3, "sad": 1, "angry": 2, "surprised": 3,
+            "fear": 1, "disgust": 2, "smirk": 3, "think": 0,
+        },
+    })
+
+
 @app.route("/api/config/test", methods=["POST"])
 def api_config_test():
     payload = request.get_json(silent=True) or {}
@@ -849,6 +1085,11 @@ ALLOWED_AVATAR_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
 
 # 文件大小限制：16MB
 MAX_UPLOAD_SIZE = 16 * 1024 * 1024
+
+# 模型上传大小限制：100MB（Live2D 模型含贴图/动作资源）
+MAX_MODEL_UPLOAD_SIZE = 100 * 1024 * 1024
+# 自定义模型保存目录
+UPLOAD_MODELS_DIR = BASE_DIR / "static" / "models" / "uploads"
 
 
 def _get_file_ext(file, allowed_ext=None) -> str:
@@ -1034,6 +1275,78 @@ def api_get_board(lesson_folder: str):
         except Exception:
             pass
     return jsonify({"ok": True, "board_url": board_url, "lesson_folder": lesson_folder})
+
+
+# ============== 单元图片资源（每个单元文件夹下的图片） ==============
+
+@app.route("/api/lesson/<path:lesson_folder>/unit-images", methods=["GET"])
+def api_lesson_unit_images(lesson_folder: str):
+    """列出当前激活单元对应的图片资源。
+    图片存放位置：
+      - 优先：lessons/<folder>/units/<unit_index>/images/
+      - 兜底：lessons/<folder>/images/  （旧格式）
+    """
+    if not lesson_folder or "/" in lesson_folder or "\\" in lesson_folder or ".." in lesson_folder:
+        return jsonify({"ok": False, "message": "非法的课程名"}), 400
+
+    lesson_dir = LESSONS_DIR / lesson_folder
+    config_path = lesson_dir / "config.json"
+    cur_idx = 0
+    cur_title = ""
+    if config_path.exists():
+        try:
+            cfg = json.loads(config_path.read_text(encoding="utf-8"))
+            units = cfg.get("units") or []
+            if units:
+                progress_path = lesson_dir / "progress.json"
+                if progress_path.exists():
+                    try:
+                        prog = json.loads(progress_path.read_text(encoding="utf-8"))
+                        cur_idx = int(prog.get("current_unit", 0) or 0)
+                    except Exception:
+                        cur_idx = 0
+                if 0 <= cur_idx < len(units):
+                    cur_title = units[cur_idx].get("title", "")
+        except Exception:
+            pass
+
+    # 候选目录
+    candidates = [
+        lesson_dir / "units" / f"unit_{cur_idx + 1}" / "images",
+        lesson_dir / "units" / str(cur_idx) / "images",
+        lesson_dir / "images",  # 兜底
+    ]
+    image_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+
+    items = []
+    seen = set()
+    for d in candidates:
+        if not d.exists() or not d.is_dir():
+            continue
+        for f in sorted(d.iterdir()):
+            if not f.is_file():
+                continue
+            if f.suffix.lower() not in image_exts:
+                continue
+            if f.name in seen:
+                continue
+            seen.add(f.name)
+            url = f"/api/lesson/{lesson_folder}/asset/{f.name}"
+            items.append({
+                "filename": f.name,
+                "url": url,
+                "title": f.stem,
+                "folder": str(d.relative_to(lesson_dir)),
+            })
+
+    return jsonify({
+        "ok": True,
+        "lesson_folder": lesson_folder,
+        "unit_index": cur_idx,
+        "unit_title": cur_title,
+        "images": items,
+        "total": len(items),
+    })
 
 
 @app.route("/api/reset_avatar", methods=["POST"])
@@ -1230,6 +1543,100 @@ def api_reset_background():
     return jsonify({"ok": True, "bg_theme": "warm", "bg_url": "", "config": config})
 
 
+# ============== 自定义 Live2D 模型上传 ==============
+
+@app.route("/api/upload_model", methods=["POST"])
+def api_upload_model():
+    """上传自定义 Live2D 模型。
+
+    支持两种格式：
+    - .zip：内含 .model3.json 及其贴图/动作资源，自动解压。
+    - .model3.json：单个模型配置文件（不含资源，一般配合完整目录使用）。
+    成功后更新配置 live2d_model_url，前端刷新即加载新模型。
+    """
+    if "model" not in request.files:
+        return jsonify({"ok": False, "message": "未选择文件"}), 400
+    file = request.files["model"]
+    if not file or not file.filename:
+        return jsonify({"ok": False, "message": "文件名为空"}), 400
+
+    file.seek(0, 2)
+    file_size = file.tell()
+    file.seek(0)
+    if file_size > MAX_MODEL_UPLOAD_SIZE:
+        return jsonify({
+            "ok": False,
+            "message": f"文件过大（{file_size // 1024 // 1024}MB），最大支持 {MAX_MODEL_UPLOAD_SIZE // 1024 // 1024}MB",
+        }), 400
+
+    raw_name = os.path.basename(file.filename)
+    safe_base = re.sub(r"[^A-Za-z0-9_.-]", "_", raw_name)
+    ext = os.path.splitext(safe_base)[1].lower()
+    # 支持：zip 模型包 / Cubism3+ 的 .model3.json / Cubism2 的 model.json / .moc3 / .moc
+    if ext not in (".zip", ".json", ".moc3", ".moc"):
+        return jsonify({"ok": False, "message": "仅支持 .zip（模型包）或 .model3.json / .moc3（Cubism 3/4/5）、model.json / .moc（Cubism 2.1）"}), 400
+
+    UPLOAD_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    folder = UPLOAD_MODELS_DIR / f"{int(time.time())}_{safe_base.split('.')[0]}"
+    folder.mkdir(parents=True, exist_ok=True)
+
+    try:
+        if ext == ".zip":
+            zip_path = folder / "model.zip"
+            file.save(zip_path)
+            with zipfile.ZipFile(zip_path) as zf:
+                members = []
+                for m in zf.namelist():
+                    norm = m.replace("\\", "/")
+                    if norm.startswith("__MACOSX") or norm.endswith("/"):
+                        continue
+                    if norm.startswith("/") or norm.split("/").count("..") or ".." in norm.split("/"):
+                        continue  # 跳过绝对路径 / 路径穿越成员
+                    members.append(m)
+                # Cubism 3/4/5：*.model3.json；Cubism 2.1：model.json / *.model.json
+                model3_candidates = [m for m in members if m.lower().endswith(".model3.json")]
+                model2_candidates = [m for m in members
+                                     if m.lower().endswith("model.json") and not m.lower().endswith("model3.json")]
+                if not model3_candidates and not model2_candidates:
+                    return jsonify({"ok": False, "message": "zip 内未找到 .model3.json（Cubism 3/4/5）或 model.json（Cubism 2.1）"}), 400
+                for m in members:
+                    dest = folder / m.replace("\\", "/")
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(m) as src, open(dest, "wb") as out:
+                        out.write(src.read())
+            zip_path.unlink(missing_ok=True)
+            rel_path = (model3_candidates or model2_candidates)[0].replace("\\", "/")
+            model_url = f"/static/models/uploads/{folder.name}/{rel_path}"
+        else:
+            # 单文件：按原文件名保存（model3.json / model.json / .moc3 / .moc）
+            # 注意：moc3/moc 只是资源，一般需配合完整模型包；此处原样保存以便同目录资源可用
+            dest = folder / safe_base
+            file.save(dest)
+            model_url = f"/static/models/uploads/{folder.name}/{safe_base}"
+            # 单文件大概率缺少贴图/动作，明确警告
+            warning = ("⚠️ 单独上传的模型文件无法独立显示（缺少贴图/动作资源）。"
+                       "请把整个模型文件夹压缩成 .zip（包含 model3.json、moc3、贴图目录）再上传。")
+            save_config({"live2d_model_url": model_url})
+            return jsonify({"ok": True, "url": model_url, "warning": warning})
+    except Exception as exc:
+        shutil.rmtree(folder, ignore_errors=True)
+        return jsonify({"ok": False, "message": f"模型处理失败: {exc}"}), 500
+
+    save_config({"live2d_model_url": model_url})
+    return jsonify({"ok": True, "url": model_url})
+
+
+@app.route("/api/reset_model", methods=["POST"])
+def api_reset_model():
+    """恢复默认内置模型，并清理所有已上传的自定义模型目录。"""
+    if UPLOAD_MODELS_DIR.exists():
+        for d in UPLOAD_MODELS_DIR.iterdir():
+            if d.is_dir():
+                shutil.rmtree(d, ignore_errors=True)
+    save_config({"live2d_model_url": _DEFAULT_LIVE2D_MODEL_URL})
+    return jsonify({"ok": True, "url": _DEFAULT_LIVE2D_MODEL_URL})
+
+
 # ============== 课程资源动态路由（立绘 / 背景） ==============
 
 @app.route("/api/lesson/<path:lesson_folder>/asset/<path:filename>")
@@ -1339,14 +1746,24 @@ def api_lessons():
                     metadata = {}
             progress = load_progress(child.name)
             units = metadata.get("units") or []
+            total_units = len(units)
+            current_unit = int(progress.get("current_unit", 0) or 0)
+            completed_units = progress.get("completed_units") or []
+            if total_units > 0:
+                progress_pct = min(100, round(100 * len(completed_units) / total_units))
+            else:
+                progress_pct = 0
             items.append(
                 {
                     "name": child.name,
                     "topic": metadata.get("topic") or child.name,
+                    "assistant_name": metadata.get("assistant_name") or "",
                     "created_at": datetime.fromtimestamp(child.stat().st_ctime).astimezone().isoformat(timespec="seconds"),
                     "last_access": progress.get("last_access") or "",
-                    "units_count": len(units),
-                    "current_unit": int(progress.get("current_unit", 0) or 0),
+                    "units_count": total_units,
+                    "current_unit": current_unit,
+                    "completed_units": completed_units,
+                    "progress_pct": progress_pct,
                 }
             )
     return jsonify({"lessons": items})
@@ -1388,56 +1805,247 @@ def api_lesson_delete(lesson_folder: str):
     return jsonify({"status": "ok", "deleted": lesson_folder})
 
 
+@app.route("/api/lessons/<path:lesson_folder>/rename", methods=["POST"])
+def api_lesson_rename(lesson_folder: str):
+    """重命名课程目录（不允许修改 topic 元数据，避免历史数据错位）。"""
+    if not lesson_folder or "/" in lesson_folder or "\\" in lesson_folder or ".." in lesson_folder:
+        return jsonify({"error": "非法的课程名"}), 400
+    target = LESSONS_DIR / lesson_folder
+    try:
+        resolved = target.resolve()
+        base_resolved = LESSONS_DIR.resolve()
+        if not str(resolved).startswith(str(base_resolved)):
+            return jsonify({"error": "目标路径不在课程目录内"}), 400
+    except Exception:
+        return jsonify({"error": "路径解析失败"}), 400
+    if not target.exists() or not target.is_dir():
+        return jsonify({"error": "课程不存在"}), 404
+
+    payload = request.get_json(silent=True) or {}
+    new_name = (payload.get("new_name") or "").strip()
+    if not new_name:
+        return jsonify({"error": "new_name 必填"}), 400
+    if "/" in new_name or "\\" in new_name or ".." in new_name:
+        return jsonify({"error": "新名称非法"}), 400
+    # 名称规整：去除非法字符
+    new_name = sanitize_topic(new_name)
+    if not new_name:
+        return jsonify({"error": "新名称为空"}), 400
+    # 若同名，仅加数字后缀
+    final = new_name
+    suffix = 1
+    while (LESSONS_DIR / final).exists() and final != lesson_folder:
+        suffix += 1
+        final = f"{new_name}_{suffix}"
+    if final == lesson_folder:
+        return jsonify({"status": "ok", "renamed": lesson_folder, "new_name": lesson_folder})
+    new_path = LESSONS_DIR / final
+    try:
+        target.rename(new_path)
+    except Exception as exc:
+        return jsonify({"error": f"重命名失败：{exc}"}), 500
+
+    # 若重命名当前激活课程，同步更新 ACTIVE_LESSON.folder
+    if ACTIVE_LESSON.get("folder") == lesson_folder:
+        ACTIVE_LESSON["folder"] = final
+
+    return jsonify({"status": "ok", "renamed": lesson_folder, "new_name": final})
+
+
 @app.route("/api/prepare_lesson", methods=["POST"])
 def api_prepare_lesson():
+    """AI 备课预览（不保存到磁盘，用户确认后再保存）。"""
     payload = request.get_json(silent=True) or {}
     topic = (payload.get("topic") or "").strip()
     if not topic:
         return jsonify({"error": "topic is required"}), 400
 
     cfg = load_config()
-    # 课程级覆盖：允许新建课程时指定模型/音色
     if payload.get("cloud_model"):
         cfg["cloud_model"] = payload["cloud_model"]
     if payload.get("tts_cloud_voice"):
         cfg["tts_cloud_voice"] = payload["tts_cloud_voice"]
+
     lesson_plan = prepare_lesson(topic, config=cfg)
+    lesson_folder = build_lesson_folder_name(topic)
+
+    # 预览模式：存入 ACTIVE_LESSON，用户确认后再写入磁盘
+    ACTIVE_LESSON["preview_plan"] = lesson_plan
+    ACTIVE_LESSON["preview_topic"] = topic
+    ACTIVE_LESSON["preview_assistant_name"] = (
+        payload.get("assistant_name") or cfg.get("assistant_name") or "艾琳老师"
+    ).strip()
+    ACTIVE_LESSON["preview_personality_prompt"] = (
+        payload.get("personality_prompt") or cfg.get("personality_prompt") or "你是一位温柔、专业、耐心的 AI 学习导师。"
+    ).strip()
+    ACTIVE_LESSON["preview_tts_voice"] = (
+        payload.get("tts_voice") or cfg.get("tts_voice") or cfg.get("default_voice") or "zh-CN-XiaoxiaoNeural"
+    ).strip()
+    ACTIVE_LESSON["preview_tts_cloud_voice"] = (
+        payload.get("tts_cloud_voice") or cfg.get("tts_cloud_voice") or ""
+    ).strip()
+
+    return jsonify({"lesson_folder": lesson_folder, "plan": lesson_plan})
+
+
+@app.route("/api/apply_lesson", methods=["POST"])
+def api_apply_lesson():
+    """将预览中的课程数据（可能已编辑）保存到磁盘并进入课程。"""
+    payload = request.get_json(silent=True) or {}
+    edited_plan = payload.get("plan")   # 前端可能已编辑过 units/key_points 等
+
+    preview_plan = ACTIVE_LESSON.get("preview_plan")
+    topic = ACTIVE_LESSON.get("preview_topic")
+
+    if not preview_plan or not topic:
+        return jsonify({"error": "没有可应用的课程预览，请重新备课"}), 400
+
+    # 用前端编辑后的 plan 覆盖（若有）
+    plan_to_save = edited_plan if isinstance(edited_plan, dict) else preview_plan
+
+    cfg = load_config()
     lesson_folder = build_lesson_folder_name(topic)
     ensure_lesson_files(lesson_folder)
     lesson_dir = ensure_lesson_dir(lesson_folder)
-    personality_prompt = (payload.get("personality_prompt") or cfg.get("personality_prompt") or "你是一位温柔、专业、耐心的 AI 学习导师。").strip()
-    assistant_name = (payload.get("assistant_name") or cfg.get("assistant_name") or "艾琳老师").strip()
-    tts_voice = (payload.get("tts_voice") or cfg.get("tts_voice") or cfg.get("default_voice") or "zh-CN-XiaoxiaoNeural").strip()
-    tts_cloud_voice = (payload.get("tts_cloud_voice") or cfg.get("tts_cloud_voice") or "").strip()
-
-    ACTIVE_LESSON["folder"] = lesson_folder
-    ACTIVE_LESSON["resources"] = lesson_plan.get("resources", [])
-    ACTIVE_LESSON["prepared"] = lesson_plan
-    ACTIVE_LESSON["conversation"] = load_conversation(lesson_folder)
-    ACTIVE_LESSON["progress"] = save_progress(lesson_folder, default_progress())
-
-    # units 由 lesson_prep 保证一定存在（兜底成单课）
-    units = lesson_plan.get("units", [])
+    units = plan_to_save.get("units", [])
     save_metadata(
         lesson_dir,
         {
             "course_name": lesson_folder,
             "topic": topic,
-            "assistant_name": assistant_name,
-            "personality_prompt": personality_prompt,
-            "tts_voice": tts_voice,
-            "tts_cloud_voice": tts_cloud_voice,
-            "voice_config": {"voice": tts_voice, "enabled": bool(cfg.get("tts_enabled", False))},
-            "syllabus": lesson_plan.get("syllabus", ""),
-            "key_points": lesson_plan.get("key_points", []),
-            "resources": lesson_plan.get("resources", []),
-            "quiz_preset": lesson_plan.get("quiz_preset", []),
+            "assistant_name": ACTIVE_LESSON.get("preview_assistant_name", "艾琳老师"),
+            "personality_prompt": ACTIVE_LESSON.get("preview_personality_prompt", ""),
+            "tts_voice": ACTIVE_LESSON.get("preview_tts_voice", "zh-CN-XiaoxiaoNeural"),
+            "tts_cloud_voice": ACTIVE_LESSON.get("preview_tts_cloud_voice", ""),
+            "voice_config": {"voice": ACTIVE_LESSON.get("preview_tts_voice", ""), "enabled": bool(cfg.get("tts_enabled", False))},
+            "syllabus": plan_to_save.get("syllabus", ""),
+            "key_points": plan_to_save.get("key_points", []),
+            "resources": plan_to_save.get("resources", []),
+            "quiz_preset": plan_to_save.get("quiz_preset", []),
             "units": units,
             "has_units": bool(units),
         },
     )
 
-    return jsonify({"lesson_folder": lesson_folder, "plan": lesson_plan})
+    # 写入进度文件
+    save_progress(lesson_folder, default_progress())
+
+    # 清除预览状态
+    ACTIVE_LESSON["preview_plan"] = None
+    ACTIVE_LESSON["preview_topic"] = None
+    ACTIVE_LESSON["preview_assistant_name"] = None
+    ACTIVE_LESSON["preview_personality_prompt"] = None
+    ACTIVE_LESSON["preview_tts_voice"] = None
+    ACTIVE_LESSON["preview_tts_cloud_voice"] = None
+
+    # 切换到新课程
+    ACTIVE_LESSON["folder"] = lesson_folder
+    ACTIVE_LESSON["resources"] = plan_to_save.get("resources", [])
+    ACTIVE_LESSON["prepared"] = plan_to_save
+    ACTIVE_LESSON["conversation"] = load_conversation(lesson_folder)
+    ACTIVE_LESSON["progress"] = load_progress(lesson_folder)
+
+    return jsonify({"lesson_folder": lesson_folder, "plan": plan_to_save})
+
+
+@app.route("/api/regenerate_lesson", methods=["POST"])
+def api_regenerate_lesson():
+    """重新备课：把用户编辑后的 plan 发给云端模型重新生成（保留编辑意图）。"""
+    payload = request.get_json(silent=True) or {}
+    edited_plan = payload.get("plan")
+    topic = ACTIVE_LESSON.get("preview_topic") or (edited_plan or {}).get("topic", "课程")
+
+    cfg = load_config()
+    api_key = (cfg.get("cloud_api_key") or cfg.get("siliconflow_api_key") or "").strip()
+    if not api_key:
+        return jsonify({"error": "未配置云端 API Key，无法重新备课"}), 400
+
+    base_url = (cfg.get("cloud_base_url") or "https://api.siliconflow.cn/v1").rstrip("/")
+    if not base_url.endswith("/chat/completions"):
+        url = f"{base_url}/chat/completions"
+    else:
+        url = base_url
+    model = (cfg.get("cloud_model") or cfg.get("siliconflow_model") or "deepseek-ai/DeepSeek-V3").strip()
+    enable_search = bool(cfg.get("enable_search", True))
+
+    # 从前端传来的编辑后 plan 提取用户意图
+    edited_units = edited_plan.get("units", []) if isinstance(edited_plan, dict) else []
+    edited_kp = (edited_plan.get("key_points") or []) if isinstance(edited_plan, dict) else []
+
+    # 构建参考摘要（帮助模型理解用户保留了哪些内容）
+    ref_parts = []
+    if edited_units:
+        ref_parts.append("【用户已编辑的课时标题】\n" + "\n".join(
+            f"- {u.get('title', '')}: {u.get('summary', '')[:60]}" for u in edited_units[:5]
+        ))
+    if edited_kp:
+        ref_parts.append("【用户已编辑的核心概念】\n" + ", ".join(edited_kp[:8]))
+
+    ref_text = "\n\n".join(ref_parts)
+
+    # 让云端模型基于用户编辑重新生成
+    regen_payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "你是一位顶级学科专家与课程设计师。用户已对课程大纲做了修改，请根据他们的意图，"
+                    "重新生成完整教案。请严格以 JSON 格式返回：\n"
+                    "{\n"
+                    '  "topic": "主题",\n'
+                    '  "syllabus": "整体章节大纲（Markdown）",\n'
+                    '  "key_points": ["全局核心概念1", ...],\n'
+                    '  "units": [{"title":"第1课标题","summary":"...","key_points":[...],"source_files":[...]}],\n'
+                    '  "resources": []\n'
+                    "}\n"
+                    "要求：\n"
+                    "1. units 至少 12 课，最多 20 课，由浅入深。\n"
+                    "2. 每个 unit 的 key_points 至少 4 个，source_files 至少 1 个真实链接。\n"
+                    "3. syllabus 需包含全部课时的标题列表，使用 ### 标记。\n"
+                    "4. key_points（全局）至少 5 个，resources 至少 3 个高质量链接。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"请为【{topic}】重新设计教案。用户之前的编辑意图如下：\n"
+                    + (ref_text if ref_text else "(无额外编辑，按默认方式生成)")
+                    + "\n\n请生成完整教案 JSON。"
+                ),
+            },
+        ],
+        "enable_search": enable_search,
+        "max_tokens": 8192,
+        "temperature": 0.7,
+    }
+
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    try:
+        resp = requests.post(url, headers=headers, json=regen_payload, timeout=180)
+        resp.raise_for_status()
+        result = resp.json()
+        content = result["choices"][0]["message"]["content"]
+        text = content.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        new_plan = json.loads(text.strip())
+        # 规范化 units
+        if isinstance(new_plan, dict):
+            raw_units = new_plan.get("units", [])
+            if isinstance(raw_units, list) and raw_units:
+                units = [_normalize_unit(u, i) for i, u in enumerate(raw_units)]
+                new_plan["units"] = units
+    except Exception as e:
+        print(f"[REGEN-ERROR] {e}", flush=True)
+        return jsonify({"error": f"重新备课失败: {e}"}), 500
+
+    # 更新预览状态
+    ACTIVE_LESSON["preview_plan"] = new_plan
+    lesson_folder = build_lesson_folder_name(topic)
+
+    return jsonify({"lesson_folder": lesson_folder, "plan": new_plan})
 
 
 @app.route("/api/list_resources", methods=["GET"])
@@ -1773,6 +2381,62 @@ def _split_by_sentences(text: str, max_chars: int = 500) -> List[str]:
     return segments or [text]
 
 
+def _repair_code_fence_markers(text: str, seg_marker: str) -> str:
+    """兜底修复：模型误把分段标记输出成各种乱码形式时的清洗。
+
+    本地模型常把提示词里的 `\\c` 理解成代码块语言标记（如输出 ```c / ```plaintext），
+    甚至写成裸 `c` 单字符行，导致分段错乱、Markdown 渲染错乱。
+
+    策略（栈式配对）：
+    - ```<lang>（带语言标记）只能作【开】围栏，裸 ``` 依据当前状态开/闭；
+    - 扫描后未配成对的围栏视为"被误用的分段标记"，替换为 seg_marker；
+    - 正常成对的代码块（```lang ... ```）保持原样；
+    - 额外：把"独立成行的裸 c"也当孤立分段标记（模型常把 `\c` 转义后写成 c）。
+    """
+    import re as _re
+    if not text or seg_marker == "```":
+        return text
+    lines = text.split("\n")
+    fence_idx = [i for i, l in enumerate(lines) if l.strip().startswith("```")]
+    if not fence_idx:
+        return text
+
+    paired: set[int] = set()
+    stack: int | None = None  # 当前未闭合的开围栏行号
+    for idx in fence_idx:
+        is_lang = _re.match(r"^```\S", lines[idx].strip()) is not None
+        if stack is None:
+            stack = idx
+        elif not is_lang:
+            # 裸 ``` 闭合当前代码块
+            paired.add(stack)
+            paired.add(idx)
+            stack = None
+        else:
+            # 已开又见 ```<lang> → 前面那个是误用标记，新围栏另起
+            stack = idx
+
+    out: list[str] = []
+    for i, line in enumerate(lines):
+        if i in fence_idx and i not in paired:
+            out.append(seg_marker)   # 孤立围栏 → 还原为分段标记
+        else:
+            out.append(line)
+
+    # 额外：识别"独立成行的裸 c"——模型常把 \c 转义丢失后写成单字符行
+    # （在 HTML 提示词背景下，模型对反斜杠敏感，常常丢掉）
+    if seg_marker == "\\c":
+        fixed: list[str] = []
+        for l in out:
+            if l.strip() == "c":
+                fixed.append("\\c")
+            else:
+                fixed.append(l)
+        out = fixed
+
+    return "\n".join(out)
+
+
 def _auto_segment_by_lines(text: str, target_lines: int = 5, max_chars: int = 500) -> List[str]:
     """按行数自动分段，保护代码块/列表/表格/LaTeX公式结构不被拆散。
 
@@ -1880,19 +2544,40 @@ def _auto_segment_by_lines(text: str, target_lines: int = 5, max_chars: int = 50
     return final_segments or [text]
 
 
-# 工具调用标记正则：匹配 [TOOL:start_exam] 或 [TOOL:next_unit]
+# 工具调用标记正则：匹配 [TOOL:start_exam] 或 [TOOL:next_unit]（旧格式，无参数）
 _TOOL_RE = re.compile(r"\[TOOL:\s*(start_exam|next_unit)\s*\]", re.IGNORECASE)
+# 工具调用标记正则：匹配 [TOOL:{"type":"show_terminal",...}]（新格式，参数化 JSON 工具）
+_TOOL_JSON_RE = re.compile(r"\[TOOL:\s*(\{.*\})\s*\]", re.DOTALL)
+# 允许的新工具类型（防止模型输出任意 JSON 被误解析）
+_VALID_TOOL_TYPES = {"show_terminal", "show_image", "show_board"}
 
 
-def extract_tool_call(text: str) -> tuple[str, str | None]:
+def extract_tool_call(text: str) -> tuple[str, str | dict | None]:
     """从 LLM 回复中剥离工具调用标记。
 
     Returns:
-        (clean_text, tool_event) — tool_event 为 'start_exam' / 'next_unit' / None。
+        (clean_text, tool_event)：
+          - tool_event 为 'start_exam' / 'next_unit'（旧格式，字符串）
+          - 或参数化工具 dict：{"type": "show_terminal", "language": ..., "code": ...}
+          - 无工具时为 None。
         若出现多个标记只取第一个；剥离标记后的纯文本用于流式展示与存档。
     """
     if not text:
         return text, None
+
+    # 新格式：参数化 JSON 工具（show_terminal / show_image / show_board）
+    m = _TOOL_JSON_RE.search(text)
+    if m:
+        try:
+            obj = json.loads(m.group(1))
+            if isinstance(obj, dict) and obj.get("type") in _VALID_TOOL_TYPES:
+                cleaned = _TOOL_JSON_RE.sub("", text, count=1)
+                cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip() + ("\n" if cleaned.endswith("\n") else "")
+                return cleaned.strip(), obj
+        except (json.JSONDecodeError, ValueError):
+            pass  # 不是合法 JSON，落到旧格式继续尝试
+
+    # 旧格式：[TOOL:start_exam] / [TOOL:next_unit]
     m = _TOOL_RE.search(text)
     if not m:
         return text, None
@@ -1927,26 +2612,85 @@ def extract_action_call(text: str) -> tuple[str, str | None]:
 
 # 情绪标记正则：匹配 [EMOTION:happy] / [EMOTION:think] 等
 _EMOTION_RE = re.compile(r"\[EMOTION:\s*([a-zA-Z_]+)\s*\]", re.IGNORECASE)
-VALID_EMOTIONS = {"happy", "think", "surprised", "angry", "sad", "neutral"}
+# Open-LLM-VTuber 风格简化标签：直接 [joy] / [sadness] 等
+_EMOTION_SHORT_RE = re.compile(r"\[(joy|sadness|anger|fear|disgust|surprise|neutral|smirk|happy|sad|angry|think|surprised)\]", re.IGNORECASE)
+# 情绪标签标准化映射（Open-LLM-VTuber + 现有系统都支持）
+_EMOTION_ALIAS = {
+    "happy": "happy", "joy": "happy",
+    "sad": "sad", "sadness": "sad",
+    "angry": "angry", "anger": "angry",
+    "think": "think",
+    "surprised": "surprised", "surprise": "surprised",
+    "fear": "fear",
+    "disgust": "disgust",
+    "neutral": "neutral",
+    "smirk": "smirk",
+}
+VALID_EMOTIONS = set(_EMOTION_ALIAS.keys())
+
+
+def _normalize_emotion(token: str) -> str | None:
+    """标准化情绪名（大小写不敏感，找不到返回 None）。"""
+    if not token:
+        return None
+    t = token.strip().lower()
+    return _EMOTION_ALIAS.get(t)
 
 
 def extract_emotion_call(text: str) -> tuple[str, str | None]:
-    """从 LLM 回复中剥离情绪标记。
+    """从 LLM 回复中剥离情绪标记（取首个出现的）。
+
+    支持两种格式：
+      1. [EMOTION:happy] / [EMOTION:think] （旧格式）
+      2. [joy] / [sadness] / [anger] 等（Open-LLM-VTuber 风格简写）
 
     Returns:
-        (clean_text, emotion) — emotion 为 happy/think/surprised/angry/sad/neutral 或 None。
+        (clean_text, emotion) — emotion 为标准化后的 happy/sad/angry/think/surprised/neutral/fear/disgust/smirk 或 None。
     """
     if not text:
         return text, None
+    # 先找 [EMOTION:xxx]（避免被短标签正则抢匹配）
     m = _EMOTION_RE.search(text)
+    if m:
+        token = m.group(1)
+        emotion = _normalize_emotion(token) or "neutral"
+        cleaned = _EMOTION_RE.sub("", text, count=1)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip() + ("\n" if cleaned.endswith("\n") else "")
+        return cleaned.strip(), emotion
+    # 短标签 [joy] / [sadness]
+    m = _EMOTION_SHORT_RE.search(text)
     if not m:
         return text, None
-    emotion = m.group(1).lower()
-    if emotion not in VALID_EMOTIONS:
-        emotion = "neutral"
-    cleaned = _EMOTION_RE.sub("", text, count=1)
+    emotion = _normalize_emotion(m.group(1)) or "neutral"
+    cleaned = _EMOTION_SHORT_RE.sub("", text, count=1)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip() + ("\n" if cleaned.endswith("\n") else "")
     return cleaned.strip(), emotion
+
+
+def extract_emotions_all(text: str) -> list[str]:
+    """提取文本中所有情绪标签（按出现顺序），不去除。供流式逐帧检测。"""
+    if not text:
+        return []
+    out: list[str] = []
+    for m in _EMOTION_RE.finditer(text):
+        e = _normalize_emotion(m.group(1))
+        if e:
+            out.append(e)
+    for m in _EMOTION_SHORT_RE.finditer(text):
+        e = _normalize_emotion(m.group(1))
+        if e:
+            out.append(e)
+    return out
+
+
+def strip_emotion_tags(text: str) -> str:
+    """去除所有情绪标记（包括短标签和长标签），保留文本其余内容。"""
+    if not text:
+        return text
+    cleaned = _EMOTION_RE.sub("", text)
+    cleaned = _EMOTION_SHORT_RE.sub("", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 
 @app.route("/api/chat", methods=["POST"])
@@ -2070,23 +2814,30 @@ def api_chat():
 
         # 中文无空格时按字符分块，英文按空格分块；据此决定拼接时是否补空格
         # 分段策略（优先级递减）：
-        # 1. 模型主动用 \c 标记分段（优先，系统提示词已强制要求）
-        # 2. 无 \c → 按空行（段落边界）分段
+        # 1. 模型主动用分段标记（\c，配置可改）分段（优先，系统提示词已强制要求）
+        # 2. 无标记 → 按空行（段落边界）分段
         # 3. 无空行 → 按句子边界切分（保护 LaTeX 公式不被截断）
-        raw_segments = re.split(r"\\+c", clean_answer)
+        seg_cfg = load_config()
+        seg_enabled = seg_cfg.get("segment_enabled", True)
+        seg_marker = (seg_cfg.get("segment_marker") or "\\c").replace("\\n", "\n")
+        # 模型可能误把分段标记输出为 Markdown 代码块围栏（如 ```c），需先兜底清洗：
+        # 将孤立的 ```<lang> 行还原为分段标记，避免破坏 Markdown 渲染。
+        clean_answer = _repair_code_fence_markers(clean_answer, seg_marker)
+
+        raw_segments = re.split(r"\\+c", clean_answer) if seg_marker == "\\c" else clean_answer.split(seg_marker)
         raw_segments = [s.strip() for s in raw_segments if s.strip()]
 
         # [DEBUG] 分段诊断日志
-        has_c_marker = '\\c' in clean_answer or r'\c' in clean_answer
+        has_c_marker = seg_marker in clean_answer
         para_count = len([s for s in re.split(r'\n\s*\n', clean_answer) if s.strip()])
-        print(f"[SEG-DEBUG] answer_len={len(clean_answer)}, has_\\c={has_c_marker}, "
-              f"split_by_\\c={len(raw_segments)}, para_count={para_count}", flush=True)
+        print(f"[SEG-DEBUG] answer_len={len(clean_answer)}, seg_enabled={seg_enabled}, marker={seg_marker!r}, "
+              f"has_marker={has_c_marker}, split_by_marker={len(raw_segments)}, para_count={para_count}", flush=True)
         print(f"[SEG-DEBUG] answer_preview(200)={repr(clean_answer[:200])}", flush=True)
         if has_c_marker:
-            print(f"[SEG-DEBUG] \\c positions: {[m.start() for m in re.finditer(r'\\\\+c', clean_answer)]}", flush=True)
+            print(f"[SEG-DEBUG] marker positions: {[m.start() for m in re.finditer(re.escape(seg_marker), clean_answer)]}", flush=True)
 
-        if len(raw_segments) <= 1:
-            # 无 \c 标记 → 按空行分段（段落边界）
+        if not seg_enabled or len(raw_segments) <= 1:
+            # 关闭分段 或 无分段标记 → 按空行分段（段落边界）
             raw_segments = [s.strip() for s in re.split(r'\n\s*\n', clean_answer) if s.strip()]
             print(f"[SEG-DEBUG] fallback to paragraph split: {len(raw_segments)} segments", flush=True)
 
@@ -2105,18 +2856,36 @@ def api_chat():
             chunks = split_into_stream_chunks(segment)
             accumulator = ""
             for idx, chunk in enumerate(chunks):
+                # 检测当前 chunk 中是否含情绪标签（独立成行），如 [joy]\n
+                _emo_inline = _EMOTION_SHORT_RE.search(chunk) or _EMOTION_RE.search(chunk)
+                if _emo_inline:
+                    # 整行就是标签：推送 emotion 事件，跳过文本
+                    _emo_norm = _normalize_emotion(_emo_inline.group(1)) or "neutral"
+                    if _emo_norm != live2d_emotion:
+                        yield f"data: {json.dumps({'emotion_stream': _emo_norm, 'segment': seg_idx})}\n\n"
+                    continue
                 if idx == 0:
                     accumulator = chunk
                 elif chunk == '\n' or accumulator.endswith('\n'):
                     accumulator = accumulator + chunk
                 else:
                     accumulator = (accumulator + " " + chunk) if use_space else (accumulator + chunk)
-                payload = {"content": accumulator, "done": False, "segment": seg_idx}
+                # 检测累积文本中是否刚出现新情绪（流中插入的标签）
+                _stream_emos = extract_emotions_all(accumulator)
+                if _stream_emos and _stream_emos[-1] != live2d_emotion:
+                    live2d_emotion = _stream_emos[-1]
+                    yield f"data: {json.dumps({'emotion_stream': live2d_emotion, 'segment': seg_idx})}\n\n"
+                # 显示前剥离情绪标签
+                display_content = strip_emotion_tags(accumulator)
+                payload = {"content": display_content, "done": False, "segment": seg_idx}
                 yield f"data: {json.dumps(payload)}\n\n"
                 time.sleep(0.03)
 
-        # 存档时去掉 \c 标记（匹配单/多反斜杠 + c）
-        clean_answer_stored = re.sub(r"\\+c", "", clean_answer).strip()
+        # 存档时去掉分段标记（默认 \c，配置可改；兼容单/多反斜杠 + c 的旧历史）
+        if seg_marker == "\\c":
+            clean_answer_stored = re.sub(r"\\+c", "", clean_answer).strip()
+        else:
+            clean_answer_stored = clean_answer.replace(seg_marker, "").strip()
 
         audio_url = local_tts_audio(clean_answer[:500]) if clean_answer else None
 
@@ -2260,12 +3029,16 @@ def api_exam_generate():
             # 加入随机种子让模型生成不同题目
             "random_seed": random.randint(1, 99999),
         }
+        # 读取本课聊天记录，让题目基于真实对话内容动态生成
+        chat_history = load_conversation(lesson_folder) if lesson_folder else []
         ollama_config = {
             "ollama_base_url": cfg.get("ollama_base_url", ""),
             "ollama_model": cfg.get("ollama_model", ""),
         }
         if cfg.get("enable_local_ollama", True):
-            generated = generate_quiz_with_ollama(unit_content, personality_prompt, ollama_config)
+            generated = generate_quiz_with_ollama(
+                unit_content, personality_prompt, ollama_config, chat_history
+            )
         else:
             # 本地禁用时回退到云端模型
             cloud_config = {
@@ -2277,7 +3050,9 @@ def api_exam_generate():
                 "siliconflow_base_url": cfg.get("siliconflow_base_url", ""),
                 "siliconflow_model": cfg.get("siliconflow_model", ""),
             }
-            generated = generate_quiz_with_model(unit_content, personality_prompt, cloud_config)
+            generated = generate_quiz_with_model(
+                unit_content, personality_prompt, cloud_config, chat_history
+            )
 
         if generated:
             questions = generated
