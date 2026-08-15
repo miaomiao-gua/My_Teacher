@@ -1,16 +1,20 @@
+import ast
+import io
 import json
 import logging
 import os
 import random
 import re
 import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import traceback
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 from flask import Flask, Response, jsonify, render_template, request, send_file, stream_with_context
@@ -248,6 +252,9 @@ def default_config() -> Dict[str, Any]:
         "sidebar_width": 36,
         # 自定义 Live2D 模型（上传后更新此 URL；空则用内置默认模型）
         "live2d_model_url": "/static/models/my_teacher/female_01Arkit_6.model3.json",
+        # 自定义动作关键字：{ "关键字": "动作名" }，前端会合并进动作映射。
+        # 动作名可以是模型动作组（speak/think/listen/idle/hello）或内置自定义动作（wave）。
+        "custom_actions": {},
     }
 
 
@@ -473,7 +480,7 @@ def load_lesson_metadata(lesson_folder: str | None) -> Dict[str, Any]:
 def _ai_tool_rules() -> List[str]:
     """AI 参数化工具（终端/图片/黑板）调用规则，注入系统提示词。"""
     return [
-        "- 需要展示代码/演示运行结果时，可在回复末尾输出工具标记 `[TOOL:{\"type\":\"show_terminal\",\"language\":\"python\",\"code\":\"print('Hello')\"}]` 弹出终端。language 为代码语言（python/java/c/cpp/javascript/shell 等），code 为示例代码。",
+        "- 需要展示代码/演示运行结果时，可在回复末尾输出工具标记 `[TOOL:{\"type\":\"show_terminal\",\"language\":\"python\",\"code\":\"print('Hello')\"}]` 弹出终端弹窗并自动执行该代码。支持语言：python / javascript / shell / powershell。执行结果（源代码+运行输出）会记录进对话，之后你可以基于实际输出继续讲解或纠错。若只想展示不执行，加 `\"noRun\":true`。",
         "- 需要展示图片时，可在回复末尾输出 `[TOOL:{\"type\":\"show_image\",\"index\":1}]` 或 `[TOOL:{\"type\":\"show_image\",\"filename\":\"xxx.png\"}]` 弹出图片面板。index 为当前单元图片库序号（从 0 开始，省略则显示第一张）；filename 为图片文件名，会从当前单元图片中按文件名匹配（匹配不到则显示第一张）。",
         "- 需要板书推导或画图时，可在回复末尾输出 `[TOOL:{\"type\":\"show_board\",\"content\":\"推导：\\\\n$$E=mc^2$$\\\\n{graph:y=x^2,x:-2..2}\"}]` 弹出黑板。content 支持：普通文本（打字机逐字显示）；`$$...$$` 数学公式（LaTeX）；`{graph:y=表达式,x:最小值..最大值}` 函数曲线；`{line:x1,y1-x2,y2}` 线段（坐标 0-100）。",
         "- 工具标记必须整体独占一行且仅出现一次；`[TOOL:{...}]` 内部不要换行（换行用 \\n 表示）。",
@@ -483,24 +490,20 @@ def _ai_tool_rules() -> List[str]:
 def _ai_emotion_rules() -> List[str]:
     """情绪标签（Open-LLM-VTuber 协议）使用规则，注入系统提示词。
 
-    让本地模型按语义在回复中插入情绪标签，前端据此自动切换 Live2D 表情与动作。
+    采用 Open-LLM-VTuber 官方 live2d_expression_prompt 风格：
+    允许标签内嵌在句子任意位置，AI 输出文本即驱动 Live2D 表情，无需手动摆动作。
     """
     return [
-        "- 你可以在回复的合适位置（句首或段落开头）插入情绪标签，让角色表情自然变化。",
-        "- 支持两种格式（任选其一即可，不要混用）：",
-        "  * 简写：`[joy]` / `[sadness]` / `[anger]` / `[surprise]` / `[fear]` / `[disgust]` / `[neutral]` / `[smirk]`",
-        "  * 长写：`[EMOTION:happy]` / `[EMOTION:sad]` / `[EMOTION:angry]` / `[EMOTION:think]` / `[EMOTION:surprised]`",
-        "- 标签必须独占一整行（前后各留空行），方便流式解析。",
-        "- 标签语义：",
-        "  * `joy`/`happy`：开心、鼓励、夸赞、答对题时",
-        "  * `sadness`/`sad`：遗憾、同情、安慰",
-        "  * `anger`/`angry`：生气、纠正、严肃提醒",
-        "  * `surprise`/`surprised`：惊讶、恍然大悟",
-        "  * `think`：讲解推导、停顿思考",
-        "  * `neutral`：默认平静状态",
-        "  * `smirk`：俏皮、轻嘲",
-        "  * `fear`/`disgust`：极少用",
-        "- 一段回复内一般 0-2 个标签就够，不要刷屏。",
+        "【表情控制规则（Open-LLM-VTuber 协议）】",
+        "- 在回复中使用下面的表情关键词来表达表情或动作，请经常使用它们：",
+        "- 可用关键词（仅限这些，必须带方括号）：`[joy]` `[sadness]` `[anger]` `[surprise]` `[fear]` `[disgust]` `[neutral]` `[smirk]`（同时兼容 `[EMOTION:happy]` 等长格式）。",
+        "- 关键词可以内嵌在句子中的任意位置（句首 / 句中 / 句末），不必独占一行：",
+        "  例 1：\"好的！[joy] 这个知识点特别重要，我们来看一看。\"",
+        "  例 2：\"[think] 让我想想……嗯，是这样。\"",
+        "  例 3：\"太棒了，你答对了！[joy] 继续保持！\"",
+        "- 标签不会显示给学生，仅用于控制 Live2D 表情；严禁在正文中用文字描述表情过程。",
+        "- 语义参考：joy/happy=开心鼓励；sadness/sad=遗憾安慰；anger/angry=生气纠正；surprise/surprised=惊讶；think=思考；neutral=平静；smirk=俏皮；fear/disgust=极少用。",
+        "- 一段回复内一般 1-3 个标签就够，不要刷屏。",
     ]
 
 
@@ -540,7 +543,6 @@ def build_system_prompt(lesson_folder: str | None) -> str:
             "- 随堂测验由系统自动出题，你无需自行出题；学生答完后系统会反馈成绩，你可基于错题做简短点评。",
             "- 标记必须独占一行或位于回复末尾，且仅出现一次；不要把标记嵌在代码块或表格里。",
             "- 需要肢体动作配合教学时，可在回复末尾单独输出动作标记 `[ACTION:point]`（指向）、`[ACTION:blackboard]`（拉黑板）、`[ACTION:hello]`（打招呼）、`[ACTION:think]`（思考）、`[ACTION:listen]`（倾听）、`[ACTION:speak]`（说话）。动作标记不显示给学生，仅触发教师角色的动画。严禁在正文中用文字描述动作过程（如“我拿出黑板”“老师指向”“转过身”等），动作只能通过标记触发，正文只讲课程内容。",
-            "- 需要表达情绪时，可在回复末尾输出情绪标记 `[EMOTION:happy]`（高兴）、`[EMOTION:think]`（思考）、`[EMOTION:surprised]`（惊讶）、`[EMOTION:angry]`（生气）、`[EMOTION:sad]`（难过）、`[EMOTION:neutral]`（平静）。情绪标记同样不显示给学生，仅控制教师角色的表情。",
         ]
         tool_lines.extend(_ai_tool_rules())
         tool_lines.extend(_ai_emotion_rules())
@@ -623,7 +625,6 @@ def build_system_prompt(lesson_folder: str | None) -> str:
         )
     tool_lines.append("- 标记必须独占一行或位于回复末尾，且仅出现一次；不要把标记嵌在代码块或表格里。")
     tool_lines.append("- 需要肢体动作配合教学时，可在回复末尾单独输出动作标记 `[ACTION:point]`（指向）、`[ACTION:blackboard]`（拉黑板）、`[ACTION:hello]`（打招呼）、`[ACTION:think]`（思考）、`[ACTION:listen]`（倾听）、`[ACTION:speak]`（说话）。动作标记不显示给学生，仅触发教师角色的动画。严禁在正文中用文字描述动作过程（如“我拿出黑板”“老师指向”“转过身”等），动作只能通过标记触发，正文只讲课程内容。")
-    tool_lines.append("- 需要表达情绪时，可在回复末尾输出情绪标记 `[EMOTION:happy]`（高兴）、`[EMOTION:think]`（思考）、`[EMOTION:surprised]`（惊讶）、`[EMOTION:angry]`（生气）、`[EMOTION:sad]`（难过）、`[EMOTION:neutral]`（平静）。情绪标记同样不显示给学生，仅控制教师角色的表情。")
     tool_lines.extend(_ai_tool_rules())
     tool_lines.extend(_ai_emotion_rules())
     parts.append("\n".join(tool_lines))
@@ -861,6 +862,99 @@ def cloud_llm_reply(prompt: str, lesson_folder: str | None = None, history: List
     except Exception as exc:
         print(f"[AI-REQUEST] 云端请求异常: {type(exc).__name__}: {exc}", flush=True)
         return ""
+
+
+def direct_llm_reply(message: str, system: str = "") -> str:
+    """直接与 LLM 对话（不注入课程上下文），供前端 /ask 斜杠命令使用。
+
+    优先本地 Ollama，失败/关闭时回退到云端 OpenAI 兼容 API。
+    """
+    if not message:
+        return ""
+    cfg = load_config()
+    sys_content = (system or "你是一个乐于助人的 AI 助手。").strip()
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": sys_content},
+        {"role": "user", "content": message},
+    ]
+
+    # 1) 本地 Ollama
+    if cfg.get("enable_local_ollama", True):
+        base_url = (cfg.get("ollama_base_url") or "http://127.0.0.1:11434").rstrip("/")
+        model = (cfg.get("ollama_model") or "qwen2.5:7b").strip()
+        try:
+            resp = requests.post(
+                f"{base_url}/api/chat",
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "stream": False,
+                    "options": {
+                        "temperature": float(cfg.get("ollama_temperature", 0.7) or 0.7),
+                        "num_ctx": int(cfg.get("ollama_num_ctx", 16384) or 16384),
+                        "num_predict": int(cfg.get("ollama_num_predict", 1024) or 1024),
+                    },
+                },
+                timeout=120,
+            )
+            if resp.ok:
+                content = (resp.json().get("message", {}).get("content") or "").strip()
+                if content:
+                    return content
+            print(f"[ask] ollama HTTP {resp.status_code}: {resp.text[:200]}", flush=True)
+        except Exception as exc:
+            print(f"[ask] ollama 异常: {exc}", flush=True)
+
+    # 2) 云端 OpenAI 兼容 API（chat_* 优先，回退 cloud_*）
+    chat_key = (cfg.get("chat_api_key") or "").strip()
+    chat_model = (cfg.get("chat_model") or "").strip()
+    chat_base = (cfg.get("chat_base_url") or "").rstrip("/").strip()
+    if chat_key and chat_model and chat_base:
+        key, model, base_url = chat_key, chat_model, chat_base
+    else:
+        key = (cfg.get("cloud_api_key") or cfg.get("siliconflow_api_key") or "").strip()
+        if not key:
+            return ""
+        model = (cfg.get("cloud_model") or cfg.get("siliconflow_model") or "deepseek-ai/DeepSeek-V3").strip()
+        base_url = (cfg.get("cloud_base_url") or "https://api.siliconflow.cn/v1").rstrip("/")
+    url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
+    payload: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": int(cfg.get("chat_max_tokens", 600) or 600),
+    }
+    if bool(cfg.get("enable_search", False)):
+        payload["enable_search"] = True
+    try:
+        print(f"[AI-REQUEST] 直接对话 → 云端: {url} | model: {model}", flush=True)
+        resp = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=120,
+        )
+        if resp.ok:
+            content = resp.json().get("choices", [{}])[0].get("message", {}).get("content") or ""
+            return str(content).strip()
+        print(f"[ask] 云端 HTTP {resp.status_code}: {resp.text[:200]}", flush=True)
+    except Exception as exc:
+        print(f"[ask] 云端异常: {exc}", flush=True)
+    return ""
+
+
+@app.route("/api/llm/chat", methods=["POST"])
+def api_llm_direct_chat():
+    """直接与 LLM 对话（不注入课程上下文），供前端 /ask 命令使用。"""
+    payload = request.get_json(silent=True) or {}
+    message = (payload.get("message") or "").strip()
+    system = (payload.get("system") or "").strip()
+    if not message:
+        return jsonify({"error": "message 不能为空"}), 400
+    content = direct_llm_reply(message, system)
+    if not content:
+        return jsonify({"error": "LLM 不可用（本地 Ollama 与云端均请求失败）"}), 502
+    return jsonify({"content": content})
 
 
 def _tts_voice_with_model(voice: str, model: str) -> str:
@@ -1635,6 +1729,435 @@ def api_reset_model():
                 shutil.rmtree(d, ignore_errors=True)
     save_config({"live2d_model_url": _DEFAULT_LIVE2D_MODEL_URL})
     return jsonify({"ok": True, "url": _DEFAULT_LIVE2D_MODEL_URL})
+
+
+# ============== 终端：代码执行与结果记录 ==============
+
+# 语言 → 解释器命令映射（仅使用本机可用解释器）
+_EXEC_LANG_MAP = {
+    "python": [sys.executable, "-c"],
+    "python3": [sys.executable, "-c"],
+    "py": [sys.executable, "-c"],
+    "shell": ["cmd", "/c"],
+    "sh": ["powershell", "-NoProfile", "-Command"],
+    "powershell": ["powershell", "-NoProfile", "-Command"],
+    "js": ["node", "-e"],
+    "javascript": ["node", "-e"],
+    "node": ["node", "-e"],
+}
+_EXEC_MAX_CODE = 20000      # 单次代码长度上限
+_EXEC_TIMEOUT = 15          # 执行超时（秒）
+_EXEC_MAX_OUTPUT = 20000    # 单次输出截断上限
+
+
+@app.route("/api/execute_code", methods=["POST"])
+def api_execute_code():
+    """执行用户/ AI 提供的代码片段，返回运行输出（临时目录隔离 + 超时 + 截断）。
+
+    body: {"code": "...", "language": "python|shell|powershell|javascript"}
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        code = (data.get("code") or "").strip()
+        language = (data.get("language") or "python").strip().lower()
+        if not code:
+            return jsonify(ok=False, error="代码为空")
+        if len(code) > _EXEC_MAX_CODE:
+            return jsonify(ok=False, error=f"代码过长（上限 {_EXEC_MAX_CODE} 字符）")
+        cmd = _EXEC_LANG_MAP.get(language)
+        if not cmd:
+            return jsonify(ok=False, error=f"不支持的代码语言: {language}（支持 {', '.join(sorted(set(_EXEC_LANG_MAP)))}）")
+
+        # 在临时目录运行，隔离代码产生的文件；编码统一 utf-8 容错
+        workdir = tempfile.mkdtemp(prefix="myteacher_term_")
+        try:
+            result = subprocess.run(
+                cmd + [code],
+                capture_output=True,
+                text=True,
+                timeout=_EXEC_TIMEOUT,
+                cwd=workdir,
+                encoding="utf-8",
+                errors="replace",
+            )
+            stdout, stderr = result.stdout or "", result.stderr or ""
+            exit_code = result.returncode
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout or ""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode("utf-8", errors="replace")
+            return jsonify(ok=True, exit_code=-1, stdout=stdout, stderr=f"⏱️ 执行超时（{_EXEC_TIMEOUT} 秒上限）")
+        except Exception as exc:
+            return jsonify(ok=False, error=f"执行出错: {exc}")
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+        # 输出截断，防止刷屏
+        if len(stdout) > _EXEC_MAX_OUTPUT:
+            stdout = stdout[:_EXEC_MAX_OUTPUT] + "\n...（输出已截断）"
+        if len(stderr) > _EXEC_MAX_OUTPUT:
+            stderr = stderr[:_EXEC_MAX_OUTPUT] + "\n...（输出已截断）"
+        return jsonify(ok=True, exit_code=exit_code, stdout=stdout, stderr=stderr)
+    except Exception as exc:
+        app.logger.warning(f"execute_code failed: {exc}")
+        return jsonify(ok=False, error=str(exc))
+
+
+@app.route("/api/terminal_record", methods=["POST"])
+def api_terminal_record():
+    """把终端执行记录（源代码 + 运行输出）写入当前课程对话，供 AI 后续读取分析。
+
+    body: {"lesson_folder": "...", "language": "...", "code": "...", "stdout": "...", "stderr": "..."}
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        lesson_folder = (data.get("lesson_folder") or "").strip()
+        code = (data.get("code") or "").strip()
+        language = (data.get("language") or "python").strip()
+        stdout = (data.get("stdout") or "").strip()
+        stderr = (data.get("stderr") or "").strip()
+        if not lesson_folder or not code:
+            return jsonify(ok=False, error="缺少课程或代码")
+
+        output_part = stdout + ("\n" + stderr if stderr else "")
+        output_part = output_part.strip() or "（无输出）"
+        content = (
+            f"[终端执行记录] 语言: {language}\n"
+            f"用户输入的源代码:\n```{language}\n{code}\n```\n"
+            f"运行输出:\n{output_part}"
+        )
+        conv = load_conversation(lesson_folder)
+        conv.append({"role": "user", "content": content})
+        # 只保留最近 60 条，避免无限膨胀
+        if len(conv) > 60:
+            conv = conv[-60:]
+        save_conversation(lesson_folder, conv)
+        return jsonify(ok=True)
+    except Exception as exc:
+        app.logger.warning(f"terminal_record failed: {exc}")
+        return jsonify(ok=False, error=str(exc))
+
+
+class _PySessionRepl:
+    """进程内 Python REPL 模拟：累积源码 → compile → exec，捕获 stdout/stderr。
+
+    不依赖 python 交互进程（pyrepl 在管道下行为不可靠），命名空间持久保存，
+    支持多行语句、缩进块、变量跨命令保留。
+    """
+
+    def __init__(self, cwd: Path):
+        self.ns: Dict[str, Any] = {"__name__": "__main__", "__builtins__": __builtins__}
+        self.cwd = Path(cwd)
+        self.buffer = ""
+
+    # 行尾是这些运算符/分隔符 = 表达式还没写完，REPL 应继续等下一行
+    _TRAILING_CHARS = "+-*/%=<>!&|^~,.[({:"
+    _CONT_KEYWORDS = {
+        "if", "elif", "else", "for", "while", "def", "class", "try", "except",
+        "finally", "with", "lambda", "return", "yield", "raise", "import",
+        "from", "as", "not", "and", "or", "is", "in", "global", "nonlocal",
+        "assert", "del",
+    }
+
+    def _trailing_open(self, buffer: str) -> bool:
+        """行尾以运算符/逗号/冒号或续行关键字结尾 → 表达式未完成。"""
+        last = ""
+        for ln in reversed(buffer.splitlines()):
+            if ln.strip():
+                last = ln.strip()
+                break
+        if not last:
+            return False
+        if last[-1] in self._TRAILING_CHARS:
+            return True
+        return last.split()[-1] in self._CONT_KEYWORDS
+
+    def _is_incomplete(self, exc: SyntaxError, buffer: str) -> bool:
+        """判断 compile 的 SyntaxError 是"还没写完等输入"还是"真实语法错误"。
+
+        关键：把这两类区分开，否则一旦输入过冒号行（如 `for i in range(7):`），
+        缓冲区会永远被当成续行吞掉后续所有命令（REPL 卡死）。
+        """
+        msg = getattr(exc, "msg", "") or ""
+        # 括号/字符串未闭合、旧版 EOF → 确实还需要更多行
+        if any(k in msg for k in (
+            "was never closed",             # '(' / '[' / '{' 未闭合
+            "unterminated string literal",  # 字符串未闭合
+            "unexpected EOF while parsing",
+            "invalid or incomplete statement",
+        )):
+            return True
+        if msg.startswith("expected an indented block"):
+            # 以冒号行结尾且是最后一行 → 块头在等主体（未完成）；
+            # 否则（如冒号行后面接了顶格语句/空行）→ 真实错误，缓冲恢复
+            lines = buffer.splitlines()
+            if lines and not lines[-1].strip():
+                return False  # 尾随空行 = 用户按空 Enter 结束块（CPython 行为）
+            last = lines[-1].strip() if lines else ""
+            return bool(last and last.endswith(":"))
+        if msg == "invalid syntax":
+            # 行尾运算符/关键字（如 `1 +`、`x =`、`elif:`）→ 未完成；`?` 之类 → 真实错误
+            return self._trailing_open(buffer)
+        return False
+
+    def run(self, code: str):
+        """执行一条命令。返回 (output, continuation)。"""
+        self.buffer += code + "\n"
+        if len(self.buffer) > 2000:
+            # 防御：续行无限制累积（如字符串/括号一直不闭合）时自动恢复
+            self.buffer = ""
+            return "⚠️ 输入块过长，已自动重置\n", False
+        try:
+            compiled = compile(self.buffer, "<stdin>", "exec")
+        except SyntaxError as exc:
+            if self._is_incomplete(exc, self.buffer):
+                return "", True  # 块未结束，继续累积
+            self.buffer = ""     # 真实语法错误：清空缓冲，恢复正常 REPL
+            return (str(exc) + "\n"), False
+        except Exception as exc:
+            self.buffer = ""
+            return (f"内部错误: {exc}\n"), False
+        source = self.buffer
+        self.buffer = ""
+        # 在课程工作目录下执行
+        prev_cwd = os.getcwd()
+        buf = io.StringIO()
+        old_out, old_err = sys.stdout, sys.stderr
+        try:
+            if self.cwd.exists():
+                os.chdir(str(self.cwd))
+            sys.stdout = sys.stderr = buf
+            tree = ast.parse(source, "<stdin>", "exec")
+            if len(tree.body) == 1 and isinstance(tree.body[0], ast.Expr):
+                # 单个表达式语句（如 `a`、`1+2`）：eval 并回显其值，模拟 REPL 的 >>> a → 5
+                value = eval(compile(source, "<stdin>", "eval"), self.ns)
+                if value is not None:
+                    buf.write(repr(value) + "\n")
+            else:
+                exec(compiled, self.ns)
+        except Exception:
+            # 过滤掉指向 app.py 内部（exec/eval 调用）的帧，只保留用户代码帧
+            tb_lines = traceback.format_exc().splitlines()
+            clean = []
+            i = 0
+            while i < len(tb_lines):
+                if "app.py" in tb_lines[i] and i + 1 < len(tb_lines):
+                    i += 2
+                    continue
+                clean.append(tb_lines[i])
+                i += 1
+            buf.write("\n".join(clean))
+        finally:
+            sys.stdout, sys.stderr = old_out, old_err
+            try: os.chdir(prev_cwd)
+            except Exception: pass
+        return buf.getvalue(), False
+
+
+class TerminalSession:
+    """交互式终端会话：持久工作目录 + 持久解释器状态。
+
+    - python：进程内 REPL 模拟（变量/多行块状态连续，可靠）。
+    - javascript：持久 node REPL 进程。
+    - shell / powershell：每次单条执行，但会话内维护持久工作目录（支持 cd）。
+    """
+
+    def __init__(self, sid: str, cwd: Path):
+        self.sid = sid
+        # 沙箱根目录：终端不允许跳出课程目录（防"越狱"）
+        self.root = Path(cwd).resolve()
+        self.cwd = self.root
+        self.cwd.mkdir(parents=True, exist_ok=True)
+        self.py: Optional[_PySessionRepl] = None
+        self.node_proc: Optional[subprocess.Popen] = None
+        self.node_in_cont = False
+
+    def _inside_root(self, target: Path) -> bool:
+        """判断路径是否在沙箱根目录（含子目录）之内。Windows 路径比较大小写不敏感。"""
+        try:
+            target = target.resolve()
+        except Exception:
+            return False
+        return target == self.root or self.root in target.parents
+
+    def _ensure_py(self) -> _PySessionRepl:
+        if self.py is None:
+            self.py = _PySessionRepl(self.cwd)
+        return self.py
+
+    def _read_node_prompt(self, timeout: int = 15):
+        out, buf = "", ""
+        start = time.time()
+        while time.time() - start < timeout:
+            ch = self.node_proc.stdout.read(1)
+            if not ch:
+                break
+            out += ch
+            buf = (buf + ch)[-5:]
+            if any(buf.endswith(t) for t in ("> ", "... ")):
+                break
+        matched = ""
+        for t in ("> ", "... "):
+            if out.endswith(t):
+                matched = t
+                out = out[:-len(t)]
+                break
+        return out, matched
+
+    def _start_node(self):
+        env = dict(os.environ)
+        proc = subprocess.Popen(
+            ["node", "-i"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace",
+            bufsize=1, cwd=str(self.cwd), env=env,
+        )
+        self._read_node_prompt()
+        self.node_proc = proc
+        self.node_in_cont = False
+
+    def _run_node(self, cmd: str) -> str:
+        if self.node_proc is None or self.node_proc.poll() is not None:
+            self._start_node()
+        try:
+            need_blank = self.node_in_cont or ("\n" in cmd)
+            self.node_proc.stdin.write(cmd + ("\n\n" if need_blank else "\n"))
+            self.node_proc.stdin.flush()
+        except Exception as exc:
+            return f"会话中断: {exc}\n"
+        out, prompt = self._read_node_prompt()
+        self.node_in_cont = (prompt == "... ")
+        return out
+
+    def run(self, lang: str, cmd: str):
+        """执行一条命令。返回 (output, continuation)。"""
+        cmd = cmd.rstrip("\n")
+        if lang == "python":
+            return self._ensure_py().run(cmd)
+        if lang == "javascript":
+            return self._run_node(cmd), False
+        # shell / powershell：单次执行，会话内维护 cwd（且不允许跳出课程目录）
+        stripped = cmd.strip()
+        if stripped.lower().startswith("cd"):
+            cd_arg = stripped[2:].strip()
+            # cmd 的 `cd /d X` 写法
+            if lang == "shell" and cd_arg[:3].lower() == "/d ":
+                cd_arg = cd_arg[3:].strip()
+            if not cd_arg:
+                return "", False  # 单独 `cd`：无输出（当前目录由后续命令可见）
+            if re.search(r"[;&|<>\$()]", cd_arg):
+                # 带复合命令的 cd（如 `cd C:\ ; pwd`）：不拦截，交给 shell 执行，
+                # 若真的切出沙箱，由下方的末尾 cwd 检测重置
+                pass
+            else:
+                new_dir = cd_arg.strip('"')
+                target = Path(new_dir)
+                if not target.is_absolute():
+                    target = self.cwd / target
+                target = target.resolve()
+                if not self._inside_root(target):
+                    return f"⛔ 已阻止：不能切换到课程目录之外（{new_dir}）\n", False
+                if target.exists() and target.is_dir():
+                    self.cwd = target
+                    return "", False
+                return f"目录不存在: {new_dir}\n", False
+        exe = "cmd" if lang == "shell" else "powershell"
+        # 强制子进程输出 UTF-8（中文 Windows 默认 GBK，会导致乱码），统一按 utf-8 解码
+        # 末尾附带 cwd 标记：复合命令（如 `cd C:\ & dir`）偷改目录会被检测并重置回课程目录
+        m_start, m_end = "__CWD_START__", "__CWD_END__"
+        if lang == "shell":
+            real_cmd = f"chcp 65001 >nul & {cmd} & echo {m_start} & cd & echo {m_end}"
+            args = ["/c", real_cmd]
+        else:
+            real_cmd = (
+                f"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+                f"[Console]::InputEncoding=[System.Text.Encoding]::UTF8; "
+                f"{cmd}; Write-Output '{m_start}'; (Get-Location).Path; Write-Output '{m_end}'"
+            )
+            args = ["-NoProfile", "-Command", real_cmd]
+        try:
+            result = subprocess.run(
+                [exe] + args,
+                capture_output=True, text=True, timeout=15,
+                cwd=str(self.cwd), encoding="utf-8", errors="replace",
+            )
+            out = (result.stdout or "") + (result.stderr or "")
+        except subprocess.TimeoutExpired:
+            return "执行超时（15 秒）\n", False
+        # 解析 cwd 标记 → 若复合命令把工作目录切到了沙箱外，重置回根并提示
+        lines = out.splitlines()
+        idx = next((i for i, ln in enumerate(lines) if ln.strip() == m_start), -1)
+        cwd_line = ""
+        if idx >= 0 and idx + 1 < len(lines):
+            cwd_line = lines[idx + 1].strip()
+            del lines[idx:idx + 3]  # 去掉「标记 + cwd + 结束标记」三行
+            out = "\n".join(lines)
+        if cwd_line:
+            try:
+                current = Path(cwd_line)
+                if current.is_absolute():
+                    if self._inside_root(current):
+                        self.cwd = current  # 复合命令在沙箱内切换目录，会话同步跟踪
+                    else:
+                        self.cwd = self.root
+                        out += "\n⛔ 已阻止：命令试图跳出课程目录，工作目录已重置回课程根目录\n"
+            except Exception:
+                pass
+        return out, False
+
+    def close(self):
+        if self.node_proc is not None:
+            try: self.node_proc.terminate()
+            except Exception: pass
+            self.node_proc = None
+
+
+# 终端会话缓存：key = (lesson_folder, lang)
+_TERMINAL_SESSIONS: Dict[tuple, TerminalSession] = {}
+
+
+@app.route("/api/terminal/command", methods=["POST"])
+def api_terminal_command():
+    """交互式终端：向持久会话发送一条命令/代码，返回执行输出。
+
+    body: {"lesson_folder": "...", "language": "python|shell|powershell|javascript", "cmd": "..."}
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        lesson_folder = (data.get("lesson_folder") or "").strip()
+        language = (data.get("language") or "python").strip().lower()
+        cmd = (data.get("cmd") or "")
+        # python 允许空行：用于"结束当前未完成的块"（如冒号行后按空 Enter）
+        if language != "python" and not cmd.strip():
+            return jsonify(ok=False, error="命令为空")
+        # 保留前导空格（多行代码/缩进续行需要），仅去除结尾换行
+        cmd = cmd.rstrip("\r\n")
+        if language not in _EXEC_LANG_MAP:
+            return jsonify(ok=False, error=f"不支持的语言: {language}")
+
+        # 会话工作目录：优先当前课程目录，无课程则用全局 workspace
+        if lesson_folder:
+            cwd = (LESSONS_DIR / lesson_folder)
+            cwd.mkdir(parents=True, exist_ok=True)
+        else:
+            cwd = Path(BASE_DIR) / "terminal_workspace"
+
+        key = (lesson_folder or "", language)
+        session = _TERMINAL_SESSIONS.get(key)
+        if session is None:
+            session = TerminalSession(f"{key[0]}|{key[1]}", cwd)
+            _TERMINAL_SESSIONS[key] = session
+        # 清理过期的会话（重启/陈旧进程）
+        if len(_TERMINAL_SESSIONS) > 32:
+            for k, s in list(_TERMINAL_SESSIONS.items()):
+                if k != key:
+                    s.close()
+                    _TERMINAL_SESSIONS.pop(k, None)
+        output, continuation = session.run(language, cmd)
+        return jsonify(ok=True, output=output, continuation=bool(continuation))
+    except Exception as exc:
+        app.logger.warning(f"terminal_command failed: {exc}")
+        return jsonify(ok=False, error=str(exc))
 
 
 # ============== 课程资源动态路由（立绘 / 背景） ==============
@@ -2856,14 +3379,16 @@ def api_chat():
             chunks = split_into_stream_chunks(segment)
             accumulator = ""
             for idx, chunk in enumerate(chunks):
-                # 检测当前 chunk 中是否含情绪标签（独立成行），如 [joy]\n
+                # 检测当前 chunk 中是否含情绪标签，如 [joy]\n 或内嵌的 "好的！[joy] 我们来..."
                 _emo_inline = _EMOTION_SHORT_RE.search(chunk) or _EMOTION_RE.search(chunk)
                 if _emo_inline:
-                    # 整行就是标签：推送 emotion 事件，跳过文本
-                    _emo_norm = _normalize_emotion(_emo_inline.group(1)) or "neutral"
-                    if _emo_norm != live2d_emotion:
-                        yield f"data: {json.dumps({'emotion_stream': _emo_norm, 'segment': seg_idx})}\n\n"
-                    continue
+                    # 仅当剥离标签后无剩余文本（整行就是标签）才跳过文本、只推送 emotion 事件；
+                    # 内嵌标签的 chunk 走正常累积流程，标签在显示时统一剥离。
+                    if not strip_emotion_tags(chunk):
+                        _emo_norm = _normalize_emotion(_emo_inline.group(1)) or "neutral"
+                        if _emo_norm != live2d_emotion:
+                            yield f"data: {json.dumps({'emotion_stream': _emo_norm, 'segment': seg_idx})}\n\n"
+                        continue
                 if idx == 0:
                     accumulator = chunk
                 elif chunk == '\n' or accumulator.endswith('\n'):
@@ -2881,11 +3406,12 @@ def api_chat():
                 yield f"data: {json.dumps(payload)}\n\n"
                 time.sleep(0.03)
 
-        # 存档时去掉分段标记（默认 \c，配置可改；兼容单/多反斜杠 + c 的旧历史）
+        # 存档时去掉分段标记（默认 \c，配置可改；兼容单/多反斜杠 + c 的旧历史），
+        # 并剥离所有情绪标签（内嵌多标签时 extract_emotion_call 只清掉第一个）
         if seg_marker == "\\c":
-            clean_answer_stored = re.sub(r"\\+c", "", clean_answer).strip()
+            clean_answer_stored = strip_emotion_tags(re.sub(r"\\+c", "", clean_answer)).strip()
         else:
-            clean_answer_stored = clean_answer.replace(seg_marker, "").strip()
+            clean_answer_stored = strip_emotion_tags(clean_answer.replace(seg_marker, "")).strip()
 
         audio_url = local_tts_audio(clean_answer[:500]) if clean_answer else None
 

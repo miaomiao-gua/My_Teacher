@@ -36,6 +36,7 @@ cache/
 Textoon/
 ComfyUI/
 cache/
+Open-LLM-VTuber/
 # ====== IDE / 系统 ======
 
 .vscode/

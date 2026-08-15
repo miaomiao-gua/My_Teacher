@@ -867,11 +867,13 @@
             overflow: hidden;
             transform-origin: 50% 100%;
         }
-        /* 终端浮现动画（模型蹲下伸手后，窗口先缩小再从屏幕下方被拉上来放大） */
+        /* 终端浮现动画（模型蹲下伸手后，窗口先缩小再从屏幕下方被拉上来放大）
+           关键帧必须保留 translate(-50%,-50%)：否则 forwards 末帧会覆盖模态居中定位导致弹窗错位出屏
+           整体缩放 0.85：缩小终端弹窗的比例 */
         @keyframes terminalEmerge {
-            0%   { transform: translateY(115%) scale(0.15); opacity: 0; }
-            30%  { transform: translateY(72%) scale(0.35); opacity: 0.6; }
-            100% { transform: translateY(0) scale(1); opacity: 1; }
+            0%   { transform: translate(-50%, -50%) translateY(115%) scale(0.12); opacity: 0; }
+            30%  { transform: translate(-50%, -50%) translateY(72%) scale(0.3);  opacity: 0.6; }
+            100% { transform: translate(-50%, -50%) translateY(0) scale(0.85);   opacity: 1; }
         }
         #terminal-overlay.terminal-active {
             display: flex;
@@ -879,8 +881,8 @@
         }
         /* 收回动画（滑回屏幕下方） */
         @keyframes terminalRetract {
-            0%   { transform: translateY(0);    opacity: 1; }
-            100% { transform: translateY(110%); opacity: 0; }
+            0%   { transform: translate(-50%, -50%) translateY(0) scale(0.85); opacity: 1; }
+            100% { transform: translate(-50%, -50%) translateY(110%) scale(0.85); opacity: 0; }
         }
         #terminal-overlay.terminal-closing {
             display: flex;
@@ -920,7 +922,8 @@
         #terminal-overlay .terminal-output {
             flex: 1;
             min-height: 0;
-            overflow: auto;
+            overflow-y: auto;
+            overflow-x: hidden;
             font-family: var(--font-mono);
             font-size: 13px;
             line-height: 1.6;
@@ -931,7 +934,13 @@
             padding: 12px 14px;
             white-space: pre-wrap;
             word-break: break-word;
+            scrollbar-width: thin;
+            scrollbar-color: rgba(212, 163, 115, 0.45) rgba(255, 255, 255, 0.04);
         }
+        #terminal-overlay .terminal-output::-webkit-scrollbar { width: 8px; }
+        #terminal-overlay .terminal-output::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.04); border-radius: 4px; }
+        #terminal-overlay .terminal-output::-webkit-scrollbar-thumb { background: rgba(212, 163, 115, 0.35); border-radius: 4px; }
+        #terminal-overlay .terminal-output::-webkit-scrollbar-thumb:hover { background: rgba(212, 163, 115, 0.6); }
         #terminal-overlay .terminal-output .term-line {
             margin-bottom: 2px;
         }
@@ -942,11 +951,57 @@
             color: #5dca8a;
             margin-right: 4px;
         }
-        #terminal-overlay .terminal-hint {
+        /* 终端输入行：语言选择 + 代码输入 + 运行按钮 */
+        #terminal-overlay .terminal-input-row {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+            flex-shrink: 0;
+        }
+        #terminal-overlay #terminal-lang {
+            flex: 0 0 auto;
+            min-width: 112px;
+            padding: 6px 8px;
+            border-radius: 6px;
+            border: 1px solid rgba(212, 163, 115, 0.25);
+            background: rgba(16, 24, 34, 0.95);
+            color: #d6e8f5;
             font-size: 12px;
-            color: rgba(184, 212, 240, 0.5);
-            margin-top: 8px;
-            text-align: center;
+            outline: none;
+            cursor: pointer;
+        }
+        #terminal-overlay #terminal-input {
+            flex: 1;
+            min-width: 0;
+            padding: 6px 10px;
+            border-radius: 6px;
+            border: 1px solid rgba(212, 163, 115, 0.25);
+            background: rgba(10, 14, 20, 0.85);
+            color: #e8f0f8;
+            font-family: var(--font-mono);
+            font-size: 13px;
+            outline: none;
+        }
+        #terminal-overlay #terminal-input:focus {
+            border-color: rgba(212, 163, 115, 0.55);
+            box-shadow: 0 0 0 2px rgba(212, 163, 115, 0.12);
+        }
+        #terminal-overlay #terminal-run {
+            flex: 0 0 auto;
+            padding: 6px 14px;
+            border: none;
+            border-radius: 6px;
+            background: linear-gradient(135deg, #c8a04a, #a5792e);
+            color: #1a1206;
+            font-weight: 600;
+            font-size: 13px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        #terminal-overlay #terminal-run:hover { filter: brightness(1.12); }
+        #terminal-overlay #terminal-run:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
         }
 
         /* ========== 图片面板（当前单元图片库） ========== */
@@ -2796,16 +2851,25 @@
                     <div class="board-overlay-hint">💡 点击标记点，角色会看向该处</div>
                 </div>
 
-                <!-- 终端覆盖层：代码执行结果（/terminal 触发） -->
+                <!-- 终端弹窗：可交互代码执行（/terminal 或 AI [TOOL:show_terminal] 触发） -->
                 <div id="terminal-overlay">
                     <div class="terminal-overlay-head">
-                        <span><span class="terminal-dot"></span>Terminal · 代码执行结果</span>
+                        <span><span class="terminal-dot"></span>Terminal · 代码执行</span>
                         <button class="terminal-close" id="terminal-overlay-close" title="关闭">✕</button>
                     </div>
                     <div class="terminal-output" id="terminal-output">
-                        <div class="term-line term-info">终端已就绪，等待代码执行...</div>
+                        <div class="term-line term-info">终端已就绪。在下方输入代码，按 Enter 或 ▶ 运行；运行记录会自动提供给 AI。</div>
                     </div>
-                    <div class="terminal-hint">输入 /terminal [语言] [代码] 或在对话中触发代码执行</div>
+                    <div class="terminal-input-row">
+                        <select id="terminal-lang" title="选择语言">
+                            <option value="python">🐍 Python</option>
+                            <option value="javascript">🟨 JavaScript</option>
+                            <option value="shell">💻 CMD</option>
+                            <option value="powershell">🔷 PowerShell</option>
+                        </select>
+                        <input id="terminal-input" type="text" placeholder="输入代码或命令，Enter 运行" autocomplete="off" spellcheck="false" />
+                        <button id="terminal-run" title="运行 (Ctrl+Enter)">▶ 运行</button>
+                    </div>
                 </div>
 
                 <!-- 图片覆盖层：当前单元图片库（/image 触发） -->
@@ -2930,6 +2994,16 @@
                                         <div style="display:flex; align-items:center; gap:8px; margin-top:6px; flex-wrap:wrap;">
                                             <button id="reset-model-btn" class="btn-sm">恢复默认模型</button>
                                             <span id="model-upload-status" style="font-size:12px; color:var(--text-muted);"></span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="setting-row" style="margin-top:10px;">
+                                    <div class="setting-label">自定义动作</div>
+                                    <div style="flex:1; min-width:0;">
+                                        <textarea id="custom-actions-input" rows="3" spellcheck="false"
+                                            placeholder="每行一个：关键字:动作名&#10;如：挥手:wave、点头:listen、站好:idle&#10;动作名可选：模型动作组 speak / think / listen / idle / hello，或内置 wave（挥手）"></textarea>
+                                        <div style="font-size:12px; color:var(--text-muted); margin-top:4px;">
+                                            设置后可用 /action &lt;关键字&gt; 触发（如 /action 挥手）
                                         </div>
                                     </div>
                                 </div>
@@ -3175,13 +3249,21 @@
             const ACTION_MAP = {
                 'point': 'think',       // 指向 → 思考动作
                 'blackboard': 'speak',  // 拉黑板 → 说话动作
-                'greet': 'hello',       // 打招呼
-                'hello': 'hello',       // 打招呼（点击手/头）
+                'greet': 'wave',    // 打招呼 → 在 triggerAction 中走自定义挥手（模型无可用 hello 动作）
+                'hello': 'wave',    // 打招呼（点击手/头）
                 'idle': 'idle',
                 'listen': 'listen',
                 'speak': 'speak',
                 'think': 'think',
             };
+
+            // 合并用户自定义动作关键字到 ACTION_MAP（关键字 → 动作名），供 /action 与 AI 使用
+            function mergeCustomActions(map) {
+                if (!map || typeof map !== 'object') return;
+                for (const k in map) {
+                    if (map[k]) ACTION_MAP[k] = String(map[k]).trim();
+                }
+            }
 
             // 点击命中区域 → 语义化动作（基于模型 .model3.json 的 HitAreas）
             // 模型实际 HitAreas: Head, Body, Legs, HandR, HandL
@@ -3309,10 +3391,29 @@
             }
 
             // 触发动作接口：供点击 / 对话 / 外部模块调用
+            // 返回 Promise，便于调用方（如 /action 命令）感知成功与否
             function triggerAction(actionName) {
                 if (!live2dModel) {
                     console.warn('Live2D not loaded, cannot trigger:', actionName);
-                    return;
+                    return Promise.reject(new Error('Live2D 未加载'));
+                }
+                // 自定义动作：挥手（模型手指参数未绑定，用唯一有效的叉腰参数 Param40/43 + 身体摆动模拟）
+                if (actionName === 'wave') {
+                    waveHands();
+                    console.log('Live2D 触发动作: wave（自定义挥手）');
+                    if (typeof onActionCallback === 'function') {
+                        onActionCallback(actionName, 'wave');
+                    }
+                    return Promise.resolve(true);
+                }
+                // 打招呼：模型 hello 动作组参数（Action01/WaveHello）不存在，改为自定义挥手
+                if (actionName === 'hello' || actionName === 'greet') {
+                    waveHands();
+                    console.log('Live2D 触发动作:', actionName, '（挥手打招呼）');
+                    if (typeof onActionCallback === 'function') {
+                        onActionCallback(actionName, 'wave');
+                    }
+                    return Promise.resolve(true);
                 }
                 const motion = ACTION_MAP[actionName] || actionName;
                 if (!isMotionAvailable(motion)) {
@@ -3326,12 +3427,87 @@
                 if (typeof onActionCallback === 'function') {
                     onActionCallback(actionName, motion);
                 }
+                return Promise.resolve(true);
+            }
+
+            // 自定义"挥手"动作：模型手指参数（Hand L/R）未绑定到部件、无法驱动；
+            // 唯一有效的可见手部参数是 Param40/Param43（叉腰，手臂位移≈10-36px），
+            // 用缓动驱动叉腰 0→1→0 + 身体左右微摆，模拟双手摆动的打招呼效果
+            let _waveTicker = null;
+            let _waveTimer = null;
+            function waveHands(duration) {
+                if (!live2dApp || !live2dModel || !live2dModel.internalModel || !live2dModel.internalModel.coreModel) return;
+                if (_waveTimer) clearTimeout(_waveTimer);
+                if (_waveTicker) {
+                    try { live2dApp.ticker.remove(_waveTicker); } catch (e) {}
+                    _waveTicker = null;
+                }
+                const core = live2dModel.internalModel.coreModel;
+                const start = Date.now();
+                const dur = duration || 3200;
+                const tickerFn = function() {
+                    if (!live2dModel || !live2dModel.internalModel || !live2dModel.internalModel.coreModel) return;
+                    const c = live2dModel.internalModel.coreModel;
+                    const t = (Date.now() - start) / dur;
+                    if (t >= 1) {
+                        _coreSetParam(c, 'Param40', 0);
+                        _coreSetParam(c, 'Param43', 0);
+                        _coreSetParam(c, 'ParamBodyAngleX', 0);
+                        _coreSetParam(c, 'ParamMouthSmile', 0);
+                        try { live2dApp.ticker.remove(tickerFn); } catch (e) {}
+                        _waveTicker = null;
+                        return;
+                    }
+                    // 叉腰缓动：0→1（前30%）保持（中间）→1→0（最后20%）
+                    let akimbo = 1;
+                    if (t < 0.3) akimbo = t / 0.3;
+                    else if (t > 0.8) akimbo = Math.max(0, 1 - (t - 0.8) / 0.2);
+                    _coreSetParam(c, 'Param40', akimbo);
+                    _coreSetParam(c, 'Param43', akimbo);
+                    // 身体左右摆动两轮 + 微笑
+                    _coreSetParam(c, 'ParamBodyAngleX', Math.sin(t * Math.PI * 4) * 6);
+                    _coreSetParam(c, 'ParamMouthSmile', 0.6);
+                };
+                _waveTicker = tickerFn;
+                live2dApp.ticker.add(tickerFn);
             }
 
             // 暴露到全局，供外部调用
             window.triggerLive2DAction = triggerAction;
             window.getLive2DModel = function() { return live2dModel; };
             window.setLive2DActionCallback = function(cb) { onActionCallback = cb; };
+
+            // 角色左/右手"指向"画面坐标 (x, y)：头部转向目标 + 身体轻微侧转 + 触发指向动作
+            function pointerTo(side, targetX, targetY) {
+                if (!live2dApp || !live2dModel || !live2dModel.internalModel) return;
+                try {
+                    const core = live2dModel.internalModel.coreModel;
+                    const modelX = live2dApp.screen.width * (live2dSettings.posX / 100);
+                    const modelY = live2dApp.screen.height * (live2dSettings.posY / 100);
+                    const dx = targetX - modelX;
+                    const dy = targetY - modelY;
+                    // 头部转向（clamp ±25/±20）
+                    const angleX = Math.max(-25, Math.min(25, dx * 0.08));
+                    const angleY = Math.max(-20, Math.min(20, dy * 0.08));
+                    _coreSetParam(core, 'ParamAngleX', angleX);
+                    _coreSetParam(core, 'ParamAngleY', angleY);
+                    // 身体轻微侧转（指向一侧），ARKit 模型支持 ParamBodyAngleX
+                    _coreSetParam(core, 'ParamBodyAngleX', side === 'left' ? -8 : 8);
+                    // 触发指向动作（点屏幕时已有的语义）
+                    triggerAction('point');
+                    // 2 秒后恢复
+                    setTimeout(function() {
+                        if (live2dModel && live2dModel.internalModel) {
+                            _coreSetParam(core, 'ParamAngleX', 0);
+                            _coreSetParam(core, 'ParamAngleY', 0);
+                            _coreSetParam(core, 'ParamBodyAngleX', 0);
+                        }
+                    }, 2000);
+                    console.log('[pointer] 指向:', side, targetX, targetY, '| 角度:', Math.round(angleX), Math.round(angleY));
+                } catch (e) {
+                    console.warn('[pointer] 指向失败:', e);
+                }
+            }
             window.setLive2DActionStartCallback = function(cb) { onActionStartCallback = cb; };
             window.setLive2DActionEndCallback = function(cb) { onActionEndCallback = cb; };
             window.getLive2DAvailableMotions = function() { return availableMotions.slice(); };
@@ -3376,6 +3552,30 @@
 
             let _userCustomizedEmotionMap = false;
 
+            // 兼容 Cubism2 与 Cubism4 两套 runtime 接口。
+            // 实测 Cubism4（pl2d CubismModel）可用：setParameterValueByIndex / setParameterValueById / getParameterValueByIndex；
+            // Cubism2（pl2d Cubism2Model）用 getParamIndex / setParamFloat。
+            function _coreSetParam(core, id, val) {
+                let idx = -1;
+                if (core && typeof core.getParameterIndex === 'function') {
+                    idx = core.getParameterIndex(id);
+                } else if (core && typeof core.getParamIndex === 'function') {
+                    idx = core.getParamIndex(id);
+                }
+                if (idx >= 0) {
+                    if (core && typeof core.setParameterValueByIndex === 'function') {
+                        core.setParameterValueByIndex(idx, val, 1);
+                    } else if (core && typeof core.setParameterValueById === 'function') {
+                        core.setParameterValueById(id, val, 1);
+                    } else if (core && typeof core.setParameterFloat === 'function') {
+                        core.setParameterFloat(idx, val);
+                    } else if (core && typeof core.setParamFloat === 'function') {
+                        core.setParamFloat(idx, val);
+                    }
+                }
+                return idx;
+            }
+
             // 表情同步：将 AI 情绪映射到模型表情参数
             function resetEmotionParams() {
                 if (!live2dModel || !live2dModel.internalModel || !live2dModel.internalModel.coreModel) return;
@@ -3391,18 +3591,16 @@
                         'MouthFrownLeft': 0, 'MouthFrownRight': 0,
                     };
                     Object.keys(defaults).forEach(id => {
-                        const idx = core.getParamIndex(id);
-                        if (idx >= 0) core.setParamFloat(idx, defaults[id]);
+                        _coreSetParam(core, id, defaults[id]);
                     });
                 } catch (e) {}
             }
+            let _emotionTimer = null;   // 表情自动恢复定时器
+            let _emotionTickerFn = null; // 表情保持 ticker 回调（PIXI 7 ticker.add 返回回调，需用 ticker.remove 清理）
+            let _emotionParams = null;  // 当前表情参数集 {id: value}
             function setEmotion(emotion, duration) {
                 if (!live2dModel || !live2dModel.internalModel || !live2dModel.internalModel.coreModel) return;
                 const core = live2dModel.internalModel.coreModel;
-                const set = function(id, val) {
-                    const idx = core.getParamIndex(id);
-                    if (idx >= 0) core.setParamFloat(idx, val);
-                };
                 resetEmotionParams();
 
                 // 1) 优先尝试通过模型内置 expression 切换（更自然，支持表情文件）
@@ -3416,45 +3614,78 @@
                         console.warn('[Live2D] 切表情失败:', e);
                     }
                 }
+
+                // 2) 组装表情参数集并立即写入一次
+                const params = {};
+                const set = function(id, val) {
+                    params[id] = val;
+                    _coreSetParam(core, id, val);
+                };
                 switch (emotion) {
                     case 'happy':
-                        set('ParamMouthSmile', 8);
-                        set('ParamEyeLSmile', 3);
-                        set('ParamEyeRSmile', 3);
+                        set('ParamMouthSmile', 1);
+                        set('ParamEyeLSmile', 1);
+                        set('ParamEyeRSmile', 1);
                         break;
                     case 'think':
-                        set('ParamBrowLAngle', 5);
-                        set('ParamBrowRAngle', 5);
-                        set('ParamEyeBallX', 3);
-                        set('ParamEyeBallY', 2);
+                        set('ParamBrowLAngle', 1);
+                        set('ParamBrowRAngle', 1);
+                        set('ParamEyeBallX', 0.5);
+                        set('ParamEyeBallY', -0.3);
                         break;
                     case 'surprised':
-                        set('ParamEyeLOpen', 1.5);
-                        set('ParamEyeROpen', 1.5);
-                        set('ParamJawOpen', 6);
-                        set('ParamBrowLForm', 2);
-                        set('ParamBrowRForm', 2);
+                        set('ParamEyeLOpen', 1);
+                        set('ParamEyeROpen', 1);
+                        set('ParamJawOpen', 0.8);
+                        set('ParamBrowLForm', 1);
+                        set('ParamBrowRForm', 1);
                         break;
                     case 'angry':
-                        set('ParamBrowLAngle', 8);
-                        set('ParamBrowRAngle', 8);
-                        set('MouthFrownLeft', 4);
-                        set('MouthFrownRight', 4);
+                        set('ParamBrowLAngle', 1);
+                        set('ParamBrowRAngle', 1);
+                        set('MouthFrownLeft', 1);
+                        set('MouthFrownRight', 1);
                         break;
                     case 'sad':
-                        set('ParamBrowLForm', 4);
-                        set('ParamBrowRForm', 4);
-                        set('MouthFrownLeft', 3);
-                        set('MouthFrownRight', 3);
+                        set('ParamBrowLForm', 0.5);
+                        set('ParamBrowRForm', 0.5);
+                        set('MouthFrownLeft', 0.8);
+                        set('MouthFrownRight', 0.8);
                         break;
                     default:
                         break; // neutral
                 }
-                // 持续 duration 毫秒后恢复中性表情
+
+                // 3) 每帧重新写入表情参数，防止被 idle 动画覆盖（保证表情持续可见）
+                if (_emotionTickerFn && live2dApp) {
+                    try { live2dApp.ticker.remove(_emotionTickerFn); } catch (e) {}
+                    _emotionTickerFn = null;
+                }
+                _emotionParams = params;
+                if (emotion !== 'neutral' && live2dApp && Object.keys(params).length) {
+                    const appRef = live2dApp;
+                    const tickerFn = function() {
+                        if (!_emotionParams) return;  // 到期已清空，直接跳过
+                        if (!live2dModel || !live2dModel.internalModel || !live2dModel.internalModel.coreModel) return;
+                        const c = live2dModel.internalModel.coreModel;
+                        Object.keys(_emotionParams).forEach(id => {
+                            _coreSetParam(c, id, _emotionParams[id]);
+                        });
+                    };
+                    _emotionTickerFn = tickerFn;
+                    appRef.ticker.add(tickerFn);
+                }
+
+                // 4) 持续 duration 毫秒后恢复中性表情
                 const d = duration || 4000;
                 if (_emotionTimer) clearTimeout(_emotionTimer);
                 if (emotion !== 'neutral') {
                     _emotionTimer = setTimeout(function() {
+                        if (_emotionTickerFn && live2dApp) {
+                            try { live2dApp.ticker.remove(_emotionTickerFn); } catch (e) {}
+                            _emotionTickerFn = null;
+                        }
+                        _emotionParams = null;
                         if (live2dModel && live2dModel.internalModel && live2dModel.internalModel.coreModel) {
                             resetEmotionParams();
                         }
@@ -3487,9 +3718,11 @@
 
             function _setParamSafe(core, idx, value) {
                 if (!core || idx < 0) return;
+                // Cubism4（pl2d CubismModel）优先：setParameterValueByIndex
+                if (typeof core.setParameterValueByIndex === 'function') { core.setParameterValueByIndex(idx, value, 1); return; }
+                if (typeof core.setParameterFloat === 'function') { core.setParameterFloat(idx, value); return; }
+                // Cubism2
                 if (typeof core.setParamFloat === 'function') { core.setParamFloat(idx, value); return; }
-                if (typeof core.setParameterValueById === 'function') { core.setParameterValueById(idx, value); return; }
-                if (typeof core.setParameterValueByIndex === 'function') { core.setParameterValueByIndex(idx, value); return; }
             }
 
             function _initParamIdxCache() {
@@ -3597,17 +3830,15 @@
                 if (!live2dModel || !live2dModel.internalModel || !live2dModel.internalModel.coreModel) return;
                 try {
                     const core = live2dModel.internalModel.coreModel;
-                    const idxL = core.getParamIndex('ParamEyeLOpen');
-                    const idxR = core.getParamIndex('ParamEyeROpen');
+                    const idxL = _coreSetParam(core, 'ParamEyeLOpen', 0);
+                    const idxR = _coreSetParam(core, 'ParamEyeROpen', 0);
                     if (idxL < 0 || idxR < 0) return;
                     const d = duration || 150;
-                    core.setParamFloat(idxL, 0);
-                    core.setParamFloat(idxR, 0);
                     if (_blinkTimer) clearTimeout(_blinkTimer);
                     _blinkTimer = setTimeout(function() {
                         if (live2dModel && live2dModel.internalModel && live2dModel.internalModel.coreModel) {
-                            live2dModel.internalModel.coreModel.setParamFloat(idxL, 1);
-                            live2dModel.internalModel.coreModel.setParamFloat(idxR, 1);
+                            _coreSetParam(live2dModel.internalModel.coreModel, 'ParamEyeLOpen', 1);
+                            _coreSetParam(live2dModel.internalModel.coreModel, 'ParamEyeROpen', 1);
                         }
                         _blinkTimer = null;
                     }, d);
@@ -3816,7 +4047,9 @@
                 }
 
                 let resizeTimer;
-                window.addEventListener('resize', () => {
+                // 用 ResizeObserver 监听舞台容器：窗口缩放、侧栏拖拽、布局变化都会触发，
+                // 避免 canvas 尺寸落后于容器导致角色溢出被裁剪（如左半被切掉）
+                function syncStageSize() {
                     clearTimeout(resizeTimer);
                     resizeTimer = setTimeout(() => {
                         if (!live2dApp || !portraitWrapper) return;
@@ -3826,8 +4059,23 @@
                         if (live2dModel) {
                             applyLive2DSettings();
                         }
-                    }, 150);
-                });
+                    }, 120);
+                }
+                if (typeof ResizeObserver !== 'undefined') {
+                    try {
+                        // 复用全局 observer：reload 模型重建 app 时先断开旧的，避免观察器累积
+                        if (window._stageObserver) {
+                            try { window._stageObserver.disconnect(); } catch (e) {}
+                        }
+                        window._stageObserver = new ResizeObserver(syncStageSize);
+                        window._stageObserver.observe(portraitWrapper);
+                    } catch (e) {
+                        console.warn('Live2D: ResizeObserver 不可用，回退 window resize', e);
+                        window.addEventListener('resize', syncStageSize);
+                    }
+                } else {
+                    window.addEventListener('resize', syncStageSize);
+                }
             }
 
             // 销毁当前 Live2D 实例并用 live2dSettings.modelUrl 重新加载
@@ -4613,8 +4861,30 @@
                     case 'action':
                         // 强制播放某个动作：/action hello | /action Speak_01 | /action think
                         if (!args) {
-                            addBubble('用法：/action <动作名>，例如 /action hello 或 /action speak_01', 'teacher');
+                            addBubble('用法：/action <动作名>，或 /action list 查看全部；指向坐标用 /action point <left|right> <x> <y>', 'teacher');
                             break;
+                        }
+                        if (args.toLowerCase() === 'list') {
+                            addBubble('🎬 内置动作：wave（挥手）、hello（打招呼）、idle（待机）、listen（倾听）、speak（说话）、think（思考）', 'teacher');
+                            const builtinKeys = ['point', 'blackboard', 'greet', 'hello', 'idle', 'listen', 'speak', 'think', 'wave'];
+                            const customKeys = Object.keys(ACTION_MAP).filter(function(k) { return builtinKeys.indexOf(k) < 0; });
+                            if (customKeys.length) {
+                                addBubble('🎬 自定义动作：' + customKeys.map(k => k + '→' + ACTION_MAP[k]).join('、'), 'teacher');
+                            }
+                            addBubble('🎬 指向坐标：/action point <left|right> <x> <y> —— 左/右手指向画面坐标 (x, y)', 'teacher');
+                            break;
+                        }
+                        // /action point left 100 200 —— 左右手指向画面坐标
+                        {
+                            const pMatch = args.match(/^point\s+(left|right)\s+([-\d.]+)\s+([-\d.]+)$/i);
+                            if (pMatch) {
+                                const side = pMatch[1].toLowerCase();
+                                const px = parseFloat(pMatch[2]);
+                                const py = parseFloat(pMatch[3]);
+                                pointerTo(side, px, py);
+                                addBubble('🎬 角色' + (side === 'left' ? '左手' : '右手') + '指向 (' + px + ', ' + py + ')', 'teacher');
+                                break;
+                            }
                         }
                         if (typeof triggerAction === 'function') {
                             triggerAction(args).then(function() {
@@ -4633,16 +4903,61 @@
                             addBubble('⚠️ 动作系统未就绪', 'teacher');
                         }
                         break;
-                    case 'terminal':
-                        // 强制显示终端面板
-                        addBubble('💻 终端已打开', 'teacher');
-                        if (args) {
-                            // /terminal python print("hi")   → 显示一段示例代码
-                            const parts = args.split(/\s+/);
-                            const lang = parts[0] || 'code';
-                            const code = parts.slice(1).join(' ');
-                            showTerminal({ language: lang, code: code });
+                    case 'emotion':
+                        // 强制显示某个表情：/emotion happy | /emotion sad | /emotion think
+                        if (!args) {
+                            addBubble('用法：/emotion <表情名> 或 /emotion list 查看全部，可选：happy / sad / angry / think / surprised / neutral', 'teacher');
+                            break;
+                        }
+                        if (args.toLowerCase() === 'list') {
+                            addBubble('🎭 支持的表情：happy（开心）、sad（难过）、angry（生气）、think（思考）、surprised（惊讶）、neutral（平静）、smirk（俏皮）、fear（害怕）、disgust（嫌弃）', 'teacher');
+                            break;
+                        }
+                        if (typeof setEmotion === 'function') {
+                            const emoAlias = { joy: 'happy', happiness: 'happy', sadness: 'sad', anger: 'angry', surprise: 'surprised', shocked: 'surprised' };
+                            const emo = emoAlias[args.toLowerCase()] || args.toLowerCase();
+                            setEmotion(emo, 8000);
+                            addBubble('🎭 已强制显示表情：' + emo, 'teacher');
                         } else {
+                            addBubble('⚠️ 表情系统未就绪', 'teacher');
+                        }
+                        break;
+                    case 'ask':
+                    case 'llm':
+                        // 直接与 LLM 对话（不带课程上下文）
+                        if (!args) {
+                            addBubble('用法：/ask <内容> —— 直接与 AI 对话（不带课程上下文）', 'teacher');
+                            break;
+                        }
+                        {
+                            const askBubble = addBubble('🤖 思考中…', 'teacher');
+                            fetch('/api/llm/chat', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ message: args })
+                            }).then(r => r.json()).then(data => {
+                                if (data.content) {
+                                    askBubble.textContent = data.content;
+                                } else {
+                                    askBubble.textContent = '❌ ' + (data.error || 'AI 无响应');
+                                }
+                                conversation.scrollTop = conversation.scrollHeight;
+                            }).catch(err => {
+                                askBubble.textContent = '❌ /ask 失败: ' + err.message;
+                                conversation.scrollTop = conversation.scrollHeight;
+                            });
+                        }
+                        break;
+                    case 'terminal':
+                        // 打开终端弹窗（可交互）：/terminal python print("hi") → 直接执行
+                        if (args) {
+                            const parts = args.split(/\s+/);
+                            const lang = parts[0] || 'python';
+                            const code = parts.slice(1).join(' ');
+                            addBubble('💻 终端打开，执行: ' + lang + ' ' + code.slice(0, 60), 'teacher');
+                            showTerminal({ language: lang, code: code, autoRun: true });
+                        } else {
+                            addBubble('💻 终端已打开，输入代码即可运行', 'teacher');
                             showTerminal({});
                         }
                         break;
@@ -4665,8 +4980,10 @@
                         addBubble('/next —— 进入下一课', 'teacher');
                         addBubble('/board —— 显示黑板', 'teacher');
                         addBubble('/image [编号] —— 打开当前单元图片库', 'teacher');
-                        addBubble('/terminal <语言> <代码> —— 打开终端并执行代码', 'teacher');
-                        addBubble('/action <动作名> —— 播放模型动作', 'teacher');
+                        addBubble('/terminal [语言] [代码] —— 打开终端弹窗并执行代码（语言: python/javascript/shell/powershell，可交互）', 'teacher');
+                        addBubble('/action <动作名> —— 播放模型动作（/action list 查看全部，自定义动作可在设置中添加）', 'teacher');
+                        addBubble('/emotion <表情名> —— 强制显示表情（happy/sad/angry/think/surprised/neutral）', 'teacher');
+                        addBubble('/ask <内容> —— 直接与 AI 对话（不带课程上下文）', 'teacher');
                         addBubble('/help —— 显示本帮助', 'teacher');
                         break;
                     default:
@@ -5120,8 +5437,7 @@
                 const angleY = Math.max(-20, Math.min(20, dy * 0.08));
                 const core = live2dModel.internalModel.coreModel;
                 const setP = function(id, val) {
-                    const idx = core.getParamIndex(id);
-                    if (idx >= 0) core.setParamFloat(idx, val);
+                    _coreSetParam(core, id, val);
                 };
                 setP('ParamAngleX', angleX);
                 setP('ParamAngleY', angleY);
@@ -5496,9 +5812,100 @@
             const terminalOverlay       = document.getElementById('terminal-overlay');
             const terminalOverlayClose  = document.getElementById('terminal-overlay-close');
             const terminalOutput        = document.getElementById('terminal-output');
+            const terminalInput         = document.getElementById('terminal-input');
+            const terminalLang          = document.getElementById('terminal-lang');
+            const terminalRunBtn        = document.getElementById('terminal-run');
+            let replWaiting = false;  // Python REPL 是否在等续行（如冒号块/括号未闭合）
+
+            // 交互式终端：把命令发给后端持久 REPL 会话，展示输出，并把源代码+输出写入对话供 AI 读取
+            async function runTerminalCode(code, language, recordToAI) {
+                if (terminalRunBtn) terminalRunBtn.disabled = true;
+                const lang = (language || (terminalLang ? terminalLang.value : 'python') || 'python').toLowerCase();
+                // 空输入：仅当 Python REPL 正在等续行时作为"空行结束块"发送；否则提示
+                if (!code && !(replWaiting && lang === 'python')) {
+                    appendTerminal('⚠️ 请输入要执行的代码', 'term-stderr');
+                    if (terminalRunBtn) terminalRunBtn.disabled = false;
+                    return null;
+                }
+                // REPL 回显：正在等续行时用 ...，否则 python/javascript 用 >>>，shell 用 $
+                const promptCh = replWaiting ? '...' : ((lang === 'python' || lang === 'javascript' || lang === 'node') ? '>>>' : '$');
+                appendTerminal(promptCh + ' ' + ((code || '').split('\n')[0]).slice(0, 80), 'term-prompt');
+                try {
+                    // 交互式终端：发送给持久 REPL 会话（变量/cd 状态连续）
+                    const resp = await fetch('/api/terminal/command', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ lesson_folder: currentLesson || '', language: lang, cmd: code }),
+                    });
+                    const data = await resp.json();
+                    let output = '';
+                    if (!data.ok) {
+                        appendTerminal('❌ ' + (data.error || '执行失败'), 'term-stderr');
+                        replWaiting = false;
+                    } else {
+                        output = (data.output || '').trim();
+                        if (output) appendTerminal(output, 'term-stdout');
+                        replWaiting = !!data.continuation;
+                        if (replWaiting) appendTerminal('...', 'term-prompt');
+                    }
+                    // 记录给 AI（仅在有课程且非纯展示时写入，供 AI 后续读取分析）
+                    if (recordToAI !== false && currentLesson) {
+                        fetch('/api/terminal_record', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                lesson_folder: currentLesson,
+                                language: lang,
+                                code: code,
+                                stdout: output,
+                                stderr: data.ok ? '' : (data.error || ''),
+                            }),
+                        }).catch(function() {});
+                    }
+                    return data;
+                } catch (e) {
+                    appendTerminal('❌ 请求失败: ' + e.message, 'term-stderr');
+                    return null;
+                } finally {
+                    if (terminalRunBtn) terminalRunBtn.disabled = false;
+                }
+            }
+            window.runTerminalCode = runTerminalCode;
+
+            // 绑定输入框 / 运行按钮事件
+            function bindTerminalInputEvents() {
+                if (!terminalInput || !terminalRunBtn) return;
+                function submitTerminal() {
+                    runTerminalCode(terminalInput.value);
+                    terminalInput.value = '';
+                }
+                terminalInput.addEventListener('keydown', function(e) {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        submitTerminal();
+                    }
+                });
+                terminalRunBtn.addEventListener('click', function() {
+                    submitTerminal();
+                });
+                // Ctrl+Enter 全局运行（输入框外也可用）
+                terminalOverlay.addEventListener('keydown', function(e) {
+                    if (e.ctrlKey && e.key === 'Enter') {
+                        e.preventDefault();
+                        submitTerminal();
+                    }
+                });
+                // 切换语言时重置续行状态
+                terminalLang.addEventListener('change', function() {
+                    replWaiting = false;
+                });
+            }
+            bindTerminalInputEvents();
 
             function appendTerminal(text, cls) {
                 cls = cls || 'term-stdout';
+                // 仅在用户接近底部时才自动跟随滚动（向上翻历史时不被拉走）
+                const nearBottom = terminalOutput.scrollTop + terminalOutput.clientHeight >= terminalOutput.scrollHeight - 40;
                 const lines = String(text).split(/\r?\n/);
                 lines.forEach(function(line) {
                     const el = document.createElement('div');
@@ -5506,7 +5913,7 @@
                     el.textContent = line;
                     terminalOutput.appendChild(el);
                 });
-                terminalOutput.scrollTop = terminalOutput.scrollHeight;
+                if (nearBottom) terminalOutput.scrollTop = terminalOutput.scrollHeight;
             }
 
             // 让终端窗口的垂直中心对准模型手部的位置（蹲下伸手时，手正对窗口中间）
@@ -5530,18 +5937,21 @@
 
             async function showTerminal(opts) {
                 opts = opts || {};
+                replWaiting = false;  // 重新打开时重置续行状态
                 // 隐藏其它面板避免重叠
                 hideBoard();
                 hideImagePanel();
+                // 若欢迎页仍显示，先收起（欢迎页全屏覆盖会拦截滚轮/点击，导致终端无法滚动）
+                if (menuScreen && !menuScreen.classList.contains('hidden')) hideMenu();
 
-                // 写入内容（先准备好，面板滑入时直接展示）
+                // 写入内容（先准备好，面板滑入时直接展示；autoRun 时交给 runTerminalCode 回显，避免重复）
                 terminalOutput.innerHTML = '';
-                if (opts.language) appendTerminal('$ ' + opts.language + ' ' + (opts.code || '').split('\n')[0], 'term-info');
-                if (opts.code)    appendTerminal(opts.code, 'term-stdout');
+                if (opts.language && !opts.autoRun) appendTerminal('$ ' + opts.language + ' ' + (opts.code || '').split('\n')[0], 'term-info');
+                if (opts.code && !opts.autoRun)    appendTerminal(opts.code, 'term-stdout');
                 if (opts.stdout)  appendTerminal(opts.stdout, 'term-stdout');
                 if (opts.stderr)  appendTerminal(opts.stderr, 'term-stderr');
                 if (!opts.code && !opts.stdout && !opts.stderr) {
-                    appendTerminal('终端已就绪，等待代码执行...', 'term-info');
+                    appendTerminal('交互式终端已就绪。直接在下方输入命令（Enter 运行），变量和状态会保留。', 'term-info');
                 }
 
                 // 1) 模型"蹲下→向下伸手→站起来"（窗口动画并行）
@@ -5553,6 +5963,12 @@
                     terminalOverlay.classList.remove('terminal-active', 'terminal-closing');
                     void terminalOverlay.offsetWidth;
                     terminalOverlay.classList.add('terminal-active');
+                    // AI 给的代码自动执行（如 [TOOL:show_terminal]）
+                    if (opts.autoRun && opts.code) {
+                        runTerminalCode(opts.code, opts.language);
+                    }
+                    // 焦点到输入框，方便直接输入
+                    if (terminalInput) { try { terminalInput.focus(); } catch (e) {} }
                     console.log('[TERMINAL] 从下方拉出 + 角色动作');
                 }, 400);
                 // 3) 表演完成后，角色眼神看向下方终端
@@ -5705,7 +6121,7 @@
                     if (!tool || typeof tool !== 'object') return;
                     switch (tool.type) {
                         case 'show_terminal':
-                            await showTerminal({ language: tool.language, code: tool.code, stdout: tool.stdout, stderr: tool.stderr });
+                            await showTerminal({ language: tool.language, code: tool.code, stdout: tool.stdout, stderr: tool.stderr, autoRun: !tool.noRun });
                             break;
                         case 'show_image':
                             await showImagePanel({ index: tool.index, filename: tool.filename });
@@ -6065,6 +6481,16 @@
                             if (wasDifferent) reloadLive2DModel();
                         }
 
+                        // 自定义动作关键字（用户扩展的动作命令，如 /action 挥手）
+                        if (config.custom_actions) {
+                            mergeCustomActions(config.custom_actions);
+                            const caInput = document.getElementById('custom-actions-input');
+                            if (caInput) {
+                                caInput.value = Object.keys(config.custom_actions)
+                                    .map(k => k + ':' + config.custom_actions[k]).join('\n');
+                            }
+                        }
+
                         // 填充 UI
                         portraitPosX.value = live2dSettings.posX;
                         portraitPosY.value = live2dSettings.posY;
@@ -6286,6 +6712,19 @@
                         emoMap[emo] = parseInt(sel.value);
                     }
                 });
+                // 收集自定义动作关键字（每行 关键字:动作名，如 挥手:wave）
+                const customActs = {};
+                const caInput = document.getElementById('custom-actions-input');
+                if (caInput) {
+                    caInput.value.split('\n').forEach(line => {
+                        const idx = line.indexOf(':');
+                        if (idx > 0) {
+                            const k = line.slice(0, idx).trim();
+                            const v = line.slice(idx + 1).trim();
+                            if (k && v) customActs[k] = v;
+                        }
+                    });
+                }
                 const payload = {
                     portrait_pos_x: parseInt(portraitPosX.value),
                     portrait_pos_y: parseInt(portraitPosY.value),
@@ -6298,6 +6737,7 @@
                     segment_marker: segmentMarker.value.trim() || '\\c',
                     segment_max_lines: parseInt(segmentMaxLines.value) || 6,
                     sidebar_width: currentSidebarWidth,
+                    custom_actions: customActs,
                 };
                 fetch('/api/config', {
                     method: 'POST',
@@ -6307,6 +6747,7 @@
                     .then(() => {
                         _emotionExpressionMap = emoMap;
                         _userCustomizedEmotionMap = Object.keys(emoMap).length > 0;
+                        mergeCustomActions(customActs);
                         alert('设置已保存！');
                     })
                     .catch(err => alert('保存失败: ' + err.message));
