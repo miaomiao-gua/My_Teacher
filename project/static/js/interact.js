@@ -78,6 +78,13 @@
                 // 5) 触发数据加载
                 if (viewName === 'lesson')   { if (typeof loadLessons === 'function') loadLessons(); if (typeof loadBoard === 'function') loadBoard(); }
                 if (viewName === 'resource') if (typeof loadResources === 'function') loadResources();
+
+                // 6) 设置面板激活时给右侧 sidebar 加 class，隐藏 chat/lesson/exam/resource tab 头部
+                const sidebar = document.getElementById('chat-sidebar');
+                if (sidebar) {
+                    if (viewName === 'settings') sidebar.classList.add('settings-active');
+                    else                          sidebar.classList.remove('settings-active');
+                }
             }
 
             function panelHandHide(viewName) {
@@ -85,6 +92,9 @@
                 if (!el) return;
                 el.classList.remove('active', 'view-closing');
                 navBtns.forEach(function(b) { if (b.dataset.view === viewName) b.classList.remove('active'); });
+                // settings 关闭时移除 settings-active class
+                const sidebar = document.getElementById('chat-sidebar');
+                if (sidebar && viewName === 'settings') sidebar.classList.remove('settings-active');
                 // 不再播放"收回"动作（tab 切换是即时切换，不需要动画）
             }
 
@@ -365,15 +375,29 @@
                     currentLesson = name;
                     const history = data.conversation || data.history || [];
                     if (history.length) {
-                        conversation.innerHTML = '';
+                        // 性能优化：用 DocumentFragment 批量插入，避免逐条 innerHTML 触发多次重排
+                        const frag = document.createDocumentFragment();
+                        const teacherBubbles = []; // 收集 teacher 气泡，最后一次性 renderMarkdown
                         history.forEach(msg => {
                             // 终端执行记录只作为 AI 上下文，不显示为聊天气泡
                             if (msg.content && String(msg.content).indexOf('[终端执行记录]') === 0) return;
-                            const bubble = addBubble(msg.content, msg.role === 'user' ? 'user' : 'teacher');
-                            if (msg.role === 'assistant') bubble.innerHTML = renderMarkdown(msg.content);
+                            const bubble = addBubble(msg.content, msg.role === 'user' ? 'user' : 'teacher', { batch: true });
+                            frag.appendChild(bubble);
+                            if (msg.role === 'assistant') teacherBubbles.push(bubble);
                         });
+                        conversation.innerHTML = '';
+                        conversation.appendChild(frag);
+                        // 一次性批量渲染 markdown（marked 解析每条都比逐条 + DOM 插入更省）
+                        if (teacherBubbles.length) {
+                            requestAnimationFrame(() => {
+                                teacherBubbles.forEach(b => { b.innerHTML = renderMarkdown(b.textContent); });
+                                conversation.scrollTop = conversation.scrollHeight;
+                            });
+                        }
                     } else {
-                        conversation.innerHTML = `<div class="bubble teacher">已切换到「${name}」，开始学习吧！</div>`;
+                        // 首次进入该单元（对话历史为空）：AI 主动开场讲解基础知识点
+                        conversation.innerHTML = '';
+                        playUnitWelcome(name);
                     }
                     hideMenu();
                     switchView('chat');
@@ -391,34 +415,242 @@
                 }).catch(err => alert('进入课程失败: ' + err.message));
             }
 
-            // 创建课程（输入主题 → AI 备课 → 进入）
-            menuCreateBtn.addEventListener('click', function() {
-                customPrompt('请输入课程主题，AI 将自动备课：\n\n例如：初中物理牛顿定律 / Python 入门 / Alevel 数学 M1P1')
-                    .then(function(topic) {
-                        if (topic && topic.trim()) {
-                            prepareAndEnter(topic.trim());
-                        }
-                    });
+            // 首次进入单元：AI 主动开场讲解本课基础知识点（后端 /api/unit/welcome 流式 SSE）
+            function playUnitWelcome(name) {
+                addBubble('👩‍🏫 欢迎来到本课，让我先讲讲这节课的基础知识……', 'teacher');
+                const bubble = addBubble('', 'teacher');
+                // 复用 Galgame 对话条逐段播放
+                dialogueSegments = [];
+                dialogueSegIdx = -1;
+                dialogueStreaming = true;
+                dialogueBar.style.display = 'block';
+                dialogueContent.textContent = '……';
+                dialogueContent.classList.remove('type-caret');
+                dialogueIndicator.textContent = '老师思考中';
+                dialogueIndicator.classList.remove('hidden');
+                fetch('/api/unit/welcome', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ lesson_folder: name })
+                }).then(function(response) {
+                    const ct = response.headers.get('content-type') || '';
+                    // 已欢迎过（already:true）或出错：后端返回普通 JSON
+                    if (ct.indexOf('text/event-stream') === -1) {
+                        return response.json().then(function(data) {
+                            dialogueStreaming = false;
+                            dialogueBar.style.display = 'none';
+                            if (data.already) {
+                                bubble.remove();
+                                conversation.querySelectorAll('.bubble').forEach(b => b.remove());
+                                return;
+                            }
+                            bubble.textContent = '❌ ' + (data.error || '开场讲解失败');
+                            return;
+                        });
+                    }
+                    if (!response.body) throw new Error('No response body');
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let fullText = '';
+                    function read() {
+                        reader.read().then(function(ret) {
+                            if (ret.done) {
+                                bubble.innerHTML = renderMarkdown(fullText);
+                                conversation.scrollTop = conversation.scrollHeight;
+                                dialogueStreaming = false;
+                                dialogueBar.style.display = 'none';
+                                // 对话条逐段打字机播放
+                                startGalgamePlayback();
+                                return;
+                            }
+                            const chunk = decoder.decode(ret.value);
+                            const lines = chunk.split('\n');
+                            for (const line of lines) {
+                                if (!line.startsWith('data: ')) continue;
+                                const payload = line.replace('data: ', '').trim();
+                                if (payload === '[DONE]') continue;
+                                try {
+                                    const data = JSON.parse(payload);
+                                    if (data.content && !data.done) {
+                                        const seg = data.segment !== undefined ? data.segment : 0;
+                                        dialogueSegments[seg] = cleanSeg(data.content);
+                                        fullText = dialogueSegments.filter(s => s).join('\n\n');
+                                        bubble.textContent = stripCodeFenceMarks(fullText);
+                                        const nearBottom = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 80;
+                                        if (nearBottom) conversation.scrollTop = conversation.scrollHeight;
+                                    }
+                                    if (data.done && data.content) {
+                                        fullText = cleanSeg(data.content);
+                                        bubble.innerHTML = renderMarkdown(fullText);
+                                        conversation.scrollTop = conversation.scrollHeight;
+                                    }
+                                } catch (e) {}
+                            }
+                            read();
+                        }).catch(function(err) {
+                            console.error('[welcome] stream error:', err);
+                            bubble.textContent = '❌ ' + err.message;
+                            dialogueStreaming = false;
+                            dialogueBar.style.display = 'none';
+                        });
+                    }
+                    read();
+                }).catch(function(err) {
+                    console.error('[welcome] fetch error:', err);
+                    bubble.textContent = '❌ ' + err.message;
+                    dialogueStreaming = false;
+                    dialogueBar.style.display = 'none';
+                });
+            }
+
+            // 创建课程（拆成两种独立方法，均为独立 modal 弹窗）
+            //  - 方法一「✨ 一句话备课」：弹出独立 modal，输入主题，立即触发备课
+            //  - 方法二「📚 导入课件备课」：弹出独立 modal，选课件文件 + 输入主题，AI 转 MD 后拆分单元
+            const menuCreateFiles = document.getElementById('menu-create-files');
+            const menuCreateFilesHint = document.getElementById('menu-create-files-hint');
+            const menuCreateImportBtn = document.getElementById('menu-create-import-btn');
+            const quickPrepModal = document.getElementById('quick-prep-modal');
+            const importPrepModal = document.getElementById('import-prep-modal');
+            const quickPrepTopic = document.getElementById('quick-prep-topic');
+            const quickPrepStart = document.getElementById('quick-prep-start');
+            const quickPrepCancel = document.getElementById('quick-prep-cancel');
+            const menuImportTopic = document.getElementById('menu-import-topic');
+            const menuImportStartBtn = document.getElementById('menu-import-start-btn');
+            const menuImportCancelBtn = document.getElementById('menu-import-cancel-btn');
+
+            // 通用 modal 开关
+            function openModal(modal) {
+                if (!modal) return;
+                modal.classList.add('active');
+            }
+            function closeModal(modal) {
+                if (!modal) return;
+                modal.classList.remove('active');
+            }
+            // Esc 关闭当前打开的备课 modal
+            document.addEventListener('keydown', function(e) {
+                if (e.key === 'Escape') {
+                    if (quickPrepModal && quickPrepModal.classList.contains('active')) closeModal(quickPrepModal);
+                    if (importPrepModal && importPrepModal.classList.contains('active')) closeModal(importPrepModal);
+                }
             });
 
-            // AI 备课并进入课程
-            function prepareAndEnter(topic) {
+            // 文件选择提示
+            if (menuCreateFiles && menuCreateFilesHint) {
+                menuCreateFiles.addEventListener('change', function() {
+                    const names = Array.from(this.files || []).map(function(f) { return f.name; });
+                    menuCreateFilesHint.textContent = names.length
+                        ? ('已选择 ' + names.length + ' 个文件：' + names.join('、'))
+                        : '未选择文件';
+                });
+            }
+
+            // 方法一：✨ 一句话备课
+            menuCreateBtn.addEventListener('click', function() {
+                if (quickPrepTopic) {
+                    quickPrepTopic.value = '';
+                    setTimeout(function() { quickPrepTopic.focus(); }, 80);
+                }
+                openModal(quickPrepModal);
+            });
+            if (quickPrepCancel) {
+                quickPrepCancel.addEventListener('click', function() { closeModal(quickPrepModal); });
+            }
+            // 顶部 ✕ 关闭按钮
+            document.querySelectorAll('[data-close-quick-prep]').forEach(function(btn) {
+                btn.addEventListener('click', function() { closeModal(quickPrepModal); });
+            });
+            // 点遮罩关闭
+            if (quickPrepModal) {
+                quickPrepModal.addEventListener('click', function(e) {
+                    if (e.target === quickPrepModal) closeModal(quickPrepModal);
+                });
+            }
+            if (quickPrepStart) {
+                quickPrepStart.addEventListener('click', function() {
+                    const topic = quickPrepTopic ? quickPrepTopic.value.trim() : '';
+                    if (!topic) { alert('请先输入课程主题'); return; }
+                    closeModal(quickPrepModal);
+                    prepareAndEnter(topic, []);
+                });
+                // 回车直接提交
+                if (quickPrepTopic) {
+                    quickPrepTopic.addEventListener('keydown', function(e) {
+                        if (e.key === 'Enter') { e.preventDefault(); quickPrepStart.click(); }
+                    });
+                }
+            }
+
+            // 方法二：📚 导入课件备课
+            if (menuCreateImportBtn) {
+                menuCreateImportBtn.addEventListener('click', function() {
+                    if (menuImportTopic) menuImportTopic.value = '';
+                    if (menuCreateFiles) menuCreateFiles.value = '';
+                    if (menuCreateFilesHint) menuCreateFilesHint.textContent = '未选择文件';
+                    openModal(importPrepModal);
+                    if (menuImportTopic) setTimeout(function() { menuImportTopic.focus(); }, 80);
+                });
+            }
+            if (menuImportCancelBtn) {
+                menuImportCancelBtn.addEventListener('click', function() { closeModal(importPrepModal); });
+            }
+            document.querySelectorAll('[data-close-import-prep]').forEach(function(btn) {
+                btn.addEventListener('click', function() { closeModal(importPrepModal); });
+            });
+            if (importPrepModal) {
+                importPrepModal.addEventListener('click', function(e) {
+                    if (e.target === importPrepModal) closeModal(importPrepModal);
+                });
+            }
+            if (menuImportStartBtn) {
+                menuImportStartBtn.addEventListener('click', function() {
+                    const topic = menuImportTopic ? menuImportTopic.value.trim() : '';
+                    const files = menuCreateFiles && menuCreateFiles.files ? Array.from(menuCreateFiles.files) : [];
+                    if (!topic) { alert('请先输入课程主题'); return; }
+                    if (!files.length) { alert('请先选择至少一个课件文件'); return; }
+                    closeModal(importPrepModal);
+                    prepareAndEnter(topic, files);
+                });
+                if (menuImportTopic) {
+                    menuImportTopic.addEventListener('keydown', function(e) {
+                        if (e.key === 'Enter') { e.preventDefault(); menuImportStartBtn.click(); }
+                    });
+                }
+            }
+
+            // AI 备课并进入课程（files：可选课程资料文件数组）
+            function prepareAndEnter(topic, files) {
                 // 显示备课中状态（使用专用 loading overlay）
                 var loadingOverlay = document.getElementById('menu-loading-overlay');
                 var loadingText = document.getElementById('menu-loading-text');
                 var loadingSub = document.getElementById('menu-loading-sub');
                 if (loadingText) loadingText.textContent = '⏳ 正在备课「' + topic + '」…';
-                if (loadingSub) loadingSub.innerHTML = 'AI 正在生成课程大纲、知识点与随堂测验<br>约需 1-3 分钟，请稍候';
+                if (loadingSub) {
+                    loadingSub.innerHTML = files && files.length
+                        ? ('正在解析 ' + files.length + ' 个课程资料文件并由 AI 拆分为单元<br>约需 1-3 分钟，请稍候')
+                        : 'AI 正在生成课程大纲、知识点与随堂测验<br>约需 1-3 分钟，请稍候';
+                }
                 if (loadingOverlay) loadingOverlay.classList.add('visible');
                 menuCreateBtn.disabled = true;
                 const originalText = menuCreateBtn.textContent;
                 menuCreateBtn.textContent = '备课中…';
 
-                fetch('/api/prepare_lesson', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ topic: topic })
-                }).then(r => r.json())
+                let fetchOptions;
+                if (files && files.length) {
+                    const fd = new FormData();
+                    fd.append('topic', topic);
+                    files.forEach(function(f) { fd.append('files', f); });
+                    fetchOptions = { method: 'POST', body: fd };
+                } else {
+                    fetchOptions = {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ topic: topic })
+                    };
+                }
+
+                fetch('/api/prepare_lesson', fetchOptions)
+                .then(r => r.json())
                 .then(data => {
                     var loadingOverlay = document.getElementById('menu-loading-overlay');
                     if (loadingOverlay) loadingOverlay.classList.remove('visible');
@@ -480,6 +712,79 @@
                 ).join('\n');
             }
 
+            // 过滤代码块围栏标记（```python / ```），用于纯文本显示（对话条、流式中途气泡）
+            function stripCodeFenceMarks(text) {
+                if (!text) return '';
+                return String(text)
+                    .split('\n')
+                    .map(line => /^\s*```/.test(line) ? '' : line)
+                    .join('\n')
+                    .replace(/\n{3,}/g, '\n\n');
+            }
+
+            // 剥离 markdown 语法符号（**加粗** / # 标题 / - 列表 / `代码` 等），
+            // 用于对话条纯文本显示：只保留可读内容，不出现 ****** 这类格式化残渣。
+            function stripMarkdownSyntax(text) {
+                if (!text) return '';
+                let s = String(text);
+                // 行内反引号代码：`xxx` → xxx
+                s = s.replace(/`([^`\n]+)`/g, '$1');
+                // 加粗 / 斜体 / 删除线：***x*** / **x** / *x* / ~~x~~ → x
+                s = s.replace(/(\*\*\*|\*\*|__|~~|\*|_)([^*_~\n]+?)\1/g, '$2');
+                // 残留的孤立星号 / 下划线 / 波浪线（连续多个）直接删除
+                s = s.replace(/[*_~]{2,}/g, '');
+                // 行首标记：标题 / 引用 / 无序列表 / 有序列表 / 分隔线
+                s = s.split('\n').map(function(line) {
+                    let t = line.replace(/^\s{0,3}(#{1,6})\s+/, '');          // ### 标题
+                    t = t.replace(/^\s{0,3}(>+)\s?/, '');                     // > 引用
+                    t = t.replace(/^\s{0,3}[-*+]\s+/, '');                    // - 无序列表
+                    t = t.replace(/^\s{0,3}\d+[.、)]\s+/, '');                // 1. 有序列表
+                    t = t.replace(/^\s*([-*_])\s*(?:\1\s*){2,}$/, '');        // --- 分隔线
+                    return t;
+                }).join('\n');
+                // 行内链接 / 图片：只保留显示文字 [文字](url) → 文字
+                s = s.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1');
+                s = s.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
+                // 兜底：删除相邻星号对与残留符号块
+                s = s.replace(/\*\s*\*/g, '');
+                s = s.replace(/[#>]{2,}/g, '');
+                return s;
+            }
+
+            // 括号深度计数的 [TOOL:...] 剥离：处理 JSON 内嵌套 } / ]，
+            // 并感知 JSON 字符串（字符串值里的 ] 不参与深度计数），
+            // 修复非贪婪正则在嵌套括号处截断导致工具标记残留的问题
+            function stripToolMarkers(text) {
+                if (!text || text.toUpperCase().indexOf('[TOOL') === -1) return text;
+                let result = '';
+                let i = 0;
+                while (i < text.length) {
+                    if (text[i] === '[' && text.substr(i, 5).toUpperCase() === '[TOOL') {
+                        let j = i + 5, depth = 1, inString = false;
+                        while (j < text.length) {
+                            const c = text[j];
+                            if (inString) {
+                                if (c === '\\') j++;          // 转义字符跳过
+                                else if (c === '"') inString = false;
+                            } else {
+                                if (c === '"') inString = true;
+                                else if (c === '[' || c === '{') depth++;
+                                else if (c === ']' || c === '}') {
+                                    depth--;
+                                    if (depth === 0) { j++; break; }
+                                }
+                            }
+                            j++;
+                        }
+                        i = j;  // 跳过整个 [TOOL:...] 标记
+                        continue;
+                    }
+                    result += text[i];
+                    i++;
+                }
+                return result;
+            }
+
             // 彻底清除分段符与指令标签（模型输出/历史存档可能残留）
             function cleanSeg(text) {
                 if (!text) return '';
@@ -502,10 +807,45 @@
                 }
                 // 合并多余的空行（连续 3+ 个换行合并为 2 个）
                 out = out.replace(/\n{3,}/g, '\n\n').trim();
+                // 先用深度计数剥离 [TOOL:{...}]（可能嵌套），再走通用标签清理
+                out = stripToolMarkers(out);
                 out = out
-                    .replace(/\[(ACTION|EMOTION|TOOL):[^\]]*\]/gi, '')  // [ACTION:xxx] [EMOTION:xxx] [TOOL:xxx]
+                    .replace(/\[(ACTION|EMOTION|TOOL|cheer|joy|happy|sad|anger|surprise|disgust|fear|neutral|speak|listen|wave|nod|agree|shake|tilt|gasp|sigh|bow|think|code|board):?[\s\S]*?\]/gi, '')  // [ACTION:xxx] [EMOTION:xxx] [TOOL:xxx] 以及短标签 [cheer][joy]
                     .replace(/【(ACTION|EMOTION|TOOL):[^】]*】/gi, '');   // 中文括号变体
+                // 兜底：清理残留的孤立方括号标签（如 [emoji] / 任何方括号单行）
+                out = out
+                    .split('\n')
+                    .map(line => /^\s*[\[【][^\]】]+[\]】]\s*$/.test(line) ? '' : line)
+                    .join('\n');
+                // 兜底：修复未闭合的 markdown 代码围栏 ```（常见于出题题面末尾多余的散反引号，
+                // 如  ```age = -5`` ` ），避免 marked 把后续整段误识别为 inline code 或拼接错误。
+                // 1) 行尾的散反引号（≥2 个、且前面没有成对围栏）直接削掉
+                out = out.replace(/[`]{2,}\s*$/g, '');
+                // 2) 全文 ``` 计数若为奇数，追加一个 ``` 收尾，保证 marked 解析不出错
+                const fenceCount = (out.match(/```/g) || []).length;
+                if (fenceCount % 2 === 1) out += '\n```';
                 return out;
+            }
+
+            // 兜底扫描：部分小模型会直接在正文中输出 [TOOL:show_terminal{...}] 字面量，
+            // 后端可能未提取到（regex 对含特殊字符的 JSON 不稳定）。这里从前端兜底再扫一次。
+            // 仅在 done 帧、且后端 tool_event 缺失时调用。
+            function _fallbackScanToolCall(content) {
+                if (!content) return;
+                try {
+                    var re = /\[TOOL:\s*(\{[\s\S]*?\})\s*\]/;
+                    var m = re.exec(content);
+                    if (!m) return;
+                    var obj = JSON.parse(m[1]);
+                    var validTypes = ['show_terminal', 'show_image', 'show_board'];
+                    if (validTypes.indexOf(obj.type) === -1) return;
+                    console.log('[fallback] 扫描到工具调用:', obj);
+                    if (typeof window.handleAITool === 'function') {
+                        window.handleAITool(obj);
+                    }
+                } catch (e) {
+                    // 静默失败，不是所有正文都符合 JSON 格式
+                }
             }
 
             function renderMarkdown(text) {
@@ -513,12 +853,15 @@
                 return DOMPurify.sanitize(marked.parse(cleanSeg(text)));
             }
 
-            function addBubble(text, sender) {
+            function addBubble(text, sender, opts) {
                 const bubble = document.createElement('div');
                 bubble.className = `bubble ${sender}`;
                 bubble.textContent = cleanSeg(text);
-                conversation.appendChild(bubble);
-                conversation.scrollTop = conversation.scrollHeight;
+                // 批量模式：不主动插入 DOM，由调用方用 DocumentFragment 收集后一次性插入
+                if (!(opts && opts.batch)) {
+                    conversation.appendChild(bubble);
+                    conversation.scrollTop = conversation.scrollHeight;
+                }
                 return bubble;
             }
 
@@ -532,11 +875,25 @@
                     sendMessage();
                 }
             });
+            // 长文本模式：写作文 / 粘贴长代码时切换到大幅输入区
+            let longInputMode = false;
+            const longInputBtn = document.getElementById('long-input-btn');
+            if (longInputBtn) {
+                longInputBtn.addEventListener('click', function() {
+                    longInputMode = !longInputMode;
+                    longInputBtn.classList.toggle('active', longInputMode);
+                    messageInput.classList.toggle('long-mode', longInputMode);
+                    autoResizeMessageInput();
+                    messageInput.focus();
+                });
+            }
+            function autoResizeMessageInput() {
+                const maxH = longInputMode ? Math.round(window.innerHeight * 0.55) : 140;
+                messageInput.style.height = 'auto';
+                messageInput.style.height = Math.min(messageInput.scrollHeight, maxH) + 'px';
+            }
             // Auto-resize textarea
-            messageInput.addEventListener('input', function() {
-                this.style.height = 'auto';
-                this.style.height = Math.min(this.scrollHeight, 140) + 'px';
-            });
+            messageInput.addEventListener('input', autoResizeMessageInput);
 
             function sendMessage() {
                 const text = messageInput.value.trim();
@@ -597,7 +954,7 @@
                 fetch('/api/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: text, lesson_folder: currentLesson, attachments: attachments })
+                    body: JSON.stringify({ message: text, lesson_folder: currentLesson, attachments: attachments, long_mode: longInputMode })
                 }).then(response => {
                     console.log('[chat] response received, status=' + response.status + ', ok=' + response.ok);
                     if (!response.body) throw new Error('No response body');
@@ -605,6 +962,28 @@
                     const decoder = new TextDecoder();
                     let fullText = '';
                     let finished = false;
+                    // 性能优化：流式渲染节流
+                    // 每帧 SSE 推的内容只缓存到 latestText，再用 RAF 批量写入 DOM；
+                    // renderMarkdown 只在 done 时跑一次（流式阶段用 textContent 增量追加）。
+                    let latestText = '';
+                    let renderQueued = false;
+                    let lastRenderTime = 0;
+                    const MIN_RENDER_INTERVAL = 50; // ms，最小渲染间隔
+                    function scheduleBubbleUpdate() {
+                        if (renderQueued) return;
+                        renderQueued = true;
+                        const now = performance.now();
+                        const wait = Math.max(0, MIN_RENDER_INTERVAL - (now - lastRenderTime));
+                        setTimeout(() => {
+                            renderQueued = false;
+                            lastRenderTime = performance.now();
+                            // 流式只更新纯文本，避免每帧 renderMarkdown 重解析
+                            teacherBubble.textContent = stripCodeFenceMarks(latestText);
+                            // 滚动只在用户已接近底部时跟随，避免抖动
+                            const nearBottom = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 80;
+                            if (nearBottom) conversation.scrollTop = conversation.scrollHeight;
+                        }, wait);
+                    }
 
                     function finishDialogue() {
                         if (finished) return;
@@ -647,8 +1026,8 @@
                                             const seg = data.segment !== undefined ? data.segment : 0;
                                             dialogueSegments[seg] = cleanSeg(data.content);
                                             fullText = dialogueSegments.filter(s => s).join('\n\n');
-                                            teacherBubble.textContent = fullText;
-                                            conversation.scrollTop = conversation.scrollHeight;
+                                            latestText = fullText;
+                                            scheduleBubbleUpdate();
                                         }
                                         // done 帧：用完整内容更新侧边栏
                                         if (data.done && data.content) {
@@ -675,6 +1054,25 @@
                                         if (data.tool_event && typeof data.tool_event === 'object') {
                                             console.log('AI 工具调用:', data.tool_event);
                                             handleAITool(data.tool_event);
+                                        }
+                                        // AI 工具调用（字符串协议）：start_exam → 自动出题并切到测验视图；
+                                        // next_unit → 自动进入下一课（此前前端未处理导致无反应）
+                                        if (data.tool_event && typeof data.tool_event === 'string') {
+                                            console.log('AI 工具调用(字符串):', data.tool_event);
+                                            handleStringToolEvent(data.tool_event);
+                                        }
+                                        // 兜底：部分模型会直接在正文输出 [TOOL:show_terminal{...}] 字面量，
+                                        // 后端可能未提取到（regex 对含特殊字符的 JSON 不稳定）。
+                                        // 这里从 done.content 兜底扫描一次，弥补 4B 模型对工具协议遵循度低的问题。
+                                        if (data.done && data.content && (!data.tool_event || typeof data.tool_event !== 'object')) {
+                                            _fallbackScanToolCall(data.content);
+                                        }
+                                        // AI 联动：收到 [PARAM:...] 参数直调 → 渐变设置模型参数（短暂动作，自动恢复）
+                                        if (data.params && typeof data.params === 'object') {
+                                            console.log('AI 参数直调:', data.params);
+                                            if (typeof window.setLive2DParams === 'function') {
+                                                window.setLive2DParams(data.params, 400, 2500);
+                                            }
                                         }
                                         // AI 联动：收到 TTS 音频 → 播放 + 口型同步
                                         if (data.audio_url && data.done) {
@@ -708,6 +1106,35 @@
             }
 
             // ---- 聊天斜杠命令：/exam /next /board ----
+            // 处理 AI 主动发起的字符串工具调用（start_exam / next_unit）
+            function handleStringToolEvent(event) {
+                if (event === 'start_exam') {
+                    addBubble('📝 老师发起随堂测验，正在出题...', 'teacher');
+                    let btn = (typeof examGenerateBtn !== 'undefined' && examGenerateBtn)
+                        ? examGenerateBtn : document.getElementById('exam-generate-btn');
+                    switchView('exam');
+                    if (btn) btn.click();
+                } else if (event === 'next_unit') {
+                    if (!currentLesson || currentLesson === 'default') {
+                        addBubble('⚠️ 还没有选课，无法进入下一课', 'teacher');
+                        return;
+                    }
+                    addBubble('⏩ 老师带你进入下一课...', 'teacher');
+                    fetch('/api/lesson/next_unit', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ folder: currentLesson })
+                    }).then(r => r.json()).then(data => {
+                        if (data.success) {
+                            addBubble('✅ 已进入下一课', 'teacher');
+                            enterLesson(currentLesson);
+                        } else {
+                            addBubble('⚠️ ' + (data.message || '无法进入下一课'), 'teacher');
+                        }
+                    }).catch(err => addBubble('❌ 进入下一课失败: ' + err.message, 'teacher'));
+                }
+            }
+
             function handleSlashCommand(cmd, args) {
                 switch (cmd) {
                     case 'exam':
@@ -754,7 +1181,8 @@
                         }
                         if (args.toLowerCase() === 'list') {
                             addBubble('🎬 内置动作：wave（挥手）、hello（打招呼）、idle（待机）、listen（倾听）、speak（说话）、think（思考）', 'teacher');
-                            const builtinKeys = ['point', 'blackboard', 'greet', 'hello', 'idle', 'listen', 'speak', 'think', 'wave'];
+                            addBubble('🎬 语义动作（参数驱动）：nod（点头）、agree（赞许点头）、shake（摇头）、tilt（歪头）、gasp（惊讶）、cheer（雀跃）、sigh（叹气）、bow（鞠躬）', 'teacher');
+                            const builtinKeys = ['point', 'blackboard', 'greet', 'hello', 'idle', 'listen', 'speak', 'think', 'wave', 'nod', 'agree', 'shake', 'tilt', 'gasp', 'cheer', 'sigh', 'bow'];
                             const customKeys = Object.keys(ACTION_MAP).filter(function(k) { return builtinKeys.indexOf(k) < 0; });
                             if (customKeys.length) {
                                 addBubble('🎬 自定义动作：' + customKeys.map(k => k + '→' + ACTION_MAP[k]).join('、'), 'teacher');
@@ -808,6 +1236,54 @@
                             addBubble('🎭 已强制显示表情：' + emo, 'teacher');
                         } else {
                             addBubble('⚠️ 表情系统未就绪', 'teacher');
+                        }
+                        break;
+                    case 'param':
+                        // 直接调整模型参数（关节/五官），如 /param ParamAngleX=-15 或 /param reset
+                        if (!args) {
+                            addBubble('用法：/param <参数名>=<数值> [参数名2=<数值>...] [时长ms]；/param reset 恢复姿势；/param list 查看可调参数', 'teacher');
+                            break;
+                        }
+                        if (args.toLowerCase() === 'list') {
+                            const plist = (typeof window.getLive2DParamList === 'function') ? window.getLive2DParamList() : [];
+                            addBubble('🎛️ 常用示例：ParamAngleX/Y/Z（头部左右/上下/侧歪）、ParamBodyAngleX/Y/Z（身体）、ParamEyeLOpen/ROpen（眼睛）、ParamJawOpen/ParamMouthOpenY（嘴巴）、ParamMouthSmile（微笑）、ParamBrowLAngle/RAngle（挑眉）、ParamEyeBallX/Y（眼神）、MouthFrownLeft/Right（撇嘴）、Param40/43（叉腰）', 'teacher');
+                            addBubble('🎛️ 可调参数（' + plist.length + ' 个）：' + plist.join('、'), 'teacher');
+                            break;
+                        }
+                        if (args.toLowerCase() === 'reset') {
+                            if (typeof window.resetLive2DPose === 'function') {
+                                window.resetLive2DPose();
+                                addBubble('🧍 已恢复头部与身体角度', 'teacher');
+                            } else {
+                                addBubble('⚠️ 参数系统未就绪', 'teacher');
+                            }
+                            break;
+                        }
+                        {
+                            const parts = args.trim().split(/\s+/);
+                            const dict = {};
+                            let duration = null;
+                            parts.forEach(function(part) {
+                                const eq = part.indexOf('=');
+                                if (eq > 0) {
+                                    const k = part.slice(0, eq).trim();
+                                    const v = parseFloat(part.slice(eq + 1));
+                                    if (k && !isNaN(v)) dict[k] = v;
+                                } else if (/^\d+$/.test(part)) {
+                                    duration = parseInt(part, 10);
+                                }
+                            });
+                            const keys = Object.keys(dict);
+                            if (!keys.length) {
+                                addBubble('⚠️ 参数格式错误，示例：/param ParamAngleX=-15 ParamEyeLOpen=0.5 800', 'teacher');
+                                break;
+                            }
+                            if (typeof window.setLive2DParams === 'function') {
+                                window.setLive2DParams(dict, duration == null ? 300 : duration, 0);
+                                addBubble('🎛️ 已设置参数：' + keys.map(function(k) { return k + '=' + dict[k]; }).join('、'), 'teacher');
+                            } else {
+                                addBubble('⚠️ 参数系统未就绪', 'teacher');
+                            }
                         }
                         break;
                     case 'ask':
@@ -871,6 +1347,7 @@
                         addBubble('/terminal [语言] [代码] —— 打开终端弹窗并执行代码（语言: python/javascript/shell/powershell，可交互）', 'teacher');
                         addBubble('/action <动作名> —— 播放模型动作（/action list 查看全部，自定义动作可在设置中添加）', 'teacher');
                         addBubble('/emotion <表情名> —— 强制显示表情（happy/sad/angry/think/surprised/neutral）', 'teacher');
+                        addBubble('/param <参数名>=<数值> [..] [时长ms] —— 直接调整模型参数/关节（/param list 查看，/param reset 恢复）', 'teacher');
                         addBubble('/ask <内容> —— 直接与 AI 对话（不带课程上下文）', 'teacher');
                         addBubble('/help —— 显示本帮助', 'teacher');
                         break;
@@ -912,7 +1389,7 @@
                     dialogueContent.classList.remove('type-caret');
                     // 显示最后一段的完整内容（保证即使打字被打断也展示全文）
                     const last = dialogueSegments[dialogueSegments.length - 1] || '';
-                    dialogueContent.textContent = last;
+                    dialogueContent.textContent = stripMarkdownSyntax(stripCodeFenceMarks(last));
                     dialogueContent.scrollTop = 0;
                     dialogueIndicator.textContent = '✓ 已记录';
                     dialogueIndicator.classList.remove('hidden');
@@ -923,33 +1400,55 @@
 
             function typeDialogue(text) {
                 if (dialogueTypeTimer) clearInterval(dialogueTypeTimer);
-                const chars = text.split('');
                 dialogueContent.textContent = '';
                 dialogueContent.classList.add('type-caret');
                 dialogueIndicator.textContent = '▼';
                 dialogueIndicator.classList.add('hidden');
-                let i = 0;
+                // 拆分「普通文本」与「代码块」：代码块一次性整体显示，普通文本逐字打字
+                // 普通文本部分先剥离 markdown 符号（**、#、列表标记等），打字/显示不再出现格式化残渣
+                const parts = [];
+                const fenceRe = /```[\s\S]*?(?:```|$)/g;
+                let last = 0, m;
+                while ((m = fenceRe.exec(text)) !== null) {
+                    if (m.index > last) parts.push({ type: 'text', value: stripMarkdownSyntax(text.slice(last, m.index)) });
+                    parts.push({ type: 'code', value: m[0] });
+                    last = m.index + m[0].length;
+                }
+                if (last < text.length) parts.push({ type: 'text', value: stripMarkdownSyntax(text.slice(last)) });
+                if (!parts.length) parts.push({ type: 'text', value: stripMarkdownSyntax(text) });
+                let pi = 0, ci = 0;
                 dialogueTypeTimer = setInterval(function() {
-                    if (i < chars.length) {
-                        dialogueContent.textContent = chars.slice(0, i + 1).join('');
-                        dialogueContent.scrollTop = dialogueContent.scrollHeight;
-                        i++;
-                    } else {
+                    if (pi >= parts.length) {
                         clearInterval(dialogueTypeTimer);
                         dialogueTypeTimer = null;
                         dialogueContent.classList.remove('type-caret');
-                        // 打字完成：显示完整文本（保证最后字符一定可见）
-                        dialogueContent.textContent = text;
+                        dialogueContent.textContent = stripMarkdownSyntax(stripCodeFenceMarks(text));
                         dialogueContent.scrollTop = 0;
-                        // 如果是最后一段 → 切换为「已记录」（对话条永久保留）；否则提示按 Enter 继续
+                        // 打字完成：显示完整文本（保证最后字符一定可见）
                         if (dialogueSegIdx >= dialogueSegments.length - 1) {
                             dialogueIndicator.textContent = '✓ 已记录';
-                            dialogueIndicator.classList.remove('hidden');
                         } else {
                             dialogueIndicator.textContent = '▼ 按 Enter 继续';
-                            dialogueIndicator.classList.remove('hidden');
                         }
+                        dialogueIndicator.classList.remove('hidden');
+                        return;
                     }
+                    const part = parts[pi];
+                    if (part.type === 'code') {
+                        // 代码块整体显示（过滤 ``` 围栏标记），不逐字打字
+                        dialogueContent.textContent += stripCodeFenceMarks(part.value);
+                        pi++;
+                        ci = 0;
+                        return;
+                    }
+                    if (ci < part.value.length) {
+                        dialogueContent.textContent += part.value[ci];
+                        ci++;
+                    } else {
+                        pi++;
+                        ci = 0;
+                    }
+                    dialogueContent.scrollTop = dialogueContent.scrollHeight;
                 }, 28);
             }
 
@@ -990,7 +1489,7 @@
                     clearInterval(dialogueTypeTimer);
                     dialogueTypeTimer = null;
                     const segText = dialogueSegments[dialogueSegIdx] || '';
-                    dialogueContent.textContent = segText;
+                    dialogueContent.textContent = stripMarkdownSyntax(stripCodeFenceMarks(segText));
                     dialogueContent.classList.remove('type-caret');
                     // 跳过当前段打字后，判断是否是最后一段
                     if (dialogueSegIdx >= dialogueSegments.length - 1) {
@@ -1009,12 +1508,32 @@
             // ============================
             playBtn.addEventListener('click', function() {
                 const last = conversation.querySelector('.bubble.teacher:last-child');
-                if (last && last.textContent) {
-                    const utter = new SpeechSynthesisUtterance(last.textContent);
-                    utter.lang = 'zh-CN';
-                    utter.rate = 1.0;
-                    speechSynthesis.speak(utter);
-                }
+                if (!last || !last.textContent) return;
+                // 统一走后端 TTS 链路（与自动朗读一致）：未配置语音服务时不再
+                // 静默使用浏览器 speechSynthesis（修复"空 API 仍能朗读"的问题）
+                const text = stripToolMarkers(cleanSeg(last.textContent)).slice(0, 500);
+                if (!text) return;
+                playBtn.disabled = true;
+                fetch('/api/tts/speak', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: text })
+                }).then(function(r) { return r.json(); }).then(function(data) {
+                    playBtn.disabled = false;
+                    if (data.ok && data.audio_url) {
+                        playTeacherAudio(data.audio_url);
+                    } else {
+                        console.warn('[tts] 朗读失败:', data.error);
+                        if (typeof window.showToast === 'function') {
+                            showToast(data.error || '未配置可用的语音服务');
+                        } else {
+                            alert(data.error || '未配置可用的语音服务，请在设置中配置 TTS');
+                        }
+                    }
+                }).catch(function(err) {
+                    playBtn.disabled = false;
+                    console.warn('[tts] 朗读请求失败:', err);
+                });
             });
 
             // ============================
@@ -1045,30 +1564,56 @@
                 });
             });
 
+            function examTypeLabel(type) {
+                return { single: '单选', multiple: '多选', boolean: '判断', fill: '填空' }[type] || (type || '单选');
+            }
+
             function renderExamQuestions(questions) {
-                examList.innerHTML = questions.map((q, idx) => `
-                    <div class="exam-question" data-idx="${idx}">
-                        <div class="q-title">第 ${idx+1} 题（${q.type || '单选'}）</div>
-                        <div style="margin-bottom:6px; font-size:14px; color:var(--text-primary);">${renderMarkdown(q.question)}</div>
-                        <div class="q-options">
-                            ${q.options ? q.options.map((opt, oi) => `
-                                <label>
-                                    <input type="${q.type === '多选' ? 'checkbox' : 'radio'}" name="q${idx}" value="${String.fromCharCode(65+oi)}">
-                                    ${renderMarkdown(opt)}
-                                </label>
-                            `).join('') : ''}
+                examList.innerHTML = questions.map((q, idx) => {
+                    const type = q.type || 'single';
+                    let answerInput = '';
+                    if (type === 'fill') {
+                        answerInput = `
+                            <div class="q-fill">
+                                <input type="text" class="fill-input" placeholder="请输入你的答案…"
+                                    style="width:85%; padding:8px 12px; border:1px solid var(--border); border-radius:8px; background:var(--bg-card); color:var(--text-primary); font-size:14px;">
+                            </div>`;
+                    } else if (q.options && q.options.length) {
+                        answerInput = `
+                            <div class="q-options">
+                                ${q.options.map((opt, oi) => `
+                                    <label>
+                                        <input type="${type === 'multiple' ? 'checkbox' : 'radio'}" name="q${idx}" value="${String.fromCharCode(65 + oi)}">
+                                        ${renderMarkdown(opt)}
+                                    </label>
+                                `).join('')}
+                            </div>`;
+                    }
+                    return `
+                        <div class="exam-question" data-idx="${idx}" data-type="${type}">
+                            <div class="q-title">第 ${idx + 1} 题（${examTypeLabel(type)}）</div>
+                            <div style="margin-bottom:6px; font-size:14px; color:var(--text-primary);">${renderMarkdown(q.question)}</div>
+                            ${answerInput}
+                            <div class="q-explanation" style="display:none;"></div>
                         </div>
-                        <div class="q-explanation" style="display:none;"></div>
-                    </div>
-                `).join('');
+                    `;
+                }).join('');
             }
 
             examSubmitBtn.addEventListener('click', function() {
                 const questions = document.querySelectorAll('.exam-question');
                 const answers = {};
                 questions.forEach((qDiv, idx) => {
+                    const type = qDiv.getAttribute('data-type') || 'single';
                     const inputs = qDiv.querySelectorAll('input:checked');
-                    answers[idx] = Array.from(inputs).map(i => i.value);
+                    if (type === 'fill') {
+                        const fillInput = qDiv.querySelector('.fill-input');
+                        answers[idx] = fillInput ? fillInput.value.trim() : '';
+                    } else if (type === 'multiple') {
+                        answers[idx] = Array.from(inputs).map(i => i.value).join(',');
+                    } else {
+                        answers[idx] = inputs.length ? inputs[0].value : '';
+                    }
                 });
                 fetch('/api/exam/submit', {
                     method: 'POST',
@@ -1100,7 +1645,7 @@
                                 <div class="resource-item">
                                     <label>
                                         <input type="checkbox" value="${idx}" checked>
-                                        <span><strong>${r.title}</strong> <small>${r.type} · ${r.description || ''}</small></span>
+                                        <span><strong>${r.title}</strong> <small>${r.type === 'video' ? '🎬 视频课程 · ' + (r.platform === 'bilibili' ? 'B站' : r.platform === 'netease_open_course' ? '网易公开课' : '') + ' · <a href="' + (r.url || '#') + '" target="_blank" rel="noopener" style="color:var(--gold);">打开视频</a>' : r.type + ' · ' + (r.description || '')}</small></span>
                                     </label>
                                 </div>
                             `).join('');
@@ -1136,14 +1681,18 @@
                     if (data.status === 'ok') {
                         const downloads = data.downloads || [];
                         const failed = downloads.filter(d => d.status === 'error');
-                        const okList = downloads.filter(d => d.status === 'ok');
-                        if (failed.length === downloads.length) {
-                            statusEl.textContent = '❌ 下载失败：' + (failed[0].error || '未知错误');
-                        } else if (failed.length) {
-                            statusEl.innerHTML = '⚠️ 部分成功：' + okList.map(d => d.title).join('、') + '；失败：' + failed.map(d => d.title).join('、');
-                        } else {
-                            statusEl.innerHTML = '✅ 下载完成：' + okList.map(d => d.title).join('、') + '<br><small style="color:var(--text-dim);">保存在课程目录 lessons/' + (data.lesson_folder || '') + '/</small>';
+                        const okList = downloads.filter(d => d.status === 'ok' && !d.skipped_video);
+                        const videoList = downloads.filter(d => d.skipped_video);
+                        const parts = [];
+                        if (okList.length) parts.push('✅ 下载完成：' + okList.map(d => d.title).join('、'));
+                        if (videoList.length) {
+                            parts.push('🎬 视频无需下载（点开链接观看）：' + videoList.map(function(d) {
+                                return '<a href="' + (d.url || '#') + '" target="_blank" rel="noopener" style="color:var(--gold);">' + d.title + '</a>';
+                            }).join('、'));
                         }
+                        if (failed.length) parts.push('⚠️ 失败：' + failed.map(d => d.title + (d.error ? '(' + d.error + ')' : '')).join('、'));
+                        if (!parts.length && !failed.length) parts.push('未选中可下载资源');
+                        statusEl.innerHTML = parts.join('<br>') + (okList.length ? '<br><small style="color:var(--text-dim);">保存在课程目录 lessons/' + (data.lesson_folder || '') + '/</small>' : '');
                     } else {
                         statusEl.textContent = '❌ 下载失败: ' + (data.error || '未知错误');
                     }

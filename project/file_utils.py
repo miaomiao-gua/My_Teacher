@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import urlparse
@@ -9,9 +10,15 @@ import requests
 from docx import Document
 from pypdf import PdfReader
 
+# python-pptx 安装在项目本地目录（D 盘，避免写入系统 site-packages 受限）
+_PY_DEPS = Path(__file__).resolve().parent / "py_deps"
+if _PY_DEPS.exists() and str(_PY_DEPS) not in sys.path:
+    sys.path.insert(0, str(_PY_DEPS))
+from pptx import Presentation  # noqa: E402
+
 
 ALLOWED_SCHEMES = {"http", "https"}
-ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt", ".md", ".html"}
+ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".pptx", ".ppt", ".txt", ".md", ".html"}
 
 
 def sanitize_topic(topic: str) -> str:
@@ -62,6 +69,8 @@ def download_resource(resource: Dict[str, Any], lesson_dir: str | Path, file_pre
         suffix = ".docx"
     elif "word" in content_type.lower() or url.lower().endswith(".doc"):
         suffix = ".doc"
+    elif "pptx" in content_type.lower() or url.lower().endswith(".pptx"):
+        suffix = ".pptx"
     elif url.lower().endswith(".txt"):
         suffix = ".txt"
     elif url.lower().endswith(".html") or url.lower().endswith(".htm"):
@@ -70,7 +79,7 @@ def download_resource(resource: Dict[str, Any], lesson_dir: str | Path, file_pre
     target_path = lesson_path / f"{file_prefix}{suffix}"
     target_path.write_bytes(response.content)
 
-    if suffix in {".pdf", ".docx", ".doc"}:
+    if suffix in {".pdf", ".docx", ".doc", ".pptx"}:
         markdown_path = target_path.with_suffix(".md")
         markdown_text = convert_document_to_markdown(target_path)
         markdown_path.write_text(markdown_text, encoding="utf-8")
@@ -97,6 +106,32 @@ def _read_docx_text(file_path: str | Path) -> str:
         return ""
 
 
+def _read_pptx_text(file_path: str | Path) -> str:
+    """读取 .pptx：按幻灯片顺序提取所有文本框内容（含表格）。"""
+    try:
+        prs = Presentation(str(file_path))
+        slides: List[str] = []
+        for idx, slide in enumerate(prs.slides, 1):
+            parts: List[str] = []
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    text = "\n".join(
+                        para.text for para in shape.text_frame.paragraphs if para.text.strip()
+                    )
+                    if text.strip():
+                        parts.append(text)
+                if getattr(shape, "has_table", False) and shape.has_table:
+                    for row in shape.table.rows:
+                        cells = [cell.text.strip() for cell in row.cells]
+                        if any(cells):
+                            parts.append(" | ".join(cells))
+            if parts:
+                slides.append(f"## 幻灯片 {idx}\n\n" + "\n".join(parts))
+        return "\n\n".join(slides)
+    except Exception:
+        return ""
+
+
 def convert_document_to_markdown(file_path: str | Path) -> str:
     path = Path(file_path)
     suffix = path.suffix.lower()
@@ -104,12 +139,18 @@ def convert_document_to_markdown(file_path: str | Path) -> str:
         text = _read_pdf_text(path)
     elif suffix in {".docx", ".doc"}:
         text = _read_docx_text(path)
+    elif suffix == ".pptx":
+        text = _read_pptx_text(path)
+    elif suffix == ".ppt":
+        text = ""
     elif suffix in {".txt", ".md"}:
         text = path.read_text(encoding="utf-8", errors="ignore")
     else:
         text = path.read_text(encoding="utf-8", errors="ignore")
 
     if not text.strip():
+        if suffix == ".ppt":
+            return "# 文档内容\n\n无法直接读取旧版 .ppt（二进制格式）。请用 PowerPoint 另存为 .pptx 后重新上传。"
         return "# 文档内容\n\n无法自动提取正文内容。"
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]

@@ -188,6 +188,8 @@
             const ttsBaseUrl = document.getElementById('tts-base-url');
             const ttsTestBtn = document.getElementById('tts-test-btn');
             const ttsTestStatus = document.getElementById('tts-test-status');
+            const voiceEnabled = document.getElementById('voice-enabled');
+            const voiceEnabledVal = document.getElementById('voice-enabled-val');
             const visionEnabled = document.getElementById('vision-enabled');
             const visionEnabledVal = document.getElementById('vision-enabled-val');
             const visionBaseUrl = document.getElementById('vision-base-url');
@@ -210,12 +212,14 @@
                 document.querySelectorAll('.vision-field').forEach(el => { el.style.display = visionOn ? '' : 'none'; });
                 if (lessonSearchVal) lessonSearchVal.textContent = lessonSearch.checked ? '开' : '关';
                 if (visionEnabledVal) visionEnabledVal.textContent = visionOn ? '开' : '关';
+                if (voiceEnabledVal) voiceEnabledVal.textContent = voiceEnabled.checked ? '开' : '关';
             }
             if (chatProvider) chatProvider.addEventListener('change', syncModelFields);
             if (lessonProvider) lessonProvider.addEventListener('change', syncModelFields);
             if (ttsProvider) ttsProvider.addEventListener('change', syncModelFields);
             if (lessonSearch) lessonSearch.addEventListener('change', syncModelFields);
             if (visionEnabled) visionEnabled.addEventListener('change', syncModelFields);
+            if (voiceEnabled) voiceEnabled.addEventListener('change', syncModelFields);
 
             // 角色外观 & 背景设置
             const portraitPosX = document.getElementById('portrait-pos-x');
@@ -261,6 +265,92 @@
             let live2dModel = null;
             let live2dApp = null;
 
+            // ============================
+            // 注视跟随（自绘） + 5 秒不动回正（保留呼吸/摆动）
+            // 背景：pl2d 原生 autoFocus 把画布坐标按"模型坐标归一化"映射（模型中心为原点）。
+            // 本模型中心贴在画布底部，鼠标在画布中上部时会被归一化到很大的负 ty →
+            // 视线总是落在鼠标上方（用户反馈的"盯着鼠标上面一点"）。因此关闭原生 autoFocus，
+            // 改为以画布内"头部中性点"为基准、按画布比例映射鼠标位移为注视方向。
+            // 全局只注册一次监听；模型重载后通过 live2dApp.ticker.add(_gazeResetTicker) 重挂 ticker。
+            // ============================
+            const _GAZE_IDLE_MS = 5000;      // 无鼠标活动多少毫秒后回正
+            const _GAZE_RESET_MS = 1200;     // 回正过渡时长（ease-out cubic）
+            let _gazeLastActiveTs = Date.now();
+            let _gazeResetting = false;
+            let _gazeResetStartTs = 0;
+            let _gazeHasEverMoved = false;
+            let _gazeResetFrom = { x: 0, y: 0 };
+
+            function _feedGazeFocus(e) {
+                const model = live2dModel;
+                if (!model || !model.internalModel || !model.internalModel.focusController) return;
+                const canvasEl = document.getElementById('live2d-canvas');
+                if (!canvasEl) return;
+                const r = canvasEl.getBoundingClientRect();
+                if (!r.width || !r.height) return;
+                let dx, dy;
+                try {
+                    // 头部中性点：画布上方 30% 处（本模型头部位于画布上部；模型位置调整后仍近似成立）
+                    const neutralY = r.height * 0.30;
+                    const radiusX = r.width * 0.55;   // 水平满幅半径
+                    const radiusY = r.height * 0.42;  // 垂直满幅半径
+                    dx = (e.clientX - r.left - r.width * 0.5) / radiusX;
+                    dy = (e.clientY - r.top - neutralY) / radiusY;
+                } catch (err) { return; }
+                const len = Math.sqrt(dx * dx + dy * dy);
+                if (len > 1) { dx /= len; dy /= len; }
+                // PIXI 屏幕 y 向下为正；focusController y 向上为正（+y = 抬头）
+                model.internalModel.focusController.focus(dx, -dy, false);
+            }
+
+            function _gazeOnPointerMove(e) {
+                _gazeLastActiveTs = Date.now();
+                _gazeResetting = false;  // 用户一动，立即取消回正渐变
+                _gazeHasEverMoved = true;
+                _feedGazeFocus(e);
+            }
+
+            function _gazeResetTicker() {
+                if (!live2dModel || !live2dModel.internalModel) return;
+                const fc = live2dModel.internalModel.focusController;
+                if (!fc) return;
+                const idleMs = Date.now() - _gazeLastActiveTs;
+                if (_gazeHasEverMoved && idleMs >= _GAZE_IDLE_MS && !_gazeResetting) {
+                    _gazeResetting = true;
+                    _gazeResetStartTs = Date.now();
+                    _gazeResetFrom = { x: fc.x, y: fc.y };
+                }
+                if (!_gazeResetting) return;
+                const progress = Math.min(1, (Date.now() - _gazeResetStartTs) / _GAZE_RESET_MS);
+                const ease = 1 - Math.pow(1 - progress, 3); // ease-out cubic
+                // instant=true 直接置位，避免 focusController 自身插值干扰渐变
+                fc.focus(_gazeResetFrom.x * (1 - ease), _gazeResetFrom.y * (1 - ease), true);
+                if (progress >= 1) _gazeResetting = false;
+            }
+
+            // 全局只注册一次（防 reloadLive2DModel 重复累积监听）
+            if (!window._gazeListenersReady) {
+                window._gazeListenersReady = true;
+                document.addEventListener('mousemove', _gazeOnPointerMove);
+            }
+
+            // 轻量 toast 提示（无依赖）
+            function showToast(msg, ms) {
+                try {
+                    let el = document.getElementById('global-toast');
+                    if (!el) {
+                        el = document.createElement('div');
+                        el.id = 'global-toast';
+                        el.style.cssText = 'position:fixed; left:50%; bottom:64px; transform:translateX(-50%); background:rgba(20,14,8,0.92); color:#f5e6cf; font-size:13px; padding:8px 16px; border-radius:10px; border:1px solid rgba(212,163,115,0.4); z-index:99999; max-width:80vw; box-shadow:0 4px 18px rgba(0,0,0,0.35);';
+                        document.body.appendChild(el);
+                    }
+                    el.textContent = msg;
+                    el.style.display = 'block';
+                    if (el._toastTimer) clearTimeout(el._toastTimer);
+                    el._toastTimer = setTimeout(function() { el.style.display = 'none'; }, ms || 2600);
+                } catch (e) {}
+            }
+
             // 预设动作映射：语义化动作名 → 模型动作组
             const ACTION_MAP = {
                 'point': 'think',       // 指向 → 思考动作
@@ -272,6 +362,113 @@
                 'speak': 'speak',
                 'think': 'think',
             };
+
+            // ============================================================
+            // 语义动作引擎（借鉴 ActingDoll 的 set_parameter 参数级控制思路）：
+            // 不依赖 motion3.json 预设文件，用 ARKit 参数时间轴直接驱动模型。
+            // 头部：ParamAngleX(左右转)/Y(上下点头)/Z(侧歪)；身体：ParamBodyAngleX/Y/Z
+            // ============================================================
+            const SEMANTIC_ACTIONS = {
+                nod: { dur: 800, frames: [ // 点头（同意/肯定）
+                    { t: 0, params: { ParamAngleY: 0 } },
+                    { t: 0.25, params: { ParamAngleY: -16 } },
+                    { t: 0.5, params: { ParamAngleY: 0 } },
+                    { t: 0.75, params: { ParamAngleY: -16 } },
+                    { t: 1, params: { ParamAngleY: 0 } },
+                ] },
+                shake: { dur: 900, frames: [ // 摇头（否定/不赞成）
+                    { t: 0, params: { ParamAngleX: 0 } },
+                    { t: 0.15, params: { ParamAngleX: 14 } },
+                    { t: 0.3, params: { ParamAngleX: -14 } },
+                    { t: 0.45, params: { ParamAngleX: 14 } },
+                    { t: 0.6, params: { ParamAngleX: -14 } },
+                    { t: 0.8, params: { ParamAngleX: 0 } },
+                    { t: 1, params: { ParamAngleX: 0 } },
+                ] },
+                tilt: { dur: 1200, frames: [ // 歪头（疑惑/好奇）
+                    { t: 0, params: { ParamAngleZ: 0 } },
+                    { t: 0.4, params: { ParamAngleZ: 16 } },
+                    { t: 0.8, params: { ParamAngleZ: 16 } },
+                    { t: 1, params: { ParamAngleZ: 0 } },
+                ] },
+                bow: { dur: 1600, frames: [ // 鞠躬（开场问好/结束道别）
+                    { t: 0, params: { ParamBodyAngleX: 0, ParamAngleY: 0 } },
+                    { t: 0.25, params: { ParamBodyAngleX: -26, ParamAngleY: -16 } },
+                    { t: 0.6, params: { ParamBodyAngleX: -26, ParamAngleY: -16 } },
+                    { t: 0.85, params: { ParamBodyAngleX: -8, ParamAngleY: -5 } },
+                    { t: 1, params: { ParamBodyAngleX: 0, ParamAngleY: 0 } },
+                ] },
+                gasp: { dur: 1400, frames: [ // 惊讶（睁大眼+张嘴+挑眉）
+                    { t: 0, params: { ParamJawOpen: 0, ParamBrowLForm: 0, ParamBrowRForm: 0 } },
+                    { t: 0.2, params: { ParamJawOpen: 0.7, ParamBrowLForm: 1, ParamBrowRForm: 1 } },
+                    { t: 0.6, params: { ParamJawOpen: 0.5, ParamBrowLForm: 1, ParamBrowRForm: 1 } },
+                    { t: 1, params: { ParamJawOpen: 0, ParamBrowLForm: 0, ParamBrowRForm: 0 } },
+                ] },
+                cheer: { dur: 1200, frames: [ // 雀跃（学生答对/值得庆祝时）
+                    { t: 0, params: { ParamBodyAngleX: 0, ParamMouthSmile: 0 } },
+                    { t: 0.2, params: { ParamBodyAngleX: 9, ParamMouthSmile: 1 } },
+                    { t: 0.35, params: { ParamBodyAngleX: -9, ParamMouthSmile: 1 } },
+                    { t: 0.5, params: { ParamBodyAngleX: 9, ParamMouthSmile: 1 } },
+                    { t: 0.65, params: { ParamBodyAngleX: -9, ParamMouthSmile: 1 } },
+                    { t: 0.85, params: { ParamBodyAngleX: 0, ParamMouthSmile: 1 } },
+                    { t: 1, params: { ParamBodyAngleX: 0, ParamMouthSmile: 0 } },
+                ] },
+                sigh: { dur: 1500, frames: [ // 叹气（遗憾/无奈）
+                    { t: 0, params: { ParamAngleY: 0, ParamBodyAngleX: 0, MouthFrownLeft: 0, MouthFrownRight: 0 } },
+                    { t: 0.3, params: { ParamAngleY: -12, ParamBodyAngleX: -8, MouthFrownLeft: 0.3, MouthFrownRight: 0.3 } },
+                    { t: 0.7, params: { ParamAngleY: -12, ParamBodyAngleX: -8, MouthFrownLeft: 0.3, MouthFrownRight: 0.3 } },
+                    { t: 1, params: { ParamAngleY: 0, ParamBodyAngleX: 0, MouthFrownLeft: 0, MouthFrownRight: 0 } },
+                ] },
+                agree: { dur: 600, frames: [ // 赞许点头（表扬学生）
+                    { t: 0, params: { ParamAngleY: 0, ParamMouthSmile: 0 } },
+                    { t: 0.3, params: { ParamAngleY: -14, ParamMouthSmile: 0.8 } },
+                    { t: 0.6, params: { ParamAngleY: 0, ParamMouthSmile: 0.8 } },
+                    { t: 1, params: { ParamAngleY: 0, ParamMouthSmile: 0 } },
+                ] },
+            };
+
+            let _semTicker = null;  // 语义动作 ticker 回调
+            function runParamMotion(keyframes, duration, intensity) {
+                if (!live2dApp || !live2dModel || !live2dModel.internalModel || !live2dModel.internalModel.coreModel) return false;
+                stopParamMotion();
+                const core = live2dModel.internalModel.coreModel;
+                const amp = (intensity == null ? 1 : Math.max(0.1, Math.min(1, Number(intensity) / 100)));
+                const kf = keyframes || [];
+                if (!kf.length) return false;
+                const start = Date.now();
+                const dur = duration || 800;
+                const tickerFn = function() {
+                    if (!live2dModel || !live2dModel.internalModel || !live2dModel.internalModel.coreModel) return;
+                    const c = live2dModel.internalModel.coreModel;
+                    const t = Math.min(1, (Date.now() - start) / dur);
+                    let a = kf[0], b = kf[kf.length - 1];
+                    for (let i = 0; i < kf.length - 1; i++) {
+                        if (t >= kf[i].t && t <= kf[i + 1].t) { a = kf[i]; b = kf[i + 1]; break; }
+                    }
+                    const segT = (b.t === a.t) ? 0 : (t - a.t) / (b.t - a.t);
+                    const allIds = {};
+                    kf.forEach(function(k) { Object.keys(k.params).forEach(function(id) { allIds[id] = 1; }); });
+                    Object.keys(allIds).forEach(function(id) {
+                        const va = (a.params[id] == null ? 0 : a.params[id]);
+                        const vb = (b.params[id] == null ? 0 : b.params[id]);
+                        _coreSetParam(c, id, (va + (vb - va) * segT) * amp);
+                    });
+                    if (t >= 1) {
+                        try { live2dApp.ticker.remove(tickerFn); } catch (e) {}
+                        _semTicker = null;
+                    }
+                };
+                _semTicker = tickerFn;
+                live2dApp.ticker.add(tickerFn);
+                return true;
+            }
+            function stopParamMotion() {
+                if (_semTicker && live2dApp) {
+                    try { live2dApp.ticker.remove(_semTicker); } catch (e) {}
+                    _semTicker = null;
+                }
+            }
+            window.getSemanticActionNames = function() { return Object.keys(SEMANTIC_ACTIONS); };
 
             // 合并用户自定义动作到 ACTION_MAP（名字 → 模型动作ID），供 /action 与 AI 使用
             // 兼容两种格式：旧 {名字: "动作ID"} 与 新 {名字: {id, intensity}}
@@ -554,6 +751,15 @@
                     }
                     return Promise.resolve(true);
                 }
+                // 语义动作：参数时间轴直接驱动（不依赖 motion3 预设文件），如 nod/shake/tilt/bow/gasp/cheer/sigh/agree
+                if (SEMANTIC_ACTIONS[actionName]) {
+                    runParamMotion(SEMANTIC_ACTIONS[actionName].frames, SEMANTIC_ACTIONS[actionName].dur, intensity);
+                    console.log('Live2D 触发语义动作:', actionName);
+                    if (typeof onActionCallback === 'function') {
+                        onActionCallback(actionName, actionName);
+                    }
+                    return Promise.resolve(true);
+                }
                 const motion = ACTION_MAP[actionName] || actionName;
                 if (!isMotionAvailable(motion)) {
                     console.warn('Live2D: 动作不存在:', motion, '| 可用:', availableMotions);
@@ -612,6 +818,103 @@
                 _waveTicker = tickerFn;
                 live2dApp.ticker.add(tickerFn);
             }
+
+            // ============================================================
+            // 参数直调：/param 命令 + AI [PARAM:...] 协议共用
+            // 借鉴 ActingDoll 的 set_parameter：直接对模型参数赋值（带渐变）
+            // ============================================================
+            const PARAM_RANGES = {
+                ParamAngleX: [-45, 45], ParamAngleY: [-45, 45], ParamAngleZ: [-45, 45],
+                ParamBodyAngleX: [-45, 45], ParamBodyAngleY: [-45, 45], ParamBodyAngleZ: [-45, 45],
+                ParamEyeLOpen: [0, 1], ParamEyeROpen: [0, 1],
+                ParamJawOpen: [0, 1], ParamMouthOpenY: [0, 1],
+                ParamMouthSmile: [0, 1], ParamEyeLSmile: [0, 1], ParamEyeRSmile: [0, 1],
+                ParamMouthPucker: [0, 1], ParamMouthFunnel: [0, 1],
+                ParamBrowLForm: [0, 1], ParamBrowRForm: [0, 1],
+                ParamBrowLAngle: [-1, 1], ParamBrowRAngle: [-1, 1],
+                ParamEyeBallX: [-1, 1], ParamEyeBallY: [-1, 1],
+                MouthFrownLeft: [0, 1], MouthFrownRight: [0, 1],
+                ParamBreath: [0, 1], Param40: [0, 1], Param43: [0, 1],
+            };
+            function clampParamValue(name, v) {
+                const r = PARAM_RANGES[name];
+                if (r) return Math.max(r[0], Math.min(r[1], v));
+                return Math.max(-100, Math.min(100, v));
+            }
+            function _getParamValue(core, id) {
+                if (!core) return 0;
+                try {
+                    let idx = -1;
+                    if (typeof core.getParameterIndex === 'function') idx = core.getParameterIndex(id);
+                    else if (typeof core.getParamIndex === 'function') idx = core.getParamIndex(id);
+                    if (idx >= 0) {
+                        if (typeof core.getParameterValueByIndex === 'function') return core.getParameterValueByIndex(idx);
+                        if (typeof core.getParameterValueById === 'function') return core.getParameterValueById(id);
+                        if (typeof core.getParamFloat === 'function') return core.getParamFloat(idx);
+                        if (typeof core.getParameterFloat === 'function') return core.getParameterFloat(idx);
+                    }
+                } catch (e) {}
+                return 0;
+            }
+            let _paramTickerFn = null;
+            let _paramResetTimer = null;
+            function setModelParam(name, value, duration, autoResetMs) {
+                // 渐变设置单个参数；autoResetMs 指定后自动渐变恢复原值（供 AI 短暂动作用）
+                if (!live2dApp || !live2dModel || !live2dModel.internalModel || !live2dModel.internalModel.coreModel) return false;
+                const v = clampParamValue(name, Number(value));
+                if (isNaN(v)) return false;
+                try {
+                    if (_paramTickerFn) { live2dApp.ticker.remove(_paramTickerFn); _paramTickerFn = null; }
+                    if (_paramResetTimer) { clearTimeout(_paramResetTimer); _paramResetTimer = null; }
+                } catch (e) {}
+                const core = live2dModel.internalModel.coreModel;
+                const from = _getParamValue(core, name);
+                const dur = (duration == null ? 300 : Math.max(1, Number(duration)));
+                if (dur <= 0 || Math.abs(v - from) < 0.001) {
+                    _coreSetParam(core, name, v);
+                } else {
+                    const start = Date.now();
+                    const tickerFn = function() {
+                        if (!live2dModel || !live2dModel.internalModel || !live2dModel.internalModel.coreModel) return;
+                        const t = Math.min(1, (Date.now() - start) / dur);
+                        _coreSetParam(live2dModel.internalModel.coreModel, name, from + (v - from) * t);
+                        if (t >= 1) {
+                            try { live2dApp.ticker.remove(tickerFn); } catch (e) {}
+                            if (_paramTickerFn === tickerFn) _paramTickerFn = null;
+                        }
+                    };
+                    _paramTickerFn = tickerFn;
+                    live2dApp.ticker.add(tickerFn);
+                }
+                // 可选自动恢复
+                if (autoResetMs > 0) {
+                    _paramResetTimer = setTimeout(function() {
+                        _paramResetTimer = null;
+                        setModelParam(name, from, Math.min(500, autoResetMs / 2), 0);
+                    }, autoResetMs);
+                }
+                return true;
+            }
+            function setModelParams(dict, duration, autoResetMs) {
+                if (!dict) return false;
+                Object.keys(dict).forEach(function(k) { setModelParam(k, dict[k], duration, autoResetMs); });
+                return true;
+            }
+            function resetModelPose() {
+                // 恢复头部/身体角度与常用参数为默认
+                const zeros = {
+                    'ParamAngleX': 0, 'ParamAngleY': 0, 'ParamAngleZ': 0,
+                    'ParamBodyAngleX': 0, 'ParamBodyAngleY': 0, 'ParamBodyAngleZ': 0,
+                };
+                Object.keys(zeros).forEach(function(k) {
+                    setModelParam(k, 0, 400, 0);
+                });
+            }
+            // 暴露到全局，供 /param 命令与 AI 参数协议使用
+            window.setLive2DParam = setModelParam;
+            window.setLive2DParams = setModelParams;
+            window.resetLive2DPose = resetModelPose;
+            window.getLive2DParamList = function() { return Object.keys(PARAM_RANGES); };
 
             // 暴露到全局，供外部调用
             window.triggerLive2DAction = triggerAction;
@@ -1070,6 +1373,8 @@
                         powerPreference: 'high-performance',
                     });
                     live2dApp = app;
+                    // 5秒不动回正 ticker：每次重建 app 后重挂（旧 app 已销毁，监听不会累积）
+                    live2dApp.ticker.add(_gazeResetTicker);
                     console.log('Live2D: app created OK');
 
                     const baseUrl = live2dSettings.modelUrl || LIVE2D_DEFAULTS.modelUrl;
@@ -1111,13 +1416,13 @@
                                 console.warn('Live2D: 无法读取 drawable 列表', e);
                             }
 
-                            // 鼠标追踪（眼神跟随）
-                            canvas.addEventListener('mousemove', (e) => {
-                                const r = canvas.getBoundingClientRect();
-                                const x = e.clientX - r.left;
-                                const y = e.clientY - r.top;
-                                if (model.focus) model.focus(x, y);
-                            });
+                            // 鼠标追踪（眼神跟随） + 5秒不动则渐变回正（保留呼吸/摆动）
+                            // 注视跟随改为自绘实现（_feedGazeFocus 在全局 mousemove 中驱动 focusController，
+                            // 修正了原生 autoFocus 因模型中心贴画布底部导致的"视线偏上"偏移）。
+                            // 回正由 _gazeResetTicker 在 app ticker 中每帧检查并缓动回 (0,0)，
+                            // 呼吸/摆动保持原生。ticker 在 initLive2D 创建 app 后统一挂载，这里只关闭原生跟随。
+                            model.autoFocus = false;
+                            console.log('[idle-gaze] 原生 autoFocus 已关闭，启用自绘注视跟随 + 5秒回正');
 
                             // 模型命中检测：使用 .model3.json 中的 HitAreas
                             // 优先采用 PIXI 内置 hit-test（精确判定 Head/Hand/Body/Legs）

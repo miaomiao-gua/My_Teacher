@@ -422,6 +422,18 @@
                             ttsCloudVoice.value = config.tts_cloud_voice || '';
                             ttsBaseUrl.value = config.tts_base_url || '';
                         }
+                        const ttsCloudEnabled = document.getElementById('tts-cloud-enabled');
+                        if (ttsCloudEnabled) {
+                            ttsCloudEnabled.checked = !!config.tts_cloud_enabled;
+                            const val = document.getElementById('tts-cloud-enabled-val');
+                            if (val) val.textContent = ttsCloudEnabled.checked ? '开' : '关';
+                            ttsCloudEnabled.addEventListener('change', function() {
+                                if (val) val.textContent = ttsCloudEnabled.checked ? '开' : '关';
+                            });
+                        }
+                        if (voiceEnabled) {
+                            voiceEnabled.checked = !!config.voice_enabled;
+                        }
                         if (visionEnabled) {
                             visionEnabled.checked = !!config.vision_enabled;
                             visionBaseUrl.value = config.vision_base_url || '';
@@ -430,6 +442,21 @@
                         }
                         if (personalityPromptInput) personalityPromptInput.value = config.personality_prompt || '';
                         if (lessonPromptInput) lessonPromptInput.value = config.lesson_prompt || '';
+
+                        // 字号 / 侧栏宽度初始化
+                        const fontSizeInput = document.getElementById('font-size-input');
+                        const fontSizeVal = document.getElementById('font-size-val');
+                        const fs = parseInt(config.font_size) || 14;
+                        if (fontSizeInput) fontSizeInput.value = fs;
+                        if (fontSizeVal) fontSizeVal.textContent = fs + ' px';
+                        document.documentElement.style.setProperty('--settings-font-size', fs + 'px');
+
+                        const swInput = document.getElementById('sidebar-width-input');
+                        const swVal = document.getElementById('sidebar-width-val');
+                        const sw = parseInt(config.sidebar_width) || 36;
+                        if (swInput) swInput.value = sw;
+                        if (swVal) swVal.textContent = sw + '%';
+                        document.documentElement.style.setProperty('--sidebar-width', sw + '%');
                         syncModelFields();
                     })
                     .catch(() => {});
@@ -636,17 +663,17 @@
                 document.addEventListener('touchend', onPointerUp);
             })();
 
-            if (saveSettingsBtn) saveSettingsBtn.addEventListener('click', function() {
-                // 收集情绪映射（从 UI 网格）
+            function _buildSettingsPayload() {
+                // 情绪映射（从 UI 网格收集）
                 const emoMap = {};
-                document.querySelectorAll('#emotion-map-grid .emotion-row').forEach(row => {
+                document.querySelectorAll('#emotion-map-grid .emotion-row').forEach(function(row) {
                     const emo = row.dataset.emotion;
                     const sel = row.querySelector('select');
                     if (sel && sel.value !== '') {
                         emoMap[emo] = parseInt(sel.value);
                     }
                 });
-                // 收集自定义动作（{UI名字: {id, intensity}}，来自设置页最底部的编辑器）
+                // 自定义动作（从设置页底部编辑器收集）
                 const customActs = {};
                 for (const k in customActionState) {
                     const it = customActionState[k] || {};
@@ -660,54 +687,119 @@
                     }
                 }
                 const payload = {
-                    portrait_pos_x: parseInt(portraitPosX.value),
-                    portrait_pos_y: parseInt(portraitPosY.value),
-                    portrait_scale: parseInt(portraitScale.value) / 100,
-                    tts_voice: voiceSelect.value,
-                    bg_theme: live2dSettings.bgTheme,
-                    bg_url: live2dSettings.bgUrl,
-                    emotion_map: emoMap,
-                    segment_enabled: segmentEnabled.checked,
-                    segment_marker: segmentMarker.value.trim() || '\\c',
-                    segment_max_lines: parseInt(segmentMaxLines.value) || 6,
-                    sidebar_width: currentSidebarWidth,
-                    custom_actions: customActs,
-                    // 模型与 API 设置
-                    chat_provider: chatProvider.value,
-                    chat_base_url: chatBaseUrl.value.trim(),
-                    chat_api_key: chatApiKey.value.trim(),
-                    chat_model: chatModel.value.trim(),
-                    ollama_base_url: ollamaBaseUrl.value.trim() || 'http://127.0.0.1:11434',
-                    ollama_model: ollamaModel.value.trim() || 'qwen2.5:7b',
-                    lesson_provider: lessonProvider.value,
-                    cloud_base_url: cloudBaseUrl.value.trim(),
-                    cloud_api_key: cloudApiKey.value.trim(),
-                    cloud_model: cloudModel.value.trim(),
-                    enable_search: lessonSearch.checked,
-                    tts_provider: ttsProvider.value,
-                    tts_cloud_base_url: ttsCloudBaseUrl.value.trim(),
-                    tts_cloud_model: ttsCloudModel.value.trim(),
-                    tts_cloud_voice: ttsCloudVoice.value.trim(),
-                    tts_base_url: ttsBaseUrl.value.trim(),
-                    vision_enabled: visionEnabled.checked,
-                    vision_base_url: visionBaseUrl.value.trim(),
-                    vision_api_key: visionApiKey.value.trim(),
-                    vision_model: visionModel.value.trim(),
-                    personality_prompt: personalityPromptInput.value.trim(),
-                    lesson_prompt: lessonPromptInput.value.trim(),
-                };
-                fetch('/api/config', {
+                                    portrait_pos_x: parseInt(portraitPosX.value),
+                                    portrait_pos_y: parseInt(portraitPosY.value),
+                                    portrait_scale: parseInt(portraitScale.value) / 100,
+                                    tts_voice: voiceSelect.value,
+                                    bg_theme: live2dSettings.bgTheme,
+                                    bg_url: live2dSettings.bgUrl,
+                                    emotion_map: emoMap,
+                                    segment_enabled: segmentEnabled.checked,
+                                    segment_marker: segmentMarker.value.trim() || '\\c',
+                                    segment_max_lines: parseInt(segmentMaxLines.value) || 6,
+                                    sidebar_width: currentSidebarWidth,
+                                    custom_actions: customActs,
+                                    // 模型与 API 设置
+                                    chat_provider: chatProvider.value,
+                                    chat_base_url: chatBaseUrl.value.trim(),
+                                    chat_api_key: chatApiKey.value.trim(),
+                                    chat_model: chatModel.value.trim(),
+                                    ollama_base_url: ollamaBaseUrl.value.trim() || 'http://127.0.0.1:11434',
+                                    ollama_model: ollamaModel.value.trim() || 'qwen2.5:7b',
+                                    lesson_provider: lessonProvider.value,
+                                    cloud_base_url: cloudBaseUrl.value.trim(),
+                                    cloud_api_key: cloudApiKey.value.trim(),
+                                    cloud_model: cloudModel.value.trim(),
+                                    enable_search: lessonSearch.checked,
+                                    tts_provider: ttsProvider.value,
+                                    tts_cloud_base_url: ttsCloudBaseUrl.value.trim(),
+                                    tts_cloud_model: ttsCloudModel.value.trim(),
+                                    tts_cloud_voice: ttsCloudVoice.value.trim(),
+                                    tts_base_url: ttsBaseUrl.value.trim(),
+                                    voice_enabled: voiceEnabled ? voiceEnabled.checked : true,
+                                    tts_cloud_enabled: (function() {
+                                        const el = document.getElementById('tts-cloud-enabled');
+                                        return el ? el.checked : false;
+                                    })(),
+                                    vision_enabled: visionEnabled.checked,
+                                    vision_base_url: visionBaseUrl.value.trim(),
+                                    vision_api_key: visionApiKey.value.trim(),
+                                    vision_model: visionModel.value.trim(),
+                                    personality_prompt: personalityPromptInput.value.trim(),
+                                    lesson_prompt: lessonPromptInput.value.trim(),
+                                    font_size: (function() {
+                                        const el = document.getElementById('font-size-input');
+                                        return el ? parseInt(el.value) || 14 : 14;
+                                    })(),
+                                    sidebar_width: (function() {
+                                        const el = document.getElementById('sidebar-width-input');
+                                        return el ? parseInt(el.value) || 36 : 36;
+                                    })(),
+                                };
+                return payload;
+            }
+
+            // 静默保存（用于自动保存），不弹 alert；按钮保存传 false 会弹 alert。
+            function _saveSettingsNow(showAlert) {
+                if (showAlert == null) showAlert = true;
+                const payload = _buildSettingsPayload();
+                const emoMap = payload.emotion_map;
+                const customActs = payload.custom_actions;
+                return fetch('/api/config', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 }).then(r => r.json())
                     .then(() => {
-                        _emotionExpressionMap = emoMap;
-                        _userCustomizedEmotionMap = Object.keys(emoMap).length > 0;
+                        if (emoMap && Object.keys(emoMap).length) {
+                            _emotionExpressionMap = emoMap;
+                            _userCustomizedEmotionMap = true;
+                        }
                         mergeCustomActions(customActs);
-                        alert('设置已保存！');
+                        if (showAlert) alert('设置已保存！');
+                        _setSettingsSaveStatus('已保存 · ' + new Date().toLocaleTimeString('zh-CN', { hour12: false }), 'ok');
                     })
-                    .catch(err => alert('保存失败: ' + err.message));
+                    .catch(err => {
+                        console.error('[settings] auto save failed', err);
+                        _setSettingsSaveStatus('保存失败', 'err');
+                        if (showAlert) alert('保存失败: ' + err.message);
+                    });
+            }
+
+            // 防抖自动保存：input/change 触发，500ms 内合并多次修改
+            let _autoSaveTimer = null;
+            function _autoSaveSettings() {
+                clearTimeout(_autoSaveTimer);
+                _setSettingsSaveStatus('编辑中…', 'pending');
+                _autoSaveTimer = setTimeout(function() {
+                    _saveSettingsNow(false);
+                }, 500);
+            }
+
+            function _setSettingsSaveStatus(text, kind) {
+                const el = document.getElementById('settings-save-status');
+                if (!el) return;
+                el.textContent = text;
+                el.dataset.kind = kind || 'pending';
+            }
+
+            // 给 settings 视图内所有表单元素挂 input/change 自动保存（不上传按钮/文件）
+            (function bindAutoSave() {
+                const view = document.getElementById('view-settings');
+                if (!view) return;
+                const selector = 'input:not([type=file]):not([type=button]):not([type=submit]), select, textarea';
+                view.querySelectorAll(selector).forEach(function(el) {
+                    // 跳过滑块类的实时预览元素（portrait_*），它们有自己的实时应用 handler
+                    if (el.id && /^portrait-(pos|scale)/.test(el.id)) return;
+                    const evt = (el.type === 'checkbox' || el.tagName === 'SELECT') ? 'change' : 'input';
+                    el.addEventListener(evt, _autoSaveSettings);
+                    // textarea / text input 也监听 change 兜底（粘贴后失焦）
+                    if (evt === 'input') el.addEventListener('change', _autoSaveSettings);
+                });
+            })();
+
+if (saveSettingsBtn) saveSettingsBtn.addEventListener('click', function() {
+                _saveSettingsNow(false);
             });
 
             // ---- 模型连接测试 ----
@@ -1088,4 +1180,53 @@
             // ============================
             syncSegmentUI();   // 先按 DOM 默认值渲染一次
             loadTeacherSettings();
+
+            // ===== 设置面板顶部分类 tab 切换 =====
+            (function initSettingsTabs() {
+                const tabsBar = document.getElementById('settings-tabs');
+                if (!tabsBar) return;
+                tabsBar.addEventListener('click', function(e) {
+                    const tab = e.target.closest('.settings-tab');
+                    if (!tab) return;
+                    const target = tab.dataset.tab;
+                    if (!target) return;
+                    // 切换 tab 高亮
+                    tabsBar.querySelectorAll('.settings-tab').forEach(function(b) {
+                        b.classList.toggle('active', b === tab);
+                    });
+                    // 切换 section 显示
+                    document.querySelectorAll('#view-settings .settings-section').forEach(function(s) {
+                        s.classList.toggle('active', s.dataset.section === target);
+                    });
+                });
+            })();
+
+            // ===== 应用正文字号 + 侧栏宽度（实时 + 持久化） =====
+            (function initDisplayControls() {
+                const fontSizeInput = document.getElementById('font-size-input');
+                const fontSizeVal = document.getElementById('font-size-val');
+                if (fontSizeInput && fontSizeVal) {
+                    const apply = function() {
+                        const px = parseInt(fontSizeInput.value) || 14;
+                        fontSizeVal.textContent = px + ' px';
+                        document.documentElement.style.setProperty('--settings-font-size', px + 'px');
+                    };
+                    fontSizeInput.addEventListener('input', apply);
+                    fontSizeInput.addEventListener('change', apply);
+                    apply();
+                }
+                const swInput = document.getElementById('sidebar-width-input');
+                const swVal = document.getElementById('sidebar-width-val');
+                if (swInput && swVal) {
+                    const apply = function() {
+                        const v = parseInt(swInput.value) || 36;
+                        swVal.textContent = v + '%';
+                        document.documentElement.style.setProperty('--sidebar-width', v + '%');
+                    };
+                    swInput.addEventListener('input', apply);
+                    swInput.addEventListener('change', apply);
+                    apply();
+                }
+            })();
+
             showMenu();   // 启动时显示首页菜单

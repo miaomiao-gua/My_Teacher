@@ -330,6 +330,7 @@
             overflow-y: auto;
             letter-spacing: 0.04em;
             word-break: break-word;
+            white-space: pre-wrap;   /* 保留换行/分段，避免多行内容挤成一行 */
             text-shadow: 0 1px 2px rgba(0,0,0,0.6);
             padding-right: 4px;
         }
@@ -1088,6 +1089,7 @@
             line-height: 1.65;
             word-break: break-word;
             animation: bubbleIn 0.25s ease;
+            width: fit-content;
             max-width: 92%;
         }
         @keyframes bubbleIn {
@@ -1128,6 +1130,32 @@
         }
         .chat-sidebar .bubble strong { color: var(--gold-light); }
         .chat-sidebar .bubble em { color: var(--text-secondary); }
+        /* 气泡内 markdown 元素统一尺寸（避免浏览器默认 h1=2em 巨大标题撑爆气泡） */
+        .chat-sidebar .bubble h1,
+        .chat-sidebar .bubble h2,
+        .chat-sidebar .bubble h3,
+        .chat-sidebar .bubble h4 {
+            font-size: 14.5px;
+            color: var(--gold-light);
+            margin: 8px 0 5px;
+            line-height: 1.4;
+        }
+        .chat-sidebar .bubble h1 { font-size: 16px; }
+        .chat-sidebar .bubble h2 { font-size: 15px; }
+        .chat-sidebar .bubble ul,
+        .chat-sidebar .bubble ol {
+            margin: 4px 0 6px;
+            padding-left: 20px;
+        }
+        .chat-sidebar .bubble li { margin: 2px 0; }
+        .chat-sidebar .bubble pre { max-width: 100%; }
+        .chat-sidebar .bubble img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 6px;
+        }
+        .chat-sidebar .bubble a { color: var(--gold-light); text-decoration: underline; }
+        .chat-sidebar .bubble hr { border: none; border-top: 1px solid var(--border-subtle); margin: 8px 0; }
 
         /* ========== Bottom Input ========== */
         .input-area {
@@ -1163,6 +1191,17 @@
             border-color: var(--border-accent);
             box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.12), 0 0 16px rgba(var(--accent-rgb), 0.06);
             background: rgba(255, 255, 255, 0.07);
+        }
+        /* 长文本模式：写作文 / 粘贴长代码时切换到大幅输入区 */
+        .input-area textarea.long-mode {
+            min-height: 36vh;
+            max-height: 55vh;
+            font-size: 15px;
+        }
+        .input-area .btn.active {
+            background: rgba(var(--accent-rgb), 0.5);
+            border-color: var(--border-accent);
+            box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.2);
         }
         .input-area textarea::placeholder { color: var(--text-dim); font-style: italic; }
         .input-area .btn {
@@ -1315,6 +1354,43 @@
             border-radius: var(--radius-md);
             border-left: 3px solid var(--border-accent);
         }
+        /* 修复：测验题内行内/代码块默认白底导致的"白块盖住文字"问题
+           （题干/选项经 marked 渲染出的 <code>/<pre> 没有专属样式时，会回退到浏览器默认浅色背景） */
+        #view-exam.view-content code,
+        #view-resource.view-content code,
+        #view-lesson.view-content code,
+        #view-settings.view-content code {
+            background: rgba(0, 0, 0, 0.35);
+            color: var(--gold-light);
+            padding: 1px 6px;
+            border-radius: 4px;
+            font-family: ui-monospace, Consolas, 'Courier New', monospace;
+            font-size: 0.92em;
+            border: 1px solid rgba(var(--accent-rgb), 0.12);
+        }
+        #view-exam.view-content pre,
+        #view-resource.view-content pre,
+        #view-lesson.view-content pre,
+        #view-settings.view-content pre {
+            background: rgba(0, 0, 0, 0.42);
+            color: var(--text-primary);
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            padding: 10px 14px;
+            overflow-x: auto;
+            font-family: ui-monospace, Consolas, 'Courier New', monospace;
+            font-size: 0.88em;
+            margin: 6px 0;
+        }
+        #view-exam.view-content pre code,
+        #view-resource.view-content pre code,
+        #view-lesson.view-content pre code,
+        #view-settings.view-content pre code {
+            background: transparent;
+            border: none;
+            padding: 0;
+            color: inherit;
+        }
         .exam-question .q-title {
             font-weight: 600;
             color: var(--gold-light);
@@ -1448,6 +1524,73 @@
             border-radius: 2px;
             background: linear-gradient(180deg, var(--gold), var(--rose-soft));
             display: inline-block;
+        }
+        /* ===== 设置面板顶部 tabs ===== */
+        .settings-tabs {
+            display: flex;
+            gap: 4px;
+            padding: 6px;
+            background: rgba(0, 0, 0, 0.35);
+            border: 1px solid var(--border-subtle);
+            border-radius: 12px;
+            margin-bottom: 14px;
+            position: sticky;
+            top: 0;
+            z-index: 5;
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            overflow-x: auto;
+        }
+        .settings-tab {
+            flex: 1;
+            min-width: 64px;
+            padding: 8px 10px;
+            border: none;
+            background: transparent;
+            color: var(--text-secondary);
+            font-family: var(--font-serif);
+            font-size: var(--settings-tab-size, 13px);
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 2px;
+            white-space: nowrap;
+        }
+        .settings-tab:hover {
+            color: var(--text-primary);
+            background: rgba(var(--accent-rgb), 0.08);
+        }
+        .settings-tab.active {
+            color: var(--gold-light);
+            background: linear-gradient(180deg, rgba(var(--accent-rgb), 0.22) 0%, rgba(var(--accent-rgb), 0.1) 100%);
+            box-shadow: inset 0 1px 0 rgba(var(--accent-light-rgb), 0.3);
+        }
+        .settings-tab .tab-icon {
+            font-size: calc(var(--settings-tab-size, 13px) + 4px);
+        }
+        /* ===== 分类 section（隐藏非激活的） ===== */
+        .settings-section {
+            display: none;
+            animation: sectionFade 0.25s ease;
+        }
+        .settings-section.active {
+            display: block;
+        }
+        /* ===== 字号：应用到右侧聊天面板和设置面板 ===== */
+        .chat-sidebar,
+        #view-settings .view-content-body {
+            font-size: var(--settings-font-size, 14px);
+        }
+        @keyframes sectionFade {
+            from { opacity: 0; transform: translateY(4px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        /* settings 视图激活时隐藏侧栏顶部 header，避免"对话/切换课程"tab 干扰 */
+        .chat-sidebar.settings-active .sidebar-header {
+            display: none;
         }
         .slider-control {
             display: flex;
@@ -2102,6 +2245,203 @@
         }
         .menu-btn.primary:active {
             transform: translateY(0);
+        }
+
+        /* ========== 备课面板（两种方法） ========== */
+        .menu-import-panel {
+            margin: 18px auto 0;
+            max-width: 560px;
+            padding: 18px 22px;
+            background: rgba(0, 0, 0, 0.28);
+            border: 1px solid var(--border-mid);
+            border-radius: 16px;
+            text-align: left;
+        }
+        .menu-import-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--gold-light);
+            margin-bottom: 6px;
+            letter-spacing: 0.04em;
+        }
+        .menu-import-desc {
+            font-size: 12px;
+            color: var(--text-muted);
+            line-height: 1.6;
+            margin-bottom: 12px;
+        }
+        .menu-import-row {
+            margin-bottom: 10px;
+        }
+        .menu-import-input {
+            width: 100%;
+            padding: 10px 14px;
+            background: rgba(0, 0, 0, 0.35);
+            border: 1px solid var(--border-mid);
+            border-radius: 10px;
+            color: var(--text-primary);
+            font-family: var(--font-serif);
+            font-size: 13px;
+            outline: none;
+        }
+        .menu-import-input:focus { border-color: var(--gold); }
+        .menu-import-file-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 14px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px dashed var(--border-mid);
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 12px;
+            color: var(--text-secondary);
+            transition: all 0.2s ease;
+        }
+        .menu-import-file-label:hover {
+            border-color: var(--gold);
+            color: var(--text-primary);
+            background: rgba(var(--accent-rgb), 0.06);
+        }
+        .menu-import-hint {
+            margin-left: 12px;
+            font-size: 11px;
+            color: var(--text-dim);
+        }
+        .menu-import-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 14px;
+            justify-content: flex-end;
+        }
+        .menu-import-actions .menu-btn { padding: 9px 20px; font-size: 13px; }
+
+        /* ========== 备课 modal 弹窗（独立 modal） ========== */
+        .quick-prep-panel {
+            max-width: 560px;
+            width: 100%;
+            padding: 0;
+        }
+        .quick-prep-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 18px 22px;
+            border-bottom: 1px solid var(--border-subtle);
+            background: linear-gradient(180deg, rgba(var(--accent-rgb), 0.08) 0%, transparent 100%);
+        }
+        .quick-prep-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--gold-light);
+            letter-spacing: 0.05em;
+        }
+        .quick-prep-close {
+            background: transparent;
+            border: 1px solid var(--border-mid);
+            border-radius: 50%;
+            width: 28px; height: 28px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 14px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+        }
+        .quick-prep-close:hover {
+            color: var(--text-primary);
+            border-color: var(--gold);
+            background: rgba(var(--accent-rgb), 0.1);
+        }
+        .quick-prep-body {
+            padding: 20px 22px;
+            max-height: 60vh;
+            overflow-y: auto;
+        }
+        .quick-prep-desc {
+            font-size: 13px;
+            color: var(--text-secondary);
+            line-height: 1.7;
+            margin-bottom: 16px;
+        }
+        .quick-prep-row {
+            margin-bottom: 14px;
+        }
+        .quick-prep-label {
+            display: block;
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+            letter-spacing: 0.04em;
+        }
+        .quick-prep-input {
+            width: 100%;
+            padding: 11px 14px;
+            background: rgba(0, 0, 0, 0.4);
+            border: 1px solid var(--border-mid);
+            border-radius: 10px;
+            color: var(--text-primary);
+            font-family: var(--font-serif);
+            font-size: 13px;
+            outline: none;
+            transition: border-color 0.2s ease;
+        }
+        .quick-prep-input:focus {
+            border-color: var(--gold);
+            background: rgba(0, 0, 0, 0.5);
+        }
+        .quick-prep-file-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .quick-prep-file-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 9px 16px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px dashed var(--border-mid);
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 12px;
+            color: var(--text-secondary);
+            transition: all 0.2s ease;
+        }
+        .quick-prep-file-label:hover {
+            border-color: var(--gold);
+            color: var(--text-primary);
+            background: rgba(var(--accent-rgb), 0.08);
+        }
+        .quick-prep-hint {
+            font-size: 11px;
+            color: var(--text-dim);
+            flex: 1;
+            min-width: 0;
+        }
+        .quick-prep-tip {
+            font-size: 11px;
+            color: var(--text-muted);
+            line-height: 1.6;
+            padding: 10px 12px;
+            background: rgba(var(--accent-rgb), 0.05);
+            border-left: 2px solid var(--gold);
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+        .quick-prep-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            padding: 14px 22px;
+            border-top: 1px solid var(--border-subtle);
+            background: rgba(0, 0, 0, 0.25);
+        }
+        .quick-prep-actions .menu-btn {
+            padding: 9px 22px;
+            font-size: 13px;
         }
 
         /* ========== Responsive ========== */

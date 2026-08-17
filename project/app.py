@@ -29,6 +29,8 @@ except ImportError:
     pass
 
 from file_utils import (
+    ALLOWED_EXTENSIONS,
+    convert_document_to_markdown,
     download_resource,
     ensure_lesson_dir,
     load_course_context,
@@ -37,7 +39,15 @@ from file_utils import (
     sanitize_topic,
     unit_dir,
 )
-from lesson_prep import _normalize_unit, prepare_lesson, generate_quiz_with_model, generate_quiz_with_ollama
+from lesson_prep import (
+    _fallback_quiz,
+    _is_meaningful_question,
+    _normalize_unit,
+    _strip_thinking_lead,
+    prepare_lesson,
+    generate_quiz_with_model,
+    generate_quiz_with_ollama,
+)
 
 app = Flask(__name__)
 
@@ -52,6 +62,47 @@ def no_cache_headers(response):
 # ============================
 # 全局请求/错误日志
 # ============================
+# 日志脱敏：把 body 中的敏感字段值替换为 ***，避免明文密钥写入日志
+# 覆盖典型命名（兼容 snake_case / camelCase）+ 任何"看似密钥"的长串值
+_SENSITIVE_KEYS = (
+    "api_key", "apikey", "api-key",
+    "token", "access_token", "refresh_token", "bearer",
+    "secret", "client_secret",
+    "password", "passwd",
+    "private_key",
+)
+_TOKEN_VALUE_RE = re.compile(r'(?i)\b(?:sk-|pk-|gho_|ghp_|github_pat_|xox[abp]-|AIza[0-9A-Za-z_\-]{20,})[A-Za-z0-9_\-]+')
+
+def _redact_body(raw: str) -> str:
+    """对请求 body 字符串做敏感字段脱敏。原始 body 可能不是合法 JSON，做 best-effort。"""
+    if not raw:
+        return raw
+    try:
+        # 优先按 JSON 处理（结构化精确）
+        obj = json.loads(raw)
+        def walk(node):
+            if isinstance(node, dict):
+                return {k: ("***" if k.lower().replace("-", "_") in _SENSITIVE_KEYS else walk(v)) for k, v in node.items()}
+            if isinstance(node, list):
+                return [walk(x) for x in node]
+            if isinstance(node, str):
+                # 额外兜底：值本身就是 sk-xxx 形态的密钥字符串
+                return _TOKEN_VALUE_RE.sub("***", node)
+            return node
+        return json.dumps(walk(obj), ensure_ascii=False)
+    except (ValueError, json.JSONDecodeError):
+        # 非 JSON（form / text）：用正则替换 key=value / "key":"value"
+        redacted = raw
+        for k in _SENSITIVE_KEYS:
+            pattern = (
+                r'(["\']?' + re.escape(k) + r'["\']?\s*[:=]\s*)'
+                r'(["\'][^"\n]*["\']|[^,&\n\s]+)'
+            )
+            redacted = re.sub(pattern, r'\1"***"', redacted, flags=re.IGNORECASE)
+        redacted = _TOKEN_VALUE_RE.sub("***", redacted)
+        return redacted
+
+
 @app.before_request
 def _log_request():
     """每个 HTTP 请求进来时记一条（POST/PUT/DELETE 也带上 body 摘要）。"""
@@ -69,7 +120,10 @@ def _log_request():
         if method in ("POST", "PUT", "DELETE", "PATCH"):
             try:
                 raw = request.get_data(cache=True, as_text=True)[:500]
-                body_summary = f"  body={raw}" if raw else ""
+                if raw:
+                    # 安全：日志中的 body 必须过滤敏感字段（API key / token / secret 等）
+                    # 防止明文密钥写入 logs/app.log 后被备份/同步外泄
+                    body_summary = f"  body={_redact_body(raw)}"
             except Exception:
                 pass
         app.logger.info(f"📥 {method} {path}{body_summary}")
@@ -156,6 +210,15 @@ logging.getLogger("werkzeug").addHandler(_console_handler)
 logging.getLogger("werkzeug").addHandler(_file_handler)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
+# 子模块（lesson_prep 等）的 logger 也接入同一控制台 + 日志文件
+for _sub_name in ("lesson_prep", "file_utils"):
+    _sub_logger = logging.getLogger(_sub_name)
+    _sub_logger.handlers.clear()
+    _sub_logger.addHandler(_console_handler)
+    _sub_logger.addHandler(_file_handler)
+    _sub_logger.setLevel(logging.DEBUG)
+    _sub_logger.propagate = False
+
 app.logger.info("=" * 60)
 app.logger.info("🚀 My Teacher app started")
 app.logger.info(f"📝 日志文件: {LOG_FILE}")
@@ -187,57 +250,105 @@ def default_progress() -> Dict[str, Any]:
         # 分课进度：当前上到第几课（0-based），已完成的 unit 索引列表
         "current_unit": 0,
         "completed_units": [],
+        # 已做过"开场讲解"的 unit 索引列表（首次进入单元时 AI 主动讲解，只讲一次）
+        "welcomed_units": [],
     }
 
 
 def default_config() -> Dict[str, Any]:
     return {
-        "ollama_base_url": "http://127.0.0.1:11434",
-        "ollama_model": "qwen2.5:7B",
-        # Ollama 生成参数（可配置，避免魔法数）
+        # 模拟"用户刚 clone 下来"的初始状态：本地服务 URL 保留，其余用户配置字段全部清空。
+        "ollama_base_url": "http://127.0.0.1:11434",  # 本地服务，无需配置
+        "ollama_model": "qwen3:8b",                   # 内置默认模型（用户可改成本地已安装的其它模型）
         "ollama_num_ctx": 16384,
         "ollama_temperature": 0.7,
         "ollama_num_predict": 8192,
-        "tts_base_url": "http://127.0.0.1:8000",
-        "tts_voice": "zh-CN-XiaoxiaoNeural",
+        "tts_base_url": "http://127.0.0.1:8000",       # 本地服务，无需配置
+        "tts_voice": "",                              # 用户填自己装的 TTS 服务音色
         "tts_enabled": False,
         "tts_provider": "local",
         # 云端 TTS（硅基流动 FunAudioLLM/CosyVoice2-0.5B）
-        # voice 必须用硅基预置音色名：alex/benjamin/charles/david(男) anna/bella/claire/diana(女)
-        "tts_cloud_base_url": "https://api.siliconflow.cn/v1",
-        "tts_cloud_voice": "anna",
+        "tts_cloud_base_url": "",
+        "tts_cloud_voice": "",
         "tts_cloud_model": "FunAudioLLM/CosyVoice2-0.5B",
         "tts_cloud_response_format": "mp3",
-        "enable_local_ollama": True,
+        "enable_local_ollama": False,                 # 默认关闭，让用户主动开启
         "siliconflow_api_key": "",
-        "siliconflow_model": "deepseek-ai/DeepSeek-V3",
-        # 云端模型 - 备课用（支持硅基/任意 OpenAI 兼容原生 API）
-        "cloud_provider": "siliconflow",
-        "cloud_base_url": "https://api.siliconflow.cn/v1",
+        "siliconflow_model": "deepseek-ai/DeepSeek-V3",  # 内置默认（硅基流动），用户可改
+        # 云端模型 - 备课用
+        "cloud_provider": "",                         # 用户填（siliconflow / openai / ...）
+        "cloud_base_url": "",
         "cloud_api_key": "",
         "cloud_model": "deepseek-ai/DeepSeek-V3",
-        "enable_search": True,
+        "enable_search": False,
         # 云端模型 - 对话聊天用（独立配置；未填写时回退到 cloud_*）
-        # chat_provider: auto（本地 Ollama 优先，失败回退云端）/ ollama（只用本地）/ cloud（只用云端）
         "chat_provider": "auto",
         "chat_base_url": "",
         "chat_api_key": "",
-        "chat_model": "",
+        "chat_model": "deepseek-ai/DeepSeek-V3",
         "chat_enable_search": False,
-        # 备课模型提供方：cloud（云端）/ ollama（本地）/ auto（云端优先，失败回退本地）
-        "lesson_provider": "cloud",
-        # 识图模型（可选）：OpenAI 兼容 vision API；启用后聊天上传的图片会先经它识别再交给对话模型
+        # 备课模型提供方：auto（云端优先，失败回退本地）/ cloud / ollama
+        "lesson_provider": "auto",
+        # 识图模型（可选）
         "vision_enabled": False,
         "vision_base_url": "",
         "vision_api_key": "",
         "vision_model": "",
-        "auto_play_tts": True,
-        "assistant_name": "艾琳老师",
-        "personality_prompt": "你是一位温柔、专业、耐心的 AI 学习导师。请以启发式提问方式指导学生，先解释概念，再给出例子和练习。",
-        # 备课（分课教案生成）system 提示词，用户可在设置页自定义；与 lesson_prep._LESSON_SYSTEM_PROMPT 保持一致
-        "lesson_prompt": "你是一位顶级学科专家与课程设计师。请针对用户给定的主题，搜索最新、权威的资料，并将内容拆分为若干个可循序渐进教学的「课」（unit）。\n请严格以 JSON 格式返回以下字段（不要输出任何额外文字）：\n{\n  \"topic\": \"主题\",\n  \"syllabus\": \"整体章节大纲（Markdown 格式，列出全部 unit 标题与简要内容）\",\n  \"key_points\": [\"全局核心概念1\", \"全局核心概念2\", ...],\n  \"units\": [\n    {\n      \"title\": \"第 1 课标题\",\n      \"summary\": \"本课要点概述（1-2 句）\",\n      \"key_points\": [\"本课要点1\", \"本课要点2\", \"本课要点3\", \"本课要点4\"],\n      \"source_files\": [\n        {\"title\": \"资源标题\", \"url\": \"下载链接\", \"type\": \"pdf|docx|webpage\", \"description\": \"简短说明\", \"markdown_content\": \"可选：若资源是公开文本，直接提供 Markdown 正文\"}\n      ]\n    }\n  ],\n  \"resources\": [\"全局备用资源（可选，结构与 source_files 一致）\"]\n}\n要求：\n1. units 至少 12 课，最多 20 课，由浅入深、循序渐进。每课标题需明确体现该课的教学内容。\n2. 每个 unit 的 key_points 至少 4 个，source_files 至少 1 个真实可访问的下载链接（PDF 教材、官方文档等），type 字段必须是 pdf/docx/webpage 之一。\n3. markdown_content 字段若资源是公开网页/文本，请直接给出关键段落 Markdown 正文（不超过 2000 字）。\n4. syllabus 字段需包含全部课时的标题列表，使用 ### 标记每课，格式为 ### 第N课：标题，并附上1-2句简要说明。\n5. key_points（全局）至少 5 个核心概念。\n6. resources（全局）至少 3 个高质量学习资源链接。",
-        "default_topic": "Python 基础",
-        "default_voice": "zh-CN-XiaoxiaoNeural",
+        "auto_play_tts": False,
+        "voice_enabled": False,
+        "assistant_name": "AI 老师",                  # 用户可改成自己想要的老师名
+        # 内置人设 prompt —— 用户可自由改写
+        "personality_prompt": "你是一位温柔、专业、耐心的 AI 学习导师。请以启发式提问方式指导学生：先解释概念，再给出生活化的例子，最后用一两个小问题确认理解。遇到学生答错时不要直接给答案，而是再换一种方式重讲一遍。保持亲切的口吻，称呼学生『你』，并适度使用 emoji 让对话更生动。",
+        # 备课（分课教案生成）system 提示词 —— 用户可在设置面板修改；下面是 v2 内置默认（阶段一备课思考链 + 每 unit 含 target + modules 教案骨架）
+        "lesson_prompt": (
+            "你是一位顶级学科专家与课程设计师，同时承担「做教案」的职责。\n"
+            "你的工作严格分为两个阶段，备课阶段你只需要做【阶段一】，不要做任何讲课。\n\n"
+            "【阶段一：备课思考链】\n"
+            "  第1步【定目标】  — 学生学完这堂课，能做什么？用一句话写出来（填入每个 unit 的 target 字段）。\n"
+            "  第2步【拆结构】  — 这个目标需要拆成几个最小讲解单元（modules）？每个 module 讲一个核心概念。\n"
+            "                     每个 module 必须包含：concept（概念）+ example（生活/代码例子）+ anchor（一句话记忆锚点）。\n"
+            "  第3步【配节奏】  — 每个 module 结束后，安排什么交互（小测验 / 代码练习 / 提问 / 类比对比）？写入 modules[].interaction。\n"
+            "  第4步【想动作】  — 哪个 module 值得用 Live2D 动作辅助（如『绕圈手势』『指向黑板』）？写入 modules[].action。\n"
+            "  第5步【出教案】  — 组装成最终 JSON（schema 见下）。\n\n"
+            "请严格以 JSON 格式返回（不要输出任何额外文字、不要用 ```json 包裹）：\n"
+            "{\n"
+            '  "topic": "主题",\n'
+            '  "syllabus": "整体章节大纲（Markdown，### 第N课：标题 + 1-2句说明）",\n'
+            '  "key_points": ["全局核心概念1", "全局核心概念2", ...],\n'
+            '  "units": [\n'
+            '    {\n'
+            '      "title": "第 N 课：xxx",\n'
+            '      "summary": "本课要点概述（1-2 句）",\n'
+            '      "key_points": ["本课要点1", "本课要点2", "本课要点3", "本课要点4"],\n'
+            '      "target": "学生学完这堂课，能用一句话写出来的能力目标",\n'
+            '      "modules": [\n'
+            '        {\n'
+            '          "id": "M1",\n'
+            '          "title": "本模块的标题（动宾短语）",\n'
+            '          "concept": "本模块要讲解的核心概念（1-2 句）",\n'
+            '          "example": "用来做类比/演示的具体例子",\n'
+            '          "anchor": "一句话记忆锚点",\n'
+            '          "interaction": "本模块结束后安排的交互",\n'
+            '          "action": "建议的 Live2D 动作描述"\n'
+            '        }\n'
+            '      ],\n'
+            '      "source_files": [\n'
+            '        {"title": "资源标题", "url": "链接", "type": "pdf|docx|webpage|video", "platform": "video 类型时填写 bilibili 或 netease_open_course", "description": "简短说明", "markdown_content": "可选：若资源是公开文本，直接提供 Markdown 正文"}\n'
+            '      ]\n'
+            '    }\n'
+            '  ],\n'
+            '  "resources": ["全局备用资源（可选，结构与 source_files 一致）"]\n'
+            "}\n\n"
+            "硬性要求：\n"
+            "1. units 至少 8 课，最多 16 课。\n"
+            "2. 每个 unit 的 modules 至少 3 个、最多 6 个；每个 module 的 concept/example/anchor/interaction/action 五个字段都必须有内容，禁止空字符串或省略。\n"
+            "3. 每个 unit 的 key_points 至少 4 个，source_files 至少 1 个真实可访问的资源链接（PDF 教材、官方文档、网页等）。\n"
+            "4. type 字段必须是 pdf/docx/webpage/video 之一；video 链接必须是 bilibili（B站，https://www.bilibili.com/video/BV...）或 netease_open_course（网易公开课，https://open.163.com/...）之一。\n"
+            "5. syllabus 字段需用 ### 第N课：标题 的形式列出全部课时。\n"
+            "6. 严禁在 JSON 中输出「思考过程」「分析」等元文本；只输出最终结构化教案。"
+        ),
+        "default_topic": "",
+        "default_voice": "",
         "avatar_url": "/static/images/teacher.svg",
         "bg_theme": "warm",
         "bg_url": "",
@@ -250,13 +361,17 @@ def default_config() -> Dict[str, Any]:
         "portrait_scale": 1.15,      # 缩放倍率（0.5-3.0）
         "portrait_float_amplitude": 8,  # 上下浮动幅度（像素 0-40）
         "portrait_float_enabled": True,  # 是否启用浮动动画
+        # 云端 TTS 独立开关（与 tts_enabled 分离）：tts_provider=cloud 时这个才生效
+        "tts_cloud_enabled": False,
+        # 全局正文字号（px），应用在 .chat-sidebar 与 .menu-screen 上；范围 12-20，默认 14
+        "font_size": 14,
         # 情绪映射（Open-LLM-VTuber 协议）：emotion 名 → 模型 expression index
         # 在前端设置面板可调整；留空则用默认映射
         "emotion_map": {},
         # 回复分段（Galgame 逐段展示）：
         # segment_marker 为纯文本分段符，模型在回复中用它把内容切成多段；
         # 它【不是】Markdown 代码块语言标记，提示词中已强制要求模型不要误用。
-        "segment_enabled": True,
+        "segment_enabled": False,
         "segment_marker": "\\c",
         "segment_max_lines": 6,
         # 右侧聊天侧栏宽度（百分比 25-60，CSS 用 flex-basis 应用）
@@ -332,9 +447,15 @@ def save_config(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def build_lesson_folder_name(topic: str) -> str:
+    """生成唯一课程目录名 = 日期_主题_时间戳_随机。
+
+    即使主题完全相同，每次创建也会得到不同的目录名（毫秒级 + 随机后缀），
+    避免同名课程相互覆盖。返回的目录名也直接作为 lesson_id 使用。
+    """
     slug = sanitize_topic(topic)
-    stamp = datetime.now().strftime("%Y%m%d")
-    return f"{stamp}_{slug}"
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    rand4 = "".join(random.choices("0123456789abcdef", k=4))
+    return f"{stamp}_{slug}_{rand4}"
 
 
 def lesson_path(lesson_folder: str, filename: str) -> Path:
@@ -358,6 +479,8 @@ def ensure_lesson_files(lesson_folder: str) -> Dict[str, Path]:
             try:
                 old_data = json.loads(old_meta.read_text(encoding="utf-8"))
                 config_data = {
+                    # 课程唯一 ID = 目录名本身（每次 build_lesson_folder_name 都带毫秒级时间戳+随机后缀，已保证唯一）
+                    "lesson_id": lesson_folder,
                     "course_name": lesson_folder,
                     "topic": old_data.get("topic", lesson_folder),
                     "assistant_name": old_data.get("assistant_name", ""),
@@ -378,6 +501,7 @@ def ensure_lesson_files(lesson_folder: str) -> Dict[str, Path]:
                 config_path.write_text(json.dumps(config_data, ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception:
                 config_path.write_text(json.dumps({
+                    "lesson_id": lesson_folder,
                     "course_name": lesson_folder,
                     "avatar_url": "",
                     "bg_theme": "warm",
@@ -385,11 +509,21 @@ def ensure_lesson_files(lesson_folder: str) -> Dict[str, Path]:
                 }, ensure_ascii=False, indent=2), encoding="utf-8")
         else:
             config_path.write_text(json.dumps({
+                "lesson_id": lesson_folder,
                 "course_name": lesson_folder,
                 "avatar_url": "",
                 "bg_theme": "warm",
                 "bg_url": "",
             }, ensure_ascii=False, indent=2), encoding="utf-8")
+    else:
+        # 数据迁移：旧 config 缺 lesson_id 时补上（用目录名兜底）
+        try:
+            cfg = json.loads(config_path.read_text(encoding="utf-8"))
+            if not cfg.get("lesson_id"):
+                cfg["lesson_id"] = lesson_folder
+                config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
     if not conversation_path.exists():
         conversation_path.write_text("[]", encoding="utf-8")
     if not progress_path.exists():
@@ -483,7 +617,122 @@ def load_lesson_metadata(lesson_folder: str | None) -> Dict[str, Any]:
         return {}
     try:
         data = json.loads(target.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+    # 数据迁移：剥掉 unit.title 里硬编码的「第N课：xxx」等序号前缀（AI / 用户手动留下），
+    # 否则 AI 会把「第 N 课」当作当前课序号，导致开场白与单元名错位。迁移完成后写回磁盘。
+    try:
+        units = data.get("units")
+        if isinstance(units, list):
+            changed = False
+            for u in units:
+                if isinstance(u, dict) and isinstance(u.get("title"), str):
+                    new_title = _strip_unit_prefix_for_metadata(u["title"])
+                    if new_title != u["title"]:
+                        u["title"] = new_title
+                        changed = True
+            if changed:
+                target.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        print(f"[lesson_meta] 迁移 units 标题前缀失败: {exc}", flush=True)
+
+    # 数据迁移：缺 syllabus.json 时，根据 units[].target/modules 自动派生一份。
+    # 旧课程只有 key_points 也能落出可用的"教案骨架"，保证阶段二讲课有材料可循。
+    try:
+        lesson_dir = LESSONS_DIR / lesson_folder
+        syllabus_path = lesson_dir / "syllabus.json"
+        if not syllabus_path.exists():
+            payload = _build_syllabus_payload(data, data.get("units") or [])
+            syllabus_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        print(f"[lesson_meta] 派生 syllabus.json 失败: {exc}", flush=True)
+    return data if isinstance(data, dict) else {}
+
+
+def _build_syllabus_payload(plan: Dict[str, Any], units: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """把备课产物抽成"教案骨架"用于讲课阶段：topic + 顶层 target + units[].target/modules。
+
+    兼容旧数据：units[i] 缺 target/modules 时从 key_points 派生。
+    """
+    units_out: List[Dict[str, Any]] = []
+    for idx, u in enumerate(units or []):
+        if not isinstance(u, dict):
+            continue
+        title = str(u.get("title") or f"第 {idx + 1} 课").strip()
+        summary = str(u.get("summary") or "").strip()
+        key_points = u.get("key_points") or []
+        if not isinstance(key_points, list):
+            key_points = []
+        key_points = [str(k).strip() for k in key_points if str(k).strip()]
+        target = str(u.get("target") or summary or f"理解并应用「{title}」的核心概念").strip()
+        raw_modules = u.get("modules")
+        modules: List[Dict[str, Any]] = []
+        if isinstance(raw_modules, list) and raw_modules:
+            for mi, m in enumerate(raw_modules):
+                if not isinstance(m, dict):
+                    continue
+                mid = str(m.get("id") or f"M{mi + 1}").strip() or f"M{mi + 1}"
+                modules.append({
+                    "id": mid,
+                    "title": str(m.get("title") or "").strip(),
+                    "concept": str(m.get("concept") or "").strip(),
+                    "example": str(m.get("example") or "").strip(),
+                    "anchor": str(m.get("anchor") or "").strip(),
+                    "interaction": str(m.get("interaction") or "").strip(),
+                    "action": str(m.get("action") or "").strip(),
+                })
+        if not modules:
+            # 兜底：用 key_points 派生最简 module 骨架
+            kp_src = key_points or [summary or title]
+            for mi, kp in enumerate(kp_src[:5]):
+                modules.append({
+                    "id": f"M{mi + 1}",
+                    "title": f"理解「{kp}」",
+                    "concept": kp,
+                    "example": "用一个贴近生活的类比或最小例子说明。",
+                    "anchor": f"一句话：{kp} 是本课的关键要点之一。",
+                    "interaction": "提问：你对这个概念熟悉吗？",
+                    "action": "指向黑板",
+                })
+        units_out.append({
+            "index": idx,
+            "title": title,
+            "summary": summary,
+            "target": target,
+            "key_points": key_points,
+            "modules": modules,
+        })
+    return {
+        "topic": str((plan or {}).get("topic") or "").strip(),
+        "target": str((plan or {}).get("target") or "").strip() or f"系统掌握本课程的核心概念",
+        "units": units_out,
+    }
+
+
+def _strip_unit_prefix_for_metadata(t: str) -> str:
+    """剥掉 unit 标题中的「第 N 课 / Lesson N / Unit N」序号前缀，迁移旧数据。"""
+    s = str(t or "").strip()
+    for _ in range(3):
+        new_s = re.sub(
+            r"^\s*(?:第\s*\d+\s*课|lesson\s*\d+|unit\s*\d+|第\s*\d+\s*讲)\s*[:：\-—、\.\s]+",
+            "", s, flags=re.IGNORECASE,
+        )
+        if new_s == s:
+            break
+        s = new_s.strip()
+    return s or str(t or "").strip()
+
+
+def _load_syllabus(lesson_folder: str | None) -> Dict[str, Any]:
+    """读取 lessons/{course}/syllabus.json，失败/缺失时返回空 dict。"""
+    if not lesson_folder:
+        return {}
+    p = LESSONS_DIR / lesson_folder / "syllabus.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
@@ -495,6 +744,21 @@ def _ai_tool_rules() -> List[str]:
         "- 需要展示图片时，可在回复末尾输出 `[TOOL:{\"type\":\"show_image\",\"index\":1}]` 或 `[TOOL:{\"type\":\"show_image\",\"filename\":\"xxx.png\"}]` 弹出图片面板。index 为当前单元图片库序号（从 0 开始，省略则显示第一张）；filename 为图片文件名，会从当前单元图片中按文件名匹配（匹配不到则显示第一张）。",
         "- 需要板书推导或画图时，可在回复末尾输出 `[TOOL:{\"type\":\"show_board\",\"content\":\"推导：\\\\n$$E=mc^2$$\\\\n{graph:y=x^2,x:-2..2}\"}]` 弹出黑板。content 支持：普通文本（打字机逐字显示）；`$$...$$` 数学公式（LaTeX）；`{graph:y=表达式,x:最小值..最大值}` 函数曲线；`{line:x1,y1-x2,y2}` 线段（坐标 0-100）。",
         "- 工具标记必须整体独占一行且仅出现一次；`[TOOL:{...}]` 内部不要换行（换行用 \\n 表示）。",
+    ]
+
+
+def _ai_action_rules() -> List[str]:
+    """肢体动作标记（[ACTION:xxx]）使用规则，注入系统提示词。
+
+    动作分两类：基础教学动作（播放模型预设 motion 文件）与语义动作
+    （前端用 ARKit 参数时间轴直接驱动，不依赖 motion3 文件）。
+    """
+    return [
+        "- 需要肢体动作配合教学时，可在回复末尾单独输出动作标记（每段回复最多 1-2 个）：",
+        "- 基础教学动作：`[ACTION:point]`（指向）、`[ACTION:blackboard]`（拉黑板）、`[ACTION:think]`（思考）、`[ACTION:listen]`（倾听）、`[ACTION:speak]`（说话）、`[ACTION:hello]`（打招呼）。",
+        "- 语义动作（按语境使用）：`[ACTION:nod]`（点头，同意/肯定学生）、`[ACTION:agree]`（赞许点头，表扬学生答对）、`[ACTION:shake]`（摇头，否定/纠正）、`[ACTION:tilt]`（歪头，疑惑/好奇）、`[ACTION:gasp]`（惊讶）、`[ACTION:cheer]`（雀跃，学生答对或值得庆祝时）、`[ACTION:sigh]`（叹气，遗憾/无奈）、`[ACTION:bow]`（鞠躬，开场问好/下课道别）。",
+        "- 高级精确控制（仅在语义动作不够用时）：可输出 `[PARAM:ParamAngleX=-15 ParamAngleY=5]`（参数名=数值，空格分隔）直接调整头部/身体角度或五官（如 ParamAngleX/Y/Z 头部、ParamBodyAngleX/Y/Z 身体、ParamEyeLOpen 睁眼、ParamJawOpen 张嘴、ParamMouthSmile 微笑），数值会被安全钳制，且会自动恢复。优先使用上面列出的语义动作标记，避免滥用参数直调。",
+        "- 动作标记不显示给学生，仅触发教师角色的动画。严禁在正文中用文字描述动作过程（如“我拿出黑板”“老师指向”“转过身”等），动作只能通过标记触发，正文只讲课程内容。",
     ]
 
 
@@ -527,8 +791,8 @@ def build_system_prompt(lesson_folder: str | None) -> str:
         or "艾琳老师"
     ).strip()
     personality = (
-        metadata.get("personality_prompt")
-        or cfg.get("personality_prompt")
+        cfg.get("personality_prompt")
+        or metadata.get("personality_prompt")
         or "你是一名耐心的学习教练。"
     ).strip()
 
@@ -536,7 +800,11 @@ def build_system_prompt(lesson_folder: str | None) -> str:
         f"【基本身份】\n"
         f"你的名字是：{assistant_name}。请你在对话中始终以「{assistant_name}」自居，"
         f"不要声称自己是其他品牌的 AI 助手或来自其他公司。\n\n"
-        f"【角色设定】\n{personality}\n"
+        f"【角色设定】\n{personality}\n\n"
+        f"【输出规范】\n"
+        f"- 直接回答用户问题，不要输出思考过程、内心独白或复述用户需求"
+        f"（禁止出现「首先，用户请求…」「我需要…」这类开场白）。\n"
+        f"- 口语化、简洁、像真人老师面对面授课。\n"
     )
 
     if not lesson_folder:
@@ -553,8 +821,8 @@ def build_system_prompt(lesson_folder: str | None) -> str:
             "- 当你判断课程内容已讲解充分（核心要点都已覆盖并举例），可在回复末尾单独输出标记 `[TOOL:start_exam]` 触发随堂测验。",
             "- 随堂测验由系统自动出题，你无需自行出题；学生答完后系统会反馈成绩，你可基于错题做简短点评。",
             "- 标记必须独占一行或位于回复末尾，且仅出现一次；不要把标记嵌在代码块或表格里。",
-            "- 需要肢体动作配合教学时，可在回复末尾单独输出动作标记 `[ACTION:point]`（指向）、`[ACTION:blackboard]`（拉黑板）、`[ACTION:hello]`（打招呼）、`[ACTION:think]`（思考）、`[ACTION:listen]`（倾听）、`[ACTION:speak]`（说话）。动作标记不显示给学生，仅触发教师角色的动画。严禁在正文中用文字描述动作过程（如“我拿出黑板”“老师指向”“转过身”等），动作只能通过标记触发，正文只讲课程内容。",
         ]
+        tool_lines.extend(_ai_action_rules())
         tool_lines.extend(_ai_tool_rules())
         tool_lines.extend(_ai_emotion_rules())
         try:
@@ -579,7 +847,21 @@ def build_system_prompt(lesson_folder: str | None) -> str:
     if current_unit >= len(units):
         current_unit = len(units) - 1
     unit = units[current_unit]
-    unit_title = unit.get("title") or f"第 {current_unit + 1} 课"
+
+    # 修复：单元标题常被用户/AI 误填为「第3课：xxx」这种带序号前缀的形式，
+    # 直接拿给 AI 会让模型把「第 3 课」当作当前课序号，导致输出"欢迎来到第 3 课"等错位文案。
+    # 这里在注入 prompt 前统一剥掉「第N课」「Lesson N」「Unit N」等前缀。
+    def _strip_unit_prefix(t: str) -> str:
+        s = str(t or "").strip()
+        # 反复剥：支持「第3课：xxx」「Lesson 3: xxx」「Unit 3 - xxx」
+        for _ in range(3):
+            new_s = re.sub(r"^\s*(?:第\s*\d+\s*课|lesson\s*\d+|unit\s*\d+|第\s*\d+\s*讲)\s*[:：\-—、\.\s]+", "", s, flags=re.IGNORECASE)
+            if new_s == s:
+                break
+            s = new_s.strip()
+        return s or str(t or "").strip()
+
+    unit_title = _strip_unit_prefix(unit.get("title")) or f"第 {current_unit + 1} 课"
     unit_summary = unit.get("summary", "")
     unit_key_points = unit.get("key_points", [])
 
@@ -595,7 +877,7 @@ def build_system_prompt(lesson_folder: str | None) -> str:
     # 构建全课程概览（让老师知道整个课程的结构和所有单元的主题）
     course_overview_lines = []
     for i, u in enumerate(units):
-        u_title = u.get("title") or f"第 {i + 1} 课"
+        u_title = _strip_unit_prefix(u.get("title")) or f"第 {i + 1} 课"
         u_summary = u.get("summary", "")
         u_kps = u.get("key_points", [])
         line = f"  {i + 1}. {u_title}"
@@ -611,10 +893,64 @@ def build_system_prompt(lesson_folder: str | None) -> str:
     parts.append(f"【全课程目录与要点总览】\n以下是本课程所有单元的结构与核心要点，请据此把握课程的整体脉络：\n{course_overview}")
     parts.append(
         f"【当前进度】\n现在上到第 {current_unit + 1} 课 / 共 {total_units} 课：{unit_title}。"
+        f"（重要）单元标题仅作为本课主题名，不要把标题里若有的「第N课」「Lesson N」等序号字样当成课程序号引用——"
+        f"请始终以系统告知的「第 {current_unit + 1} 课」为准。"
     )
     if unit_summary:
         parts.append(f"【本课概述】\n{unit_summary}")
-    if unit_key_points:
+
+    # 教案注入：从 lessons/{course}/syllabus.json 读出当前 unit 的 target + modules，
+    # 作为"阶段二讲课思考链"的强引导（备课与讲课解耦的关键衔接点）。
+    syllabus = _load_syllabus(lesson_folder)
+    current_teach_plan = None
+    if syllabus and isinstance(syllabus.get("units"), list):
+        for su in syllabus["units"]:
+            if isinstance(su, dict) and int(su.get("index", -1)) == current_unit:
+                current_teach_plan = su
+                break
+    if current_teach_plan:
+        target_line = current_teach_plan.get("target") or unit_summary or "理解本课核心"
+        modules = current_teach_plan.get("modules") or []
+        plan_lines = [
+            "【本课教案（来自备课阶段，请按此执行）】",
+            f"学习目标（target）：{target_line}",
+            "讲解模块序列（modules）：",
+        ]
+        for mi, m in enumerate(modules):
+            mid = m.get("id") or f"M{mi + 1}"
+            mtitle = m.get("title") or ""
+            concept = m.get("concept") or ""
+            example = m.get("example") or ""
+            anchor = m.get("anchor") or ""
+            interaction = m.get("interaction") or ""
+            action = m.get("action") or ""
+            plan_lines.append(
+                f"  {mid} {mtitle}".rstrip()
+            )
+            if concept:
+                plan_lines.append(f"     - 概念：{concept}")
+            if example:
+                plan_lines.append(f"     - 例子：{example}")
+            if anchor:
+                plan_lines.append(f"     - 锚点：{anchor}")
+            if interaction:
+                plan_lines.append(f"     - 节奏点（交互）：{interaction}")
+            if action:
+                plan_lines.append(f"     - 动作提示：{action}")
+        # 阶段二讲课思考链：要求 AI 按教案执行、不另起炉灶
+        plan_lines.append("")
+        plan_lines.append(
+            "【阶段二：讲课思考链（必须遵守）】\n"
+            "  1)【对照教案】— 当前应推进到哪个 module？以本课教案为准，不要临时换内容主题。\n"
+            "  2)【判断学生状态】— 学生在不在听？有没有说『懂』/『不懂』？沉默则主动问『刚才这个点，需要换种说法吗？』；答对则推进下一 module；答错则原地换一种方式再讲一遍同一个 module，不要跳。\n"
+            "  3)【按模块执行】— 每个 module 内按 concept → example → anchor 顺序讲；讲完输出 modules[].interaction 给出的交互（『提问：…』『小测验：…』等）。\n"
+            "  4)【动作执行】— 讲 module 时输出 modules[].action 对应的 Live2D 动作标记（如 [ACTION:bow] / [ACTION:point]），用动作辅助表达。\n"
+            "  5)【决定下一步】— 当前 module 全部交互完成 → 进入下一个 module；所有 module 完成 → 总结 → 在回复末尾输出 `[TOOL:start_exam]` 触发测验。\n"
+            "  严禁脱离教案自创新模块；如学生主动越界问其它内容，可简短回应但立即拉回当前 module。"
+        )
+        parts.append("\n".join(plan_lines))
+    elif unit_key_points:
+        # 旧课程没有 syllabus.json（数据迁移失败时的兜底）
         kp = "\n".join(f"- {k}" for k in unit_key_points)
         parts.append(f"【本课要点（详细）】\n{kp}")
     if unit_context:
@@ -635,7 +971,7 @@ def build_system_prompt(lesson_folder: str | None) -> str:
             "- 测验结束后，若学生表示想继续/进入下一课，你可在回复末尾单独输出标记 `[TOOL:next_unit]`，系统会自动切换到下一课。"
         )
     tool_lines.append("- 标记必须独占一行或位于回复末尾，且仅出现一次；不要把标记嵌在代码块或表格里。")
-    tool_lines.append("- 需要肢体动作配合教学时，可在回复末尾单独输出动作标记 `[ACTION:point]`（指向）、`[ACTION:blackboard]`（拉黑板）、`[ACTION:hello]`（打招呼）、`[ACTION:think]`（思考）、`[ACTION:listen]`（倾听）、`[ACTION:speak]`（说话）。动作标记不显示给学生，仅触发教师角色的动画。严禁在正文中用文字描述动作过程（如“我拿出黑板”“老师指向”“转过身”等），动作只能通过标记触发，正文只讲课程内容。")
+    tool_lines.extend(_ai_action_rules())
     tool_lines.extend(_ai_tool_rules())
     tool_lines.extend(_ai_emotion_rules())
     parts.append("\n".join(tool_lines))
@@ -707,7 +1043,31 @@ def _build_chat_messages(
     return messages
 
 
-def local_ollama_reply(prompt: str, lesson_folder: str | None = None, history: List[Dict[str, str]] | None = None) -> str:
+def _strip_thinking_residue(text: str) -> str:
+    """剥离模型思考残留（qwen3 等即使 think=false 也可能输出 <|thinking|> / </think> / [thinking] 块）。
+
+    保留正式回答，避免思考内容被当作正文朗读/展示。
+    """
+    if not text:
+        return text
+    # 常见思考包裹：<|thinking|>...</|thinking|>、<thinking>...</thinking>、[thinking]...[/thinking]、
+    # [think]...[/think]，以及 qwen3 think=false 时的 </think> 单独闭合残留
+    for pattern in (
+        r"<\|thinking\|>[\s\S]*?<\|/thinking\|>",
+        r"<thinking>[\s\S]*?</thinking>",
+        r"\[thinking\][\s\S]*?\[/thinking\]",
+        r"\[think\][\s\S]*?\[/think\]",
+        r"<\|thinking\|>[\s\S]*",
+    ):
+        text = re.sub(pattern, "", text)
+    # 段级独白：独立成段的 [think]（行首或 \c 分段标记之后，到 \c / 空行 / 结尾为止）
+    text = re.sub(r"(?:^|\n|\\c)\s*\[think\][\s\S]*?(?=\\c|\n\s*\n|\Z)", "\n", text)
+    # 单独闭合/开始标签（含 [think] / [/think] 裸标记）
+    text = re.sub(r"</?think>|<\|/?thinking\|>|\[/?think(?:ing)?\]", "", text, flags=re.IGNORECASE)
+    return text.strip()
+
+
+def local_ollama_reply(prompt: str, lesson_folder: str | None = None, history: List[Dict[str, str]] | None = None, long_mode: bool = False) -> str:
     """调用本地 Ollama 生成回复。
 
     修复要点：
@@ -746,10 +1106,12 @@ def local_ollama_reply(prompt: str, lesson_folder: str | None = None, history: L
     messages = _build_chat_messages(prompt, lesson_folder, history)
 
     # 统一从配置读取生成参数（避免魔法数；分课后 system prompt 较长，默认 16384）
+    # 长文本模式（写作文/长代码）提升输出上限，防止生成被截断
+    base_predict = int(cfg.get("ollama_num_predict", 600) or 600)
     options: Dict[str, Any] = {
         "temperature": float(cfg.get("ollama_temperature", 0.7) or 0.7),
         "num_ctx": int(cfg.get("ollama_num_ctx", 16384) or 16384),
-        "num_predict": int(cfg.get("ollama_num_predict", 600) or 600),
+        "num_predict": 2500 if long_mode else base_predict,
     }
 
     # 主路径：/api/chat（带 messages，由 Ollama 按模型自带模板渲染）
@@ -761,6 +1123,10 @@ def local_ollama_reply(prompt: str, lesson_folder: str | None = None, history: L
                 "model": model,
                 "messages": messages,
                 "stream": False,
+                # qwen3 系列默认开启 thinking：4B 小模型思考会消耗大量时间，
+                # 且 ollama 在 think 模式下返回的 content 可能为空（实测 11s 空转）。
+                # 显式关闭思考，保证能拿到可用的正文回复。
+                "think": False,
                 "options": options,
             },
             timeout=120,
@@ -768,6 +1134,10 @@ def local_ollama_reply(prompt: str, lesson_folder: str | None = None, history: L
         if response.ok:
             data = response.json()
             content = (data.get("message", {}).get("content") or data.get("response", "")).strip()
+            # 清理模型思考残留（think=false 时部分 qwen3 仍会输出 <|thinking|> / </think>）
+            # 与开头独白（"首先，用户要求我…"），避免学生看到 AI 的内心独白
+            content = _strip_thinking_residue(content)
+            content = _strip_thinking_lead(content)
             if content:
                 return content
             # 空回复：模型可能被 stop token 截断，直接返回空让上层接管，不走向更糟的回退
@@ -798,13 +1168,14 @@ def local_ollama_reply(prompt: str, lesson_folder: str | None = None, history: L
                 "prompt": fallback_prompt,
                 "system": sys_prompt,
                 "stream": False,
+                "think": False,
                 "options": options,
             },
             timeout=120,
         )
         if response.ok:
             data = response.json()
-            return (data.get("response") or "").strip()
+            return _strip_thinking_lead(_strip_thinking_residue((data.get("response") or "").strip()))
         print(f"[ollama] /api/generate HTTP {response.status_code}: {response.text[:200]}", flush=True)
     except Exception as exc:
         print(f"[ollama] /api/generate 异常: {exc}", flush=True)
@@ -813,7 +1184,7 @@ def local_ollama_reply(prompt: str, lesson_folder: str | None = None, history: L
     return ""
 
 
-def cloud_llm_reply(prompt: str, lesson_folder: str | None = None, history: List[Dict[str, str]] | None = None) -> str:
+def cloud_llm_reply(prompt: str, lesson_folder: str | None = None, history: List[Dict[str, str]] | None = None, long_mode: bool = False) -> str:
     """对话聊天用的云端 LLM。
 
     读取 chat_* 配置；若 chat_api_key / chat_model / chat_base_url 未填写，
@@ -841,12 +1212,14 @@ def cloud_llm_reply(prompt: str, lesson_folder: str | None = None, history: List
 
     url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
     messages = _build_chat_messages(prompt, lesson_folder, history)
+    # 长文本模式（写作文/长代码）提升输出上限，防止生成被截断
+    base_tokens = int(cfg.get("chat_max_tokens", 600) or 600)
     payload: Dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": 0.7,
         # 控制回复长度：对话回复保持精炼（备课/测验另有独立配置）
-        "max_tokens": int(cfg.get("chat_max_tokens", 600) or 600),
+        "max_tokens": 3000 if long_mode else base_tokens,
     }
     # 只有硅基/百川等明确支持联网搜索的服务才加 enable_search，
     # 原生 OpenAI/DeepSeek 等不认这个字段会报错 → 仅当 enable_search=True 时才附加
@@ -1216,6 +1589,9 @@ def api_upload_file():
 
 def local_tts_audio(text: str) -> str | None:
     cfg = load_config()
+    # 语音总开关：关闭后自动/手动朗读均不发声
+    if not cfg.get("voice_enabled", True):
+        return None
     if cfg.get("tts_provider") == "cloud":
         return cloud_tts_audio(text)
     if not cfg.get("tts_enabled", False):
@@ -1242,6 +1618,26 @@ def local_tts_audio(text: str) -> str | None:
         return f"/static/audio/{file_name}"
     except Exception:
         return cloud_tts_audio(text)
+
+
+@app.route("/api/tts/speak", methods=["POST"])
+def api_tts_speak():
+    """手动朗读：前端 🔊 按钮调用，走与自动朗读完全一致的 TTS 链路。
+
+    修复"前端配置空 TTS API 仍能朗读"：旧实现直接调用浏览器 speechSynthesis，
+    完全不经过后端、不校验任何配置。现在统一走后端，未配置任何语音服务时返回错误。
+    """
+    payload = request.get_json(silent=True) or {}
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "text is required"}), 400
+    cfg = load_config()
+    if not cfg.get("voice_enabled", True):
+        return jsonify({"error": "语音朗读已关闭，请在设置中开启"}), 400
+    audio_url = local_tts_audio(_tts_safe_text(text)[:500])
+    if not audio_url:
+        return jsonify({"error": "未配置可用的语音服务（云端 API Key 为空且本地 TTS 未启用）"}), 400
+    return jsonify({"ok": True, "audio_url": audio_url})
 
 
 @app.route("/")
@@ -2476,6 +2872,7 @@ def api_lessons():
             items.append(
                 {
                     "name": child.name,
+                    "lesson_id": metadata.get("lesson_id") or child.name,
                     "topic": metadata.get("topic") or child.name,
                     "assistant_name": metadata.get("assistant_name") or "",
                     "created_at": datetime.fromtimestamp(child.stat().st_ctime).astimezone().isoformat(timespec="seconds"),
@@ -2574,11 +2971,51 @@ def api_lesson_rename(lesson_folder: str):
 
 @app.route("/api/prepare_lesson", methods=["POST"])
 def api_prepare_lesson():
-    """AI 备课预览（不保存到磁盘，用户确认后再保存）。"""
-    payload = request.get_json(silent=True) or {}
-    topic = (payload.get("topic") or "").strip()
-    if not topic:
-        return jsonify({"error": "topic is required"}), 400
+    """AI 备课预览（不保存到磁盘，用户确认后再保存）。
+
+    支持两种请求：
+      - JSON: {"topic": "..."}
+      - multipart/form-data: topic 字段 + 可选 files（word/pdf/ppt/txt/md 等课程资料，可多文件）
+    上传的文档会转成 Markdown 作为备课素材，供 AI 拆分单元、并附上相关视频链接。
+    """
+    doc_markdown = ""
+    payload = {}
+    if request.content_type and request.content_type.startswith("multipart/form-data"):
+        topic = (request.form.get("topic") or "").strip()
+        if not topic:
+            return jsonify({"error": "topic is required"}), 400
+        md_parts: List[str] = []
+        for f in request.files.getlist("files"):
+            if not f or not f.filename:
+                continue
+            safe = secure_filename(f.filename) or f"file_{int(time.time() * 1000)}"
+            ext = Path(safe).suffix.lower()
+            if ext not in ALLOWED_EXTENSIONS:
+                md_parts.append(f"## 文件 {safe}\n\n（不支持的文件类型 {ext or '未知'}，已跳过）")
+                continue
+            tmp_path = Path(tempfile.gettempdir()) / f"lesson_prep_{int(time.time() * 1000)}_{safe}"
+            try:
+                f.save(str(tmp_path))
+                md = convert_document_to_markdown(tmp_path)
+            except Exception as exc:
+                md = f"## 文件 {safe}\n\n读取失败：{exc}"
+            finally:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            if md and "无法自动提取" not in md and "无法直接读取" not in md:
+                md_parts.append(f"# 课程资料：{safe}\n\n{md}")
+            else:
+                md_parts.append(f"## 文件 {safe}\n\n{md}")
+        if md_parts:
+            doc_markdown = "\n\n---\n\n".join(md_parts)
+    else:
+        payload = request.get_json(silent=True) or {}
+        topic = (payload.get("topic") or "").strip()
+        if not topic:
+            return jsonify({"error": "topic is required"}), 400
+        doc_markdown = (payload.get("document_markdown") or "").strip()
 
     cfg = load_config()
     if payload.get("cloud_model"):
@@ -2586,12 +3023,13 @@ def api_prepare_lesson():
     if payload.get("tts_cloud_voice"):
         cfg["tts_cloud_voice"] = payload["tts_cloud_voice"]
 
-    lesson_plan = prepare_lesson(topic, config=cfg)
+    lesson_plan = prepare_lesson(topic, config=cfg, document_markdown=doc_markdown)
     lesson_folder = build_lesson_folder_name(topic)
 
     # 预览模式：存入 ACTIVE_LESSON，用户确认后再写入磁盘
     ACTIVE_LESSON["preview_plan"] = lesson_plan
     ACTIVE_LESSON["preview_topic"] = topic
+    ACTIVE_LESSON["preview_doc_markdown"] = doc_markdown
     ACTIVE_LESSON["preview_assistant_name"] = (
         payload.get("assistant_name") or cfg.get("assistant_name") or "艾琳老师"
     ).strip()
@@ -2627,10 +3065,69 @@ def api_apply_lesson():
     lesson_folder = build_lesson_folder_name(topic)
     ensure_lesson_files(lesson_folder)
     lesson_dir = ensure_lesson_dir(lesson_folder)
+    # 若备课时有上传课程资料，保存为 source_document.md（进入课程后作为背景资料被 AI 读取）
+    src_doc = (ACTIVE_LESSON.get("preview_doc_markdown") or "").strip()
+    if src_doc:
+        try:
+            (lesson_dir / "source_document.md").write_text(src_doc, encoding="utf-8")
+            print(f"[apply_lesson] 已保存课程资料 source_document.md ({len(src_doc)} 字符)", flush=True)
+        except Exception as exc:
+            print(f"[apply_lesson] 保存 source_document.md 失败: {exc}", flush=True)
     units = plan_to_save.get("units", [])
+    # 删除/编辑单元后，旧 current_unit / completed_units / welcomed_units 等索引需要重新映射到新 units
+    old_units = (ACTIVE_LESSON.get("metadata") or {}).get("units") or []
+    old_progress = load_progress(lesson_folder)
+    initial_progress = default_progress()
+    if old_units and units:
+        def _title(u):
+            return str((u or {}).get("title") or "").strip()
+        old_titles = [_title(u) for u in old_units]
+        new_titles = [_title(u) for u in units]
+        # 同一标题按出现顺序一一对应；同名重复则按索引顺序
+        def _remap_index(old_idx: int) -> int:
+            t = old_titles[old_idx] if 0 <= old_idx < len(old_titles) else ""
+            if t and t in new_titles:
+                return new_titles.index(t)
+            # 找不到：按"已删除索引之前的最近存活标题"映射
+            # 从 old_idx 向左/右找最近的标题，再取其在 new_titles 的位置
+            for delta in range(1, max(len(old_titles), len(new_titles)) + 1):
+                for sign in (-1, 1):
+                    j = old_idx + sign * delta
+                    if 0 <= j < len(old_titles):
+                        tj = old_titles[j]
+                        if tj and tj in new_titles:
+                            return new_titles.index(tj)
+            return -1  # 已无对应，标记丢弃
+
+        def _remap_list(lst):
+            seen = set()
+            out = []
+            for x in (lst or []):
+                try:
+                    oi = int(x)
+                except Exception:
+                    continue
+                ni = _remap_index(oi)
+                if ni >= 0 and ni not in seen:
+                    seen.add(ni)
+                    out.append(ni)
+            return out
+
+        cur_old = int(old_progress.get("current_unit", 0) or 0)
+        cur_new = _remap_index(cur_old) if 0 <= cur_old < len(old_units) else -1
+        if cur_new < 0:
+            cur_new = max(0, min(cur_old, len(units) - 1))
+        initial_progress["current_unit"] = cur_new
+        initial_progress["completed_units"] = _remap_list(old_progress.get("completed_units"))
+        initial_progress["welcomed_units"] = _remap_list(old_progress.get("welcomed_units"))
+        # 保留已做题/得分历史（与单元对齐无关）
+        for k in ("completed_quizzes", "score_history", "code_attempts", "last_access"):
+            if k in old_progress:
+                initial_progress[k] = old_progress[k]
     save_metadata(
         lesson_dir,
         {
+            "lesson_id": lesson_folder,   # 唯一 ID = 目录名（毫秒级时间戳+随机后缀保证唯一）
             "course_name": lesson_folder,
             "topic": topic,
             "assistant_name": ACTIVE_LESSON.get("preview_assistant_name", "艾琳老师"),
@@ -2647,12 +3144,25 @@ def api_apply_lesson():
         },
     )
 
+    # 把"教案骨架"（每个 unit 的 target + modules）抽出来单独存为 syllabus.json，
+    # 讲课阶段 app.py 的 _lesson_system_prompt 会读这份 JSON 作为强引导。
+    # 即便 plan_to_save 里 units 已有 target/modules，这里也做一次规范化（含 fallback）。
+    try:
+        syllabus_payload = _build_syllabus_payload(plan_to_save, units)
+        (lesson_dir / "syllabus.json").write_text(
+            json.dumps(syllabus_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        print(f"[apply_lesson] 写入 syllabus.json 失败: {exc}", flush=True)
+
     # 写入进度文件
-    save_progress(lesson_folder, default_progress())
+    save_progress(lesson_folder, initial_progress)
 
     # 清除预览状态
     ACTIVE_LESSON["preview_plan"] = None
     ACTIVE_LESSON["preview_topic"] = None
+    ACTIVE_LESSON["preview_doc_markdown"] = None
     ACTIVE_LESSON["preview_assistant_name"] = None
     ACTIVE_LESSON["preview_personality_prompt"] = None
     ACTIVE_LESSON["preview_tts_voice"] = None
@@ -2666,6 +3176,14 @@ def api_apply_lesson():
     ACTIVE_LESSON["progress"] = load_progress(lesson_folder)
 
     return jsonify({"lesson_folder": lesson_folder, "plan": plan_to_save})
+
+
+def _regen_doc_suffix() -> str:
+    """重新备课时，若预览阶段上传了课程资料，把文档摘要附给模型参考。"""
+    doc = (ACTIVE_LESSON.get("preview_doc_markdown") or "").strip()
+    if not doc:
+        return ""
+    return "\n\n【用户上传的课程资料（摘要，前 3000 字）】\n" + doc[:3000]
 
 
 @app.route("/api/regenerate_lesson", methods=["POST"])
@@ -2731,6 +3249,7 @@ def api_regenerate_lesson():
                 "content": (
                     f"请为【{topic}】重新设计教案。用户之前的编辑意图如下：\n"
                     + (ref_text if ref_text else "(无额外编辑，按默认方式生成)")
+                    + _regen_doc_suffix()
                     + "\n\n请生成完整教案 JSON。"
                 ),
             },
@@ -2811,6 +3330,14 @@ def api_download_resources():
     selected_resources = [resources[i] for i in selected if 0 <= i < len(resources)]
 
     for index, resource in enumerate(selected_resources):
+        # 视频类资源（B站/网易公开课）无需下载：标记已跳过，前端可点链接打开
+        if str(resource.get("type", "")).lower() == "video":
+            statuses.append({
+                "index": index, "title": resource.get("title", "unnamed"), "path": "",
+                "status": "ok", "skipped_video": True, "url": resource.get("url", ""),
+                "platform": resource.get("platform", ""), "unit_index": unit_index,
+            })
+            continue
         file_name = f"resource{index + 1}"
         try:
             path = download_resource(resource, target_dir, file_name)
@@ -3014,10 +3541,7 @@ def _scan_latex_protected(lines: List[str]) -> List[bool]:
 
 
 def _split_by_sentences(text: str, max_chars: int = 500) -> List[str]:
-    """将过长文本在句子边界切分，保护 LaTeX 公式不被截断。
-
-    在 。！？\n； 等标点处切分，但仅当不在 LaTeX 公式内部时才切。
-    """
+    """将过长文本在句子边界切分，保护 LaTeX 公式与代码块（```...```）不被截断。"""
     if len(text) <= max_chars:
         return [text]
 
@@ -3027,9 +3551,22 @@ def _split_by_sentences(text: str, max_chars: int = 500) -> List[str]:
     in_inline = False
     paren_depth = 0
     bracket_depth = 0
+    in_code_block = False  # ``` 围栏内部不切分
 
     i = 0
     while i < len(text):
+        # 检测代码块围栏（``` 切换状态，围栏本身计入 buf）
+        if text[i:i + 3] == '```':
+            was_open = in_code_block
+            in_code_block = not in_code_block
+            buf += '```'
+            i += 3
+            # 代码块结束：若已累积足够内容则整段 flush，
+            # 让闭合围栏留在本段，避免句号切分把 ``` 拆到下一段
+            if was_open and len(buf) >= max_chars // 2:
+                segments.append(buf.strip())
+                buf = ""
+            continue
         # 检测 LaTeX 定界符
         if text[i:i + 2] == '$$':
             in_display = not in_display
@@ -3072,14 +3609,15 @@ def _split_by_sentences(text: str, max_chars: int = 500) -> List[str]:
 
         buf += char
         in_latex = in_display or in_inline or paren_depth > 0 or bracket_depth > 0
+        protected = in_latex or in_code_block
 
-        # 在句子边界切分（不在 LaTeX 内，且已积累足够内容）
-        if not in_latex and char in '。！？\n；' and len(buf) >= max_chars // 2:
+        # 在句子边界切分（不在 LaTeX/代码块内，且已积累足够内容）
+        if not protected and char in '。！？\n；' and len(buf) >= max_chars // 2:
             segments.append(buf.strip())
             buf = ""
 
-        # 强制切分：达到 max_chars 且不在 LaTeX 内
-        if len(buf) >= max_chars and not in_latex:
+        # 强制切分：达到 max_chars 且不在 LaTeX/代码块内
+        if len(buf) >= max_chars and not protected:
             # 往前找最近的空格或标点
             split_pos = -1
             for j in range(len(buf) - 1, max_chars // 3, -1):
@@ -3101,6 +3639,57 @@ def _split_by_sentences(text: str, max_chars: int = 500) -> List[str]:
     return segments or [text]
 
 
+_CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```")
+_CODE_PH_RE = re.compile(r"\x00BLOCK(\d+)\x00")
+
+
+def _split_by_marker_protecting_code(text: str, marker: str) -> List[str]:
+    """按分段标记（\\c 等）切分，但保护代码块：``` 代码块整体保留，不被切碎。
+
+    实现：先把代码块替换为占位符，切分后再还原（保持 re.split 原始语义）。
+    """
+    if not text:
+        return []
+    code_blocks: List[str] = []
+
+    def _hold(m):
+        code_blocks.append(m.group(0))
+        return f"\x00BLOCK{len(code_blocks) - 1}\x00"
+
+    held = _CODE_BLOCK_RE.sub(_hold, text)
+    if marker == "\\c":
+        raw = [s for s in re.split(r"\\+c", held) if s.strip()]
+    else:
+        raw = [s for s in held.split(marker) if s.strip()]
+
+    def _restore(s: str) -> str:
+        return _CODE_PH_RE.sub(lambda m: code_blocks[int(m.group(1))], s)
+
+    return [_restore(s) for s in raw]
+
+
+def _split_paragraphs_protecting_code(text: str) -> List[str]:
+    """按空行（段落边界）分段，但保护代码块：代码块整体保留，不被空行切开。
+
+    实现：先把代码块替换为占位符，分段后再还原（保持原 re.split 语义）。
+    """
+    if not text:
+        return []
+    code_blocks: List[str] = []
+
+    def _hold(m):
+        code_blocks.append(m.group(0))
+        return f"\x00BLOCK{len(code_blocks) - 1}\x00"
+
+    held = _CODE_BLOCK_RE.sub(_hold, text)
+    raw = [s for s in re.split(r'\n\s*\n', held) if s.strip()]
+
+    def _restore(s: str) -> str:
+        return _CODE_PH_RE.sub(lambda m: code_blocks[int(m.group(1))], s)
+
+    return [_restore(s) for s in raw]
+
+
 def _repair_code_fence_markers(text: str, seg_marker: str) -> str:
     """兜底修复：模型误把分段标记输出成各种乱码形式时的清洗。
 
@@ -3111,7 +3700,7 @@ def _repair_code_fence_markers(text: str, seg_marker: str) -> str:
     - ```<lang>（带语言标记）只能作【开】围栏，裸 ``` 依据当前状态开/闭；
     - 扫描后未配成对的围栏视为"被误用的分段标记"，替换为 seg_marker；
     - 正常成对的代码块（```lang ... ```）保持原样；
-    - 额外：把"独立成行的裸 c"也当孤立分段标记（模型常把 `\c` 转义后写成 c）。
+    - 额外：把"独立成行的裸 c"也当孤立分段标记（模型常把 `\\c` 转义后写成 c）。
     """
     import re as _re
     if not text or seg_marker == "```":
@@ -3267,9 +3856,64 @@ def _auto_segment_by_lines(text: str, target_lines: int = 5, max_chars: int = 50
 # 工具调用标记正则：匹配 [TOOL:start_exam] 或 [TOOL:next_unit]（旧格式，无参数）
 _TOOL_RE = re.compile(r"\[TOOL:\s*(start_exam|next_unit)\s*\]", re.IGNORECASE)
 # 工具调用标记正则：匹配 [TOOL:{"type":"show_terminal",...}]（新格式，参数化 JSON 工具）
-_TOOL_JSON_RE = re.compile(r"\[TOOL:\s*(\{.*\})\s*\]", re.DOTALL)
+# 注意：必须非贪婪 + DOTALL，否则贪婪会把 JSON 内部的 } 吞掉导致匹配失败
+_TOOL_JSON_RE = re.compile(r"\[TOOL:\s*(\{[\s\S]*?\})\s*\]", re.DOTALL)
 # 允许的新工具类型（防止模型输出任意 JSON 被误解析）
 _VALID_TOOL_TYPES = {"show_terminal", "show_image", "show_board"}
+
+
+def _strip_tool_markers(text: str) -> str:
+    """稳健地剥离 [TOOL:...] 标记（即使内部 JSON 嵌套/不合法），保留其余文本。
+
+    用括号深度计数定位匹配的结束 ]，避免非贪婪正则被嵌套 } / ] 提前截断，
+    导致 [TOOL:{...}] 残留在 clean_answer 里被 TTS 原样朗读。
+    """
+    if not text or "[TOOL" not in text.upper():
+        return text
+    out: List[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] == "[" and text[i:i + 5].upper() == "[TOOL":
+            j, depth = i + 5, 1
+            in_string = False
+            while j < n:
+                c = text[j]
+                if in_string:
+                    # JSON 字符串内部：转义字符跳过，普通字符不计入括号深度
+                    if c == "\\":
+                        j += 1
+                    elif c == '"':
+                        in_string = False
+                else:
+                    if c == '"':
+                        in_string = True
+                    elif c in "[{":
+                        depth += 1
+                    elif c in "]}":
+                        depth -= 1
+                        if depth == 0:
+                            j += 1
+                            break
+                j += 1
+            i = j  # 跳过整个 [TOOL:...] 标记
+            continue
+        out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def _tts_safe_text(text: str) -> str:
+    """朗读文本净化：剥离 [TOOL:...] / [ACTION:...] / [EMOTION:...] / [PARAM:...]
+    及中文括号变体，避免 TTS 把工具调用等内部标记读出来。"""
+    if not text:
+        return text
+    cleaned = _strip_tool_markers(text)
+    cleaned = _ACTION_RE.sub("", cleaned)
+    cleaned = _EMOTION_RE.sub("", cleaned)
+    cleaned = _PARAM_RE.sub("", cleaned)
+    cleaned = re.sub(r"【(ACTION|EMOTION|TOOL|PARAM):[^】]*】", "", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 
 def extract_tool_call(text: str) -> tuple[str, str | dict | None]:
@@ -3300,6 +3944,10 @@ def extract_tool_call(text: str) -> tuple[str, str | dict | None]:
     # 旧格式：[TOOL:start_exam] / [TOOL:next_unit]
     m = _TOOL_RE.search(text)
     if not m:
+        # 最终兜底：无论 [TOOL:...] 内容是否合法 JSON / 嵌套多深，都完整剥离，
+        # 避免标记残留在正文（尤其被 TTS 原样朗读）
+        if "[TOOL" in text.upper():
+            return _strip_tool_markers(text), None
         return text, None
     tool_event = m.group(1).lower()
     # 移除该标记及其周围多余空行
@@ -3328,6 +3976,81 @@ def extract_action_call(text: str) -> tuple[str, str | None]:
     cleaned = _ACTION_RE.sub("", text, count=1)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip() + ("\n" if cleaned.endswith("\n") else "")
     return cleaned.strip(), action
+
+
+# 参数直调标记正则：匹配 [PARAM:ParamAngleX=-15 ParamAngleY=5]（AI 直接控制模型参数）
+_PARAM_RE = re.compile(r"\[PARAM:\s*([^\]]+)\]", re.IGNORECASE)
+
+
+def extract_param_call(text: str):
+    """从模型回复中提取 [PARAM:参数名=数值 ...] 参数直调标记。
+
+    返回 (clean_text, params_dict|None)。params_dict 为 {参数名: float}。
+    """
+    if not text:
+        return text, None
+    m = _PARAM_RE.search(text)
+    if not m:
+        return text, None
+    params: Dict[str, float] = {}
+    for part in m.group(1).replace(",", " ").split():
+        if "=" not in part:
+            continue
+        k, _, v = part.partition("=")
+        k = k.strip()
+        try:
+            params[k] = float(v)
+        except ValueError:
+            continue
+    cleaned = _PARAM_RE.sub("", text, count=1)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip()
+    return cleaned, (params if params else None)
+
+
+# ============================
+# 语境动作/情绪推断（兜底）：本地小模型常常不输出 [ACTION:]/[EMOTION:] 标记，
+# 这里根据正文信号词自动推断动作与情绪，让老师"根据语境做出动作表情"。
+# ============================
+_CONTEXT_ACTION_RULES = [
+    (("恭喜", "太棒了", "非常棒", "真棒", "答对了", "做得很好", "太好了", "了不起", "为你骄傲", "你真厉害", "给你们点赞"), "cheer"),
+    (("没错", "说得对", "你说得对", "正是这样", "非常正确", "正是如此", "回答得很对"), "agree"),
+    (("不对", "错了", "不是这样", "可不能", "这是不对的", "这样可不行", "再想想看"), "shake"),
+    (("让我想想", "想一想", "这是个好问题", "关键在于", "思考一下", "让我思考"), "think"),
+    (("有点奇怪", "这很奇怪", "嗯？", "怎么回事", "这是为什么"), "tilt"),
+    (("真的吗", "竟然", "原来如此", "居然", "真没想到"), "gasp"),
+    (("可惜", "遗憾", "没办法", "唉", "真无奈", "算了"), "sigh"),
+    (("同学们好", "大家好", "同学们再见", "下课", "下次见", "我们下次课"), "bow"),
+]
+
+
+def infer_context_action(text: str) -> Optional[str]:
+    if not text:
+        return None
+    for keywords, action in _CONTEXT_ACTION_RULES:
+        for kw in keywords:
+            if kw in text:
+                return action
+    return None
+
+
+def infer_context_emotion(text: str) -> Optional[str]:
+    """由语境推断情绪：优先由动作映射，再匹配正文情绪词。"""
+    if not text:
+        return None
+    action = infer_context_action(text)
+    action_to_emotion = {
+        "cheer": "happy", "agree": "happy", "gasp": "surprised",
+        "sigh": "sad", "tilt": "think", "think": "think",
+    }
+    if action in action_to_emotion:
+        return action_to_emotion[action]
+    if any(k in text for k in ("太好了", "真棒", "恭喜", "真厉害", "为你开心", "为你们骄傲")):
+        return "happy"
+    if any(k in text for k in ("抱歉", "遗憾", "可惜", "很遗憾", "唉")):
+        return "sad"
+    if any(k in text for k in ("真的吗", "竟然", "真没想到")):
+        return "surprised"
+    return None
 
 
 # 情绪标记正则：匹配 [EMOTION:happy] / [EMOTION:think] 等
@@ -3420,6 +4143,7 @@ def api_chat():
     lesson_folder = payload.get("lesson_folder") or ACTIVE_LESSON.get("folder")
     force_cloud = payload.get("force_cloud", False)
     explain_mode = payload.get("explain_mode", "")
+    long_mode = bool(payload.get("long_mode", False))
     attachments = payload.get("attachments") or []
     if not message:
         return jsonify({"error": "message is required"}), 400
@@ -3490,24 +4214,24 @@ def api_chat():
         chat_provider = (chat_cfg.get("chat_provider") or "auto").strip().lower()
         if force_cloud:
             generated_answer = (
-                cloud_llm_reply(effective_message, lesson_folder, history=history)
-                or local_ollama_reply(effective_message, lesson_folder, history=history)
+                cloud_llm_reply(effective_message, lesson_folder, history=history, long_mode=long_mode)
+                or local_ollama_reply(effective_message, lesson_folder, history=history, long_mode=long_mode)
                 or fallback_answer
             )
         elif chat_provider in ("cloud", "openai_compatible"):
             generated_answer = (
-                cloud_llm_reply(effective_message, lesson_folder, history=history)
+                cloud_llm_reply(effective_message, lesson_folder, history=history, long_mode=long_mode)
                 or fallback_answer
             )
         elif chat_provider == "ollama":
             generated_answer = (
-                local_ollama_reply(effective_message, lesson_folder, history=history)
+                local_ollama_reply(effective_message, lesson_folder, history=history, long_mode=long_mode)
                 or fallback_answer
             )
         else:  # auto
             generated_answer = (
-                local_ollama_reply(effective_message, lesson_folder, history=history)
-                or cloud_llm_reply(effective_message, lesson_folder, history=history)
+                local_ollama_reply(effective_message, lesson_folder, history=history, long_mode=long_mode)
+                or cloud_llm_reply(effective_message, lesson_folder, history=history, long_mode=long_mode)
                 or fallback_answer
             )
 
@@ -3520,6 +4244,7 @@ def api_chat():
 
         # 解析情绪标记：剥离后推送 emotion 给前端设置表情
         clean_answer, live2d_emotion = extract_emotion_call(clean_answer)
+        clean_answer, live2d_params = extract_param_call(clean_answer)
         if live2d_emotion:
             print(f"[EMOTION-DEBUG] live2d_emotion={live2d_emotion}", flush=True)
 
@@ -3541,6 +4266,17 @@ def api_chat():
         if _ACTION_CLAUSE_RE.search(clean_answer):
             clean_answer = _ACTION_CLAUSE_RE.sub("", clean_answer)
             print("[ACTION-DEBUG] 已剥离动作描述从句", flush=True)
+
+        # 语境兜底：模型未输出动作/情绪标记时，根据正文信号词自动推断
+        if not live2d_action:
+            live2d_action = infer_context_action(clean_answer)
+            if live2d_action:
+                print(f"[ACTION-DEBUG] 语境推断动作={live2d_action}", flush=True)
+        if not live2d_emotion:
+            _inferred_emo = infer_context_emotion(clean_answer)
+            if _inferred_emo:
+                live2d_emotion = _inferred_emo
+                print(f"[EMOTION-DEBUG] 语境推断情绪={_inferred_emo}", flush=True)
 
         # [DEBUG] 工具调用检测日志
         meta_debug = load_lesson_metadata(lesson_folder)
@@ -3585,7 +4321,7 @@ def api_chat():
         # 将孤立的 ```<lang> 行还原为分段标记，避免破坏 Markdown 渲染。
         clean_answer = _repair_code_fence_markers(clean_answer, seg_marker)
 
-        raw_segments = re.split(r"\\+c", clean_answer) if seg_marker == "\\c" else clean_answer.split(seg_marker)
+        raw_segments = _split_by_marker_protecting_code(clean_answer, seg_marker)
         raw_segments = [s.strip() for s in raw_segments if s.strip()]
 
         # [DEBUG] 分段诊断日志
@@ -3598,8 +4334,9 @@ def api_chat():
             print(f"[SEG-DEBUG] marker positions: {[m.start() for m in re.finditer(re.escape(seg_marker), clean_answer)]}", flush=True)
 
         if not seg_enabled or len(raw_segments) <= 1:
-            # 关闭分段 或 无分段标记 → 按空行分段（段落边界）
-            raw_segments = [s.strip() for s in re.split(r'\n\s*\n', clean_answer) if s.strip()]
+            # 关闭分段 或 无分段标记 → 按空行分段（段落边界；保护代码块不被空行切开）
+            raw_segments = _split_paragraphs_protecting_code(clean_answer)
+            raw_segments = [s.strip() for s in raw_segments if s.strip()]
             print(f"[SEG-DEBUG] fallback to paragraph split: {len(raw_segments)} segments", flush=True)
 
         if len(raw_segments) <= 1:
@@ -3642,7 +4379,8 @@ def api_chat():
                 display_content = strip_emotion_tags(accumulator)
                 payload = {"content": display_content, "done": False, "segment": seg_idx}
                 yield f"data: {json.dumps(payload)}\n\n"
-                time.sleep(0.03)
+                # 流式节流：原 30ms/帧 × 88 帧 = 2.6s 纯睡眠，降低到 8ms 体感无差、首字延迟大幅减少
+                time.sleep(0.008)
 
         # 存档时去掉分段标记（默认 \c，配置可改；兼容单/多反斜杠 + c 的旧历史），
         # 并剥离所有情绪标签（内嵌多标签时 extract_emotion_call 只清掉第一个）
@@ -3651,7 +4389,7 @@ def api_chat():
         else:
             clean_answer_stored = strip_emotion_tags(clean_answer.replace(seg_marker, "")).strip()
 
-        audio_url = local_tts_audio(clean_answer[:500]) if clean_answer else None
+        audio_url = local_tts_audio(_tts_safe_text(clean_answer)[:500]) if clean_answer else None
 
         conversation = load_conversation(lesson_folder)
         conversation.append({"role": "user", "content": effective_message, "timestamp": now_iso()})
@@ -3669,6 +4407,8 @@ def api_chat():
             done_payload["action"] = live2d_action
         if live2d_emotion:
             done_payload["emotion"] = live2d_emotion
+        if live2d_params:
+            done_payload["params"] = live2d_params
         if tool_event:
             done_payload["tool_event"] = tool_event
             # 附带最新进度，便于前端刷新进度条
@@ -3752,6 +4492,9 @@ def _normalize_quiz_questions(raw_questions: List[Dict[str, Any]]) -> List[Dict[
         }
         if q_type in ("single", "multiple", "boolean"):
             item["options"] = list(options)
+        # 过滤"元认知/学习态度"套路题（绝对不允许出现无意义题）
+        if not _is_meaningful_question(item):
+            continue
         out.append(item)
     return out
 
@@ -3839,20 +4582,24 @@ def api_exam_generate():
         if not questions:
             questions = list(metadata.get("quiz_preset") or [])
 
-    # 3. 最终兜底题库（基于单元内容生成有意义的题目）
+    # 3. 最终兜底题库（基于单元 key_points 生成与具体知识点绑定的题目，严禁泛化套路题）
     if not questions:
-        title = cur_unit.get("title", "") if cur_unit else ""
-        summary = cur_unit.get("summary", "") if cur_unit else ""
-        kps = (cur_unit.get("key_points", []) if cur_unit else []) or []
-        kp_str = "、".join(str(k) for k in kps[:3]) if kps else (summary[:40] or topic)
-        questions = [
-            {"question": f"在「{title or topic}」中，{kp_str} 的核心要点是什么？", "type": "single", "options": ["A. 以上都对", "B. 只需记忆定义", "C. 跳过此部分", "D. 不需理解"], "answer": "A"},
-            {"question": f"关于「{title or topic}」的学习，以下哪些方法是有效的？（多选）", "type": "multiple", "options": ["A. 结合实践练习", "B. 死记硬背", "C. 理解核心概念", "D. 只看不练"], "answer": "AC"},
-            {"question": f"学习「{title or topic}」不需要理解，只需记忆。", "type": "boolean", "options": ["A. 正确", "B. 错误"], "answer": "F"},
-            {"question": f"「{title or topic}」中最基础的概念是______。", "type": "fill", "answer": "基础概念"},
-        ]
+        questions = _fallback_quiz(cur_unit or {"title": topic})
 
     questions = _normalize_quiz_questions(questions)
+
+    # 题型兜底：4B 本地模型常漏出多选/判断/填空（实测只出 2 道单选），
+    # 从本地题库补齐缺失题型，确保填空等题型可用。
+    if cur_unit and questions:
+        have_types = {q.get("type") for q in questions}
+        fb_quiz = _fallback_quiz(cur_unit)
+        for want in ("multiple", "boolean", "fill"):
+            if want in have_types:
+                continue
+            cand = next((q for q in fb_quiz if q.get("type") == want), None)
+            if cand:
+                questions.append(cand)
+        questions = _normalize_quiz_questions(questions)
 
     ACTIVE_LESSON["last_exam"] = questions
     # 不把 answer 暴露给前端，避免作弊；同时隐藏 fill 题的答案
@@ -3976,6 +4723,84 @@ def api_lesson_next_unit():
         return jsonify({"success": False, "message": "无效的进度"})
 
 
+@app.route("/api/unit/welcome", methods=["POST"])
+def api_unit_welcome():
+    """首次进入单元时，AI 主动开场讲解本课基础知识点（流式 SSE）。
+
+    把系统提示词（人格/课程背景/本单元内容）交给模型生成开场讲解；
+    讲解写入对话历史（作为该单元第一条 assistant 消息），并记录到 welcomed_units 避免重复。
+    """
+    payload = request.get_json(silent=True) or {}
+    lesson_folder = payload.get("lesson_folder") or ACTIVE_LESSON.get("folder")
+    if not lesson_folder:
+        return jsonify({"error": "No active lesson selected"}), 400
+
+    metadata = load_lesson_metadata(lesson_folder)
+    units = metadata.get("units") or []
+    if not units:
+        return jsonify({"error": "该课程无分课内容"}), 400
+
+    progress = load_progress(lesson_folder)
+    cur = int(progress.get("current_unit", 0) or 0)
+    if not (0 <= cur < len(units)):
+        return jsonify({"error": "单元索引越界"}), 400
+    welcomed = progress.get("welcomed_units") or []
+    if not isinstance(welcomed, list):
+        welcomed = []
+    if cur in welcomed:
+        # 已欢迎过：轻量返回，前端不重复讲解
+        return jsonify({"ok": True, "already": True, "unit_index": cur}), 200
+
+    unit = units[cur]
+    unit_title = unit.get("title") or f"第 {cur + 1} 课"
+    system_prompt = build_system_prompt(lesson_folder)
+    user_msg = (
+        f"请为「{unit_title}」这节课做一个开场讲解，帮助学生开始学习。要求：\n"
+        "1. 先简短介绍这节课要学什么、为什么重要（1-2 句）\n"
+        "2. 然后系统性地讲解本课的基础知识点，覆盖关键要点，每个要点配一个简单例子\n"
+        "3. 用 Markdown 结构化输出（标题、列表、粗体），口语化、亲切，像真人老师面对面授课\n"
+        "4. 篇幅适中（约 300-500 字），不要过于冗长，不要输出任何工具调用标记\n"
+    )
+
+    def generate():
+        chat_cfg = load_config()
+        chat_provider = (chat_cfg.get("chat_provider") or "auto").strip().lower()
+        if chat_provider in ("cloud", "openai_compatible"):
+            answer = cloud_llm_reply(user_msg, lesson_folder, history=[])
+        elif chat_provider == "ollama":
+            answer = local_ollama_reply(user_msg, lesson_folder, history=[])
+        else:  # auto：本地优先，失败回退云端
+            answer = (
+                local_ollama_reply(user_msg, lesson_folder, history=[])
+                or cloud_llm_reply(user_msg, lesson_folder, history=[])
+            )
+        answer = (answer or "").strip()
+        answer = _strip_thinking_lead(_strip_thinking_residue(answer))
+        if not answer:
+            answer = "这节课的基础知识我还没准备好，你可以直接问我任何问题，我来为你讲解。"
+
+        # 段落边界分段，逐段推送（制造"一段一段讲"的效果）
+        segments = _split_paragraphs_protecting_code(answer)
+        segments = [s.strip() for s in segments if s.strip()] or [answer]
+        for seg_idx, segment in enumerate(segments):
+            yield f"data: {json.dumps({'content': segment, 'done': False, 'segment': seg_idx})}\n\n"
+            time.sleep(0.25)
+
+        # 写入对话历史（作为该单元第一条消息）并标记已欢迎
+        conversation = load_conversation(lesson_folder)
+        conversation.append({"role": "user", "content": f"（系统：请讲解「{unit_title}」的开场内容）", "timestamp": now_iso()})
+        conversation.append({"role": "assistant", "content": answer, "timestamp": now_iso()})
+        save_conversation(lesson_folder, conversation)
+        welcomed.append(cur)
+        progress["welcomed_units"] = welcomed
+        save_progress(lesson_folder, progress)
+
+        done_payload = {"content": answer, "done": True, "unit_index": cur, "progress": load_progress(lesson_folder)}
+        yield f"data: {json.dumps(done_payload)}\n\n"
+
+    return Response(stream_with_context(generate()), mimetype="text/event-stream")
+
+
 @app.route("/api/lesson/reset", methods=["POST"])
 def api_lesson_reset():
     payload = request.get_json(silent=True) or {}
@@ -4004,9 +4829,10 @@ def api_create_lesson():
 @app.route("/api/switch_lesson", methods=["POST"])
 def api_switch_lesson():
     payload = request.get_json(silent=True) or {}
-    lesson_folder = payload.get("lesson_folder")
+    # 兼容两种入参：lesson_folder（旧）或 lesson_id（新）——两者都是目录名本身
+    lesson_folder = (payload.get("lesson_id") or payload.get("lesson_folder") or "").strip()
     if not lesson_folder:
-        return jsonify({"error": "lesson_folder is required"}), 400
+        return jsonify({"error": "lesson_id is required"}), 400
 
     target_dir = LESSONS_DIR / lesson_folder
     if not target_dir.exists():
@@ -4022,11 +4848,6 @@ def api_switch_lesson():
             metadata = json.loads(target_path.read_text(encoding="utf-8"))
         except Exception:
             metadata = {}
-
-    if metadata.get("personality_prompt"):
-        cfg = load_config()
-        cfg["personality_prompt"] = metadata["personality_prompt"]
-        save_config(cfg)
 
     ACTIVE_LESSON["folder"] = lesson_folder
     ACTIVE_LESSON["metadata"] = metadata

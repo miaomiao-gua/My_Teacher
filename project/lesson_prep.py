@@ -1,9 +1,66 @@
 import json
+import logging
 import os
+import random
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 import requests
+
+logger = logging.getLogger(__name__)
+
+
+def _strip_thinking_residue(text: str) -> str:
+    """剥离模型思考残留（qwen3 等即使 think=false 也可能输出 <|thinking|> / </think> / [thinking] 块）。"""
+    if not text:
+        return text
+    for pattern in (
+        r"<\|thinking\|>[\s\S]*?<\|/thinking\|>",
+        r"<thinking>[\s\S]*?</thinking>",
+        r"\[thinking\][\s\S]*?\[/thinking\]",
+        r"\[think\][\s\S]*?\[/think\]",
+        r"<\|thinking\|>[\s\S]*",
+    ):
+        text = re.sub(pattern, "", text)
+    # 段级独白：独立成段的 [think]（行首或 \c 分段标记之后，到 \c / 空行 / 结尾为止）
+    text = re.sub(r"(?:^|\n|\\c)\s*\[think\][\s\S]*?(?=\\c|\n\s*\n|\Z)", "\n", text)
+    # 单独闭合/开始标签（含 [think] / [/think] 裸标记）
+    text = re.sub(r"</?think>|<\|/?thinking\|>|\[/?think(?:ing)?\]", "", text, flags=re.IGNORECASE)
+    return text.strip()
+
+
+# qwen3 在 think=false 时仍会以"首先，用户要求我…""关键点是…我需要…"这类内心独白开头，
+# 污染回复正文与出题表格。此正则仅匹配"明确的独白句式"，避免误伤"好的，我们来看…"等正常开场。
+_THINK_LEAD_RE = re.compile(
+    r"^\s*(?:"
+    r"首先[，,：:\s]|"
+    r"用户(?:要求|希望|提出|想要|需要)|"
+    r"根据(?:用户|您的|你的|我).{0,6}?(?:要求|需求|问题|指令)|"
+    r"我需要(?:来|先|现在)?|"
+    r"让我(?:先|想想|来分析|来思考|来规划|来设计|来准备|来回答)|"
+    r"(?:关键点|重点)(?:是|为|在于)[：:，,]|"
+    r"(?:题目|设计|出题|本任务|我的任务|我的工作)(?:要求|是|为|将|需要)|"
+    r"作为.{0,20}?(?:教师|老师|助教|教练|助手|学科专家|课程设计师|学习导师)"
+    r")"
+)
+
+
+def _strip_thinking_lead(text: str) -> str:
+    """剥离模型回答开头的思考/任务复述独白段（段级）。
+
+    仅当"开头段落以强独白句式开头、且后面还有其他内容"时才剥离该段，
+    逐段循环直到开头不再是独白；若整篇只有一段（独白与内容混排）则原样保留。
+    """
+    if not text:
+        return text
+    paragraphs = [p for p in str(text).split("\n\n") if p.strip()]
+    while len(paragraphs) > 1:
+        first = paragraphs[0].strip()
+        if not _THINK_LEAD_RE.search(first):
+            break
+        paragraphs = paragraphs[1:]
+    return "\n\n".join(paragraphs).strip() or text
 
 
 SILICONFLOW_URL = "https://api.siliconflow.cn/v1/chat/completions"
@@ -13,50 +70,133 @@ DEFAULT_MODEL = "deepseek-ai/DeepSeek-V3"
 MAX_UNIT_CONTENT_CHARS = 8000
 
 # 备课 system prompt（云端 / 本地 Ollama 共用）
+#
+# 设计原则：备课是"做教案"，讲课是"用教案"，二者完全解耦。
+# - 备课阶段：模型按"两阶段思考链·阶段一"输出可执行的教案结构
+#   （每个 unit 含 target 学习目标 + modules 讲解模块序列，每模块含 concept/example/interaction/action）。
+# - 讲课阶段：app.py 的 /api/chat 注入这套教案作为强引导，模型按"两阶段思考链·阶段二"逐模块推进。
 _LESSON_SYSTEM_PROMPT = (
-    "你是一位顶级学科专家与课程设计师。请针对用户给定的主题，搜索最新、权威的资料，"
-    "并将内容拆分为若干个可循序渐进教学的「课」（unit）。\n"
-    "请严格以 JSON 格式返回以下字段（不要输出任何额外文字）：\n"
+    "你是一位顶级学科专家与课程设计师，同时承担「做教案」的职责。\n"
+    "你的工作严格分为两个阶段，备课阶段你只需要做【阶段一】，不要做任何讲课。\n\n"
+    "==================\n"
+    "【阶段一：备课思考链】\n"
+    "==================\n"
+    "目标：生成一套可执行的教案 + 节奏点 + 动作提示。\n"
+    "请严格按以下 5 步生成（输出时把这些思考体现在 JSON 的结构里，不要输出思考过程）：\n"
+    "  第1步【定目标】  — 学生学完这堂课，能做什么？用一句话写出来（填入每个 unit 的 target 字段）。\n"
+    "  第2步【拆结构】  — 这个目标需要拆成几个最小讲解单元（modules）？每个 module 讲一个核心概念。\n"
+    "                     每个 module 必须包含：concept（概念）+ example（生活/代码例子）+ anchor（一句话记忆锚点）。\n"
+    "  第3步【配节奏】  — 每个 module 结束后，安排什么交互？\n"
+    "                     选项：小测验 / 代码练习 / 生活类比 / 提问环节 / 类比对比。\n"
+    "                     把交互形式写入 modules[].interaction。\n"
+    "  第4步【想动作】  — 哪个 module 值得用 Live2D 动作辅助？\n"
+    "                     例如：讲「循环」→「绕圈手势」；讲「函数调用」→「指向黑板」。\n"
+    "                     输出到 modules[].action（用一个简短的中文动作描述）。\n"
+    "  第5步【出教案】  — 组装成最终 JSON（schema 见下）。\n\n"
+    "请严格以 JSON 格式返回（不要输出任何额外文字、不要用 ```json 包裹）：\n"
     "{\n"
     '  "topic": "主题",\n'
-    '  "syllabus": "整体章节大纲（Markdown 格式，列出全部 unit 标题与简要内容）",\n'
+    '  "syllabus": "整体章节大纲（Markdown，### 第N课：标题 + 1-2句说明）",\n'
     '  "key_points": ["全局核心概念1", "全局核心概念2", ...],\n'
     '  "units": [\n'
     '    {\n'
-    '      "title": "第 1 课标题",\n'
+    '      "title": "第 N 课：xxx",\n'
     '      "summary": "本课要点概述（1-2 句）",\n'
     '      "key_points": ["本课要点1", "本课要点2", "本课要点3", "本课要点4"],\n'
+    '      "target": "学生学完这堂课，能用一句话写出来的能力目标",\n'
+    '      "modules": [\n'
+    '        {\n'
+    '          "id": "M1",\n'
+    '          "title": "本模块的标题（动宾短语，如『理解循环的本质』）",\n'
+    '          "concept": "本模块要讲解的核心概念（1-2 句）",\n'
+    '          "example": "用来做类比/演示的具体例子（生活例子或代码片段）",\n'
+    '          "anchor": "一句话记忆锚点（学生听完能用一句话复述）",\n'
+    '          "interaction": "本模块结束后安排的交互（『小测验：…』/『代码练习：…』/『提问：…』）",\n'
+    '          "action": "建议的 Live2D 动作描述（如『绕圈手势』『指向黑板』『点头赞许』）"\n'
+    '        }\n'
+    '      ],\n'
     '      "source_files": [\n'
-    '        {"title": "资源标题", "url": "下载链接", "type": "pdf|docx|webpage", '
+    '        {"title": "资源标题", "url": "链接", "type": "pdf|docx|webpage|video", '
+    '"platform": "video 类型时填写 bilibili 或 netease_open_course", '
     '"description": "简短说明", "markdown_content": "可选：若资源是公开文本，直接提供 Markdown 正文"}\n'
     '      ]\n'
     '    }\n'
     '  ],\n'
     '  "resources": ["全局备用资源（可选，结构与 source_files 一致）"]\n'
-    "}\n"
-    "要求：\n"
-    "1. units 至少 12 课，最多 20 课，由浅入深、循序渐进。每课标题需明确体现该课的教学内容。\n"
-    "2. 每个 unit 的 key_points 至少 4 个，source_files 至少 1 个真实可访问的下载链接（PDF 教材、官方文档等），type 字段必须是 pdf/docx/webpage 之一。\n"
-    "3. markdown_content 字段若资源是公开网页/文本，请直接给出关键段落 Markdown 正文（不超过 2000 字）。\n"
-    "4. syllabus 字段需包含全部课时的标题列表，使用 ### 标记每课，格式为 ### 第N课：标题，并附上1-2句简要说明。\n"
-    "5. key_points（全局）至少 5 个核心概念。\n"
-    "6. resources（全局）至少 3 个高质量学习资源链接。"
+    "}\n\n"
+    "硬性要求：\n"
+    "1. units 至少 8 课，最多 16 课，由浅入深、循序渐进。每课标题需明确体现该课的教学内容。\n"
+    "2. 每个 unit 的 modules 至少 3 个、最多 6 个；module 数量足够把 target 拆解到位。\n"
+    "3. 每个 module 的 concept/example/anchor/interaction/action 五个字段都必须有内容，禁止空字符串或省略。\n"
+    "4. 每个 unit 的 key_points 至少 4 个，source_files 至少 1 个真实可访问的资源链接"
+    "（PDF 教材、官方文档、网页等），type 字段必须是 pdf/docx/webpage/video 之一。\n"
+    "5. markdown_content 字段若资源是公开网页/文本，请直接给出关键段落 Markdown 正文（不超过 2000 字）。\n"
+    "6. syllabus 字段需包含全部课时的标题列表，使用 ### 标记每课，格式为 ### 第N课：标题，并附上1-2句简要说明。\n"
+    "7. key_points（全局）至少 5 个核心概念；resources（全局）至少 3 个高质量学习资源链接。\n"
+    "8. 若你能搜索到与本课内容直接相关的公开课程视频，请把视频加入该课的 source_files："
+    "type 固定为 video，platform 只能填 bilibili（B站，url 形如 https://www.bilibili.com/video/BV...）"
+    "或 netease_open_course（网易公开课，url 形如 https://open.163.com/...）；"
+    "url 必须是上述两个平台之一的真实视频页链接，找不到真实链接时不要编造。\n"
+    "9. 若用户随主题提供了课程资料文档（Markdown），你必须基于该文档内容拆分单元、提炼 modules 的 concept/example，"
+    "不要脱离文档凭空编造课程内容。\n"
+    "10. 严禁在 JSON 中输出「思考过程」「分析」等元文本；只输出最终结构化教案。"
 )
 
 
-def _fallback_lesson(topic: str) -> Dict[str, Any]:
-    """本地兜底教案：单课结构，含一个示例 unit（不含题目，题目由模型单独生成）。"""
+def _fallback_lesson(topic: str, document_markdown: str = "") -> Dict[str, Any]:
+    """本地兜底教案：单课结构，含 target + modules（教案骨架），不含题目。
+
+    即使云端/Ollama 不可用，也要保证落盘的数据满足"阶段二讲课"的最低要求：
+    每个 unit 有 target + modules[]（id/title/concept/example/anchor/interaction/action）。
+    """
+    doc_summary = ""
+    if document_markdown:
+        lines = [ln.strip() for ln in document_markdown.splitlines() if ln.strip()]
+        doc_summary = "\n".join(lines[:20])
+        if len(lines) > 20:
+            doc_summary += "\n…"
     sample_unit = {
         "title": f"{topic} 概览",
         "summary": f"了解 {topic} 的核心概念、关键方法和实践要点。",
         "key_points": ["掌握主题的核心定义", "理解关键流程和步骤", "能够结合实例进行实践"],
+        "target": f"理解 {topic} 的核心概念，并能在简单场景中加以应用。",
+        "modules": [
+            {
+                "id": "M1",
+                "title": f"理解 {topic} 的基本定义",
+                "concept": f"掌握 {topic} 的核心定义、适用场景与边界。",
+                "example": "先用一个生活中的类比建立直观印象，再对应到学科概念。",
+                "anchor": f"一句话：{topic} 是用来解决某一类问题的标准化思路。",
+                "interaction": "提问：你之前在哪里遇到过类似的概念？",
+                "action": "点头致意，表示欢迎进入本课",
+            },
+            {
+                "id": "M2",
+                "title": f"{topic} 的关键方法与步骤",
+                "concept": f"拆解 {topic} 的标准处理流程，了解每一步的目的与产物。",
+                "example": "用一个最小例子走完整套流程，标注每一步对应概念。",
+                "anchor": f"一句话：流程是 {topic} 的骨架，每一步都不能跳过。",
+                "interaction": "小测验：哪一步是必要的，哪一步可以省略？",
+                "action": "指向黑板，演示流程图",
+            },
+            {
+                "id": "M3",
+                "title": f"在实例中应用 {topic}",
+                "concept": f"把 {topic} 应用到真实问题，掌握常见易错点。",
+                "example": "选一个贴近学生生活的案例，完整应用一次并讨论可能的变化。",
+                "anchor": f"一句话：{topic} 的价值在于把同类问题模板化解决。",
+                "interaction": "代码/案例练习：让学生自己尝试一次。",
+                "action": "绕圈手势，强调重复与循环",
+            },
+        ],
         "source_files": [
             {
                 "title": f"{topic}参考资料",
                 "url": "https://example.com/lesson-resource.pdf",
                 "type": "pdf",
                 "description": "参考教材与讲义（示例链接，可在设置中配置云端 API 后获取真实资源）",
-                "markdown_content": "# 参考资料\n\n这是一个示例资料链接，指向公开示例页面。",
+                "markdown_content": (f"# 参考资料\n\n（来自用户上传文档）\n\n{doc_summary}" if doc_summary
+                                     else "# 参考资料\n\n这是一个示例资料链接，指向公开示例页面。"),
             }
         ],
     }
@@ -80,11 +220,107 @@ def _strip_code_fence(text: str) -> str:
     return cleaned
 
 
-def _call_siliconflow(topic: str, config: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def _json_error_context(text: str, exc: json.JSONDecodeError) -> str:
+    """从 JSON 解析异常中提取错误位置附近的原文片段，方便日志定位。"""
+    if not text:
+        return "N/A"
+    pos = getattr(exc, "pos", None)
+    if pos is None:
+        return text[:300]
+    lo = max(0, pos - 120)
+    hi = min(len(text), pos + 120)
+    return f"...{text[lo:hi]}... (pos={pos})"
+
+
+def _fix_json_literal_newlines(text: str) -> str:
+    """字符串感知地把 JSON 字符串值内部的裸换行/回车/Tab 转义为合法 JSON。
+
+    模型生成 JSON 时常把多行文本直接写进字符串值（未转义的真实换行），
+    导致 json.loads 报 "Expecting ',' delimiter" 之类错误。这里逐字符扫描，
+    仅在字符串内部（in_string）转义裸控制字符，不触碰结构部分。
+    """
+    out: List[str] = []
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                out.append(ch)
+                escaped = False
+                continue
+            if ch == "\\":
+                out.append(ch)
+                escaped = True
+                continue
+            if ch == '"':
+                in_string = False
+                out.append(ch)
+                continue
+            if ch == "\n":
+                out.append("\\n")
+                continue
+            if ch == "\r":
+                out.append("\\r")
+                continue
+            if ch == "\t":
+                out.append("\\t")
+                continue
+            out.append(ch)
+            continue
+        # 结构部分（对象/数组/冒号/逗号/花括号之外）
+        if ch == '"':
+            in_string = True
+        out.append(ch)
+    return "".join(out)
+
+
+def _robust_json_loads(text: str) -> Any:
+    """容错解析模型输出的 JSON（备课 / 出题共用）。
+
+    依次尝试：剥围栏直接解析 → 截取最外层 {…} → 字符串内裸控制字符转义后重试。
+    全部失败则抛出原始 json.JSONDecodeError（保留定位信息）。
+    """
+    cleaned = _strip_code_fence(text).strip()
+    candidates: List[str] = [cleaned]
+    # 若正文前后混有说明文字/围栏残留，截取第一个 { 到最后一个 } 之间的部分
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end > start:
+        candidates.append(cleaned[start:end + 1])
+    for cand in candidates:
+        try:
+            return json.loads(cand)
+        except json.JSONDecodeError:
+            pass
+    # 修复字符串值内裸换行/控制字符后再试一轮
+    for cand in candidates:
+        fixed = _fix_json_literal_newlines(cand)
+        if fixed == cand:
+            continue
+        try:
+            return json.loads(fixed)
+        except json.JSONDecodeError:
+            pass
+    raise json.JSONDecodeError("所有容错策略均失败", cleaned[:500], 0)
+
+
+def _build_user_message(topic: str, document_markdown: str = "") -> str:
+    """构造备课的用户消息：无文档时只给主题；有文档时附上文档全文并要求基于文档拆分。"""
+    if not document_markdown:
+        return f"请为【{topic}】设计一份分课教案，至少12课，每课独立含资源与要点。"
+    doc = document_markdown[:60000]  # 截断防 token 爆炸
+    return (
+        f"以下是用户上传的课程资料文档（Markdown，请以此为准，不要脱离文档编造内容）：\n\n"
+        f"--- 课程资料开始 ---\n{doc}\n--- 课程资料结束 ---\n\n"
+        f"请基于以上文档为【{topic}】设计一份分课教案，至少12课，每课独立含资源与要点。"
+    )
+
+
+def _call_siliconflow(topic: str, config: Dict[str, Any] | None = None, document_markdown: str = "") -> Dict[str, Any]:
     config = config or {}
     api_key = (config.get("cloud_api_key") or config.get("siliconflow_api_key") or os.getenv("SILICONFLOW_API_KEY", "")).strip()
     if not api_key:
-        return _fallback_lesson(topic)
+        return _fallback_lesson(topic, document_markdown)
 
     base_url = (config.get("cloud_base_url") or "https://api.siliconflow.cn/v1").rstrip("/")
     if not base_url.endswith("/chat/completions"):
@@ -93,7 +329,8 @@ def _call_siliconflow(topic: str, config: Dict[str, Any] | None = None) -> Dict[
         url = base_url
 
     model = (config.get("cloud_model") or config.get("siliconflow_model") or DEFAULT_MODEL).strip()
-    enable_search = bool(config.get("enable_search", True))
+    # 备课不联网搜索：教案内容应来自模型知识 + 上传文档，搜索会显著拖慢响应（实测 180s 超时回退）
+    enable_search = False
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -101,55 +338,63 @@ def _call_siliconflow(topic: str, config: Dict[str, Any] | None = None) -> Dict[
     }
     # 让云端模型按"分课"结构生成教案：units 数组里每一课独立持有 title/summary/key_points/source_files
     # 注意：不再要求模型生成题目，题目由后续单独流程结合人格提示词生成
+    system_content = (config or {}).get("lesson_prompt") or _LESSON_SYSTEM_PROMPT
+    user_content = _build_user_message(topic, document_markdown)
     payload = {
         "model": model,
         "messages": [
-            {
-                "role": "system",
-                "content": (config or {}).get("lesson_prompt") or _LESSON_SYSTEM_PROMPT,
-            },
-            {"role": "user", "content": f"请为【{topic}】设计一份分课教案，至少12课，每课独立含资源与要点。"},
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
         ],
-        "enable_search": enable_search,
         "max_tokens": 8192,
         "temperature": 0.7,
     }
+    # 备课不再附带 enable_search（无论用户全局设置如何），避免联网搜索拖慢备课
 
     try:
-        print(f"[PREP-DEBUG] calling API: url={url}, model={model}, enable_search={enable_search}", flush=True)
-        response = requests.post(url, headers=headers, json=payload, timeout=180)
-        print(f"[PREP-DEBUG] API response status={response.status_code}", flush=True)
+        logger.info(
+            "📦 备课·云端请求包: url=%s model=%s enable_search=%s max_tokens=8192 topic=%r",
+            url, model, enable_search, topic,
+        )
+        logger.info(
+            "📦 备课·system_prompt=%d字 user_message=%d字(文档%d字)",
+            len(system_content), len(user_content), len(document_markdown),
+        )
+        t0 = time.time()
+        response = requests.post(url, headers=headers, json=payload, timeout=300)
+        elapsed = time.time() - t0
+        logger.info("📦 备课·云端响应包: status=%s 耗时=%.1fs content-type=%s",
+                    response.status_code, elapsed, response.headers.get("Content-Type"))
         response.raise_for_status()
         result = response.json()
         content = result["choices"][0]["message"]["content"]
-        print(f"[PREP-DEBUG] raw_content_len={len(content)}, preview={content[:300]}", flush=True)
+        logger.info("📦 备课·响应正文: raw_content_len=%d preview=%s", len(content), content[:300])
         text = _strip_code_fence(content)
-        data = json.loads(text)
+        data = _robust_json_loads(text)
         if isinstance(data, dict):
             units = data.get("units", [])
-            print(f"[PREP-DEBUG] parsed OK, units={len(units) if isinstance(units, list) else 'N/A'}", flush=True)
+            logger.info("✅ 备课·解析成功 units=%s", len(units) if isinstance(units, list) else "N/A")
             return data
-        print(f"[PREP-DEBUG] parsed data is not dict: {type(data)}", flush=True)
+        logger.warning("⚠️ 备课·解析结果不是 dict: %s", type(data))
     except requests.exceptions.HTTPError as e:
-        print(f"[PREP-DEBUG] HTTP error: {e}", flush=True)
-        print(f"[PREP-DEBUG] response body: {response.text[:500] if response else 'N/A'}", flush=True)
+        logger.error("❌ 备课·HTTP 错误: %s 响应体: %s", e, response.text[:500] if response else "N/A")
     except requests.exceptions.ConnectionError as e:
-        print(f"[PREP-DEBUG] connection error: {e}", flush=True)
+        logger.error("❌ 备课·连接错误: %s", e)
     except requests.exceptions.Timeout:
-        print(f"[PREP-DEBUG] timeout (60s)", flush=True)
+        logger.warning("⚠️ 备课·请求超时(300s) 已回退兜底")
     except json.JSONDecodeError as e:
-        print(f"[PREP-DEBUG] JSON decode error: {e}", flush=True)
-        print(f"[PREP-DEBUG] raw text (first 500): {text[:500] if 'text' in dir() else content[:500]}", flush=True)
+        _ctx = _json_error_context(text if "text" in dir() else content, e)
+        logger.error("❌ 备课·JSON 解析失败: %s\n   错误上下文: %s", e, _ctx)
     except Exception as e:
-        print(f"[PREP-DEBUG] unexpected error: {type(e).__name__}: {e}", flush=True)
+        logger.error("❌ 备课·未知错误: %s: %s", type(e).__name__, e)
         import traceback
         traceback.print_exc()
 
-    print(f"[PREP-DEBUG] falling back to _fallback_lesson(topic={topic})", flush=True)
-    return _fallback_lesson(topic)
+    logger.warning("⚠️ 备课·云端失败，回退到 _fallback_lesson(topic=%r)", topic)
+    return _fallback_lesson(topic, document_markdown)
 
 
-def _call_ollama_lesson(topic: str, config: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def _call_ollama_lesson(topic: str, config: Dict[str, Any] | None = None, document_markdown: str = "") -> Dict[str, Any]:
     """用本地 Ollama 生成分课教案（与云端共用同一 system prompt，去掉 enable_search）。"""
     config = config or {}
     base_url = (config.get("ollama_base_url") or "http://127.0.0.1:11434").rstrip("/")
@@ -158,9 +403,11 @@ def _call_ollama_lesson(topic: str, config: Dict[str, Any] | None = None) -> Dic
         "model": model,
         "messages": [
             {"role": "system", "content": (config or {}).get("lesson_prompt") or _LESSON_SYSTEM_PROMPT},
-            {"role": "user", "content": f"请为【{topic}】设计一份分课教案，至少12课，每课独立含资源与要点。"},
+            {"role": "user", "content": _build_user_message(topic, document_markdown)},
         ],
         "stream": False,
+        # qwen3 系列默认开启 thinking：4B 模型思考会大量消耗时间/可能返回空正文，显式关闭
+        "think": False,
         "options": {
             "temperature": 0.6,
             "num_ctx": int(config.get("ollama_num_ctx", 16384) or 16384),
@@ -168,30 +415,34 @@ def _call_ollama_lesson(topic: str, config: Dict[str, Any] | None = None) -> Dic
         },
     }
     try:
-        print(f"[PREP-DEBUG] calling Ollama: {base_url}/api/chat | model={model}", flush=True)
+        logger.info("📦 备课·Ollama请求包: %s/api/chat model=%s 文档%d字",
+                    base_url, model, len(document_markdown))
         resp = requests.post(f"{base_url}/api/chat", json=payload, timeout=300)
         if not resp.ok:
-            print(f"[PREP-DEBUG] Ollama HTTP {resp.status_code}: {resp.text[:300]}", flush=True)
+            logger.error("❌ 备课·Ollama HTTP %s: %s", resp.status_code, resp.text[:300])
             return None
         content = (resp.json().get("message", {}).get("content") or "").strip()
-        print(f"[PREP-DEBUG] Ollama raw_content_len={len(content)}, preview={content[:200]}", flush=True)
+        logger.info("📦 备课·Ollama响应: raw_content_len=%d preview=%s", len(content), content[:200])
         if not content:
             return None
+        # 清理 qwen3 思考残留（即使 think=false 也可能输出 <|thinking|> / </think>）与开头独白
+        content = _strip_thinking_residue(content)
+        content = _strip_thinking_lead(content)
         text = _strip_code_fence(content)
-        data = json.loads(text)
+        data = _robust_json_loads(text)
         if isinstance(data, dict):
             units = data.get("units", [])
-            print(f"[PREP-DEBUG] Ollama parsed OK, units={len(units) if isinstance(units, list) else 'N/A'}", flush=True)
+            logger.info("✅ 备课·Ollama解析成功 units=%s", len(units) if isinstance(units, list) else "N/A")
             return data
     except json.JSONDecodeError as exc:
-        print(f"[PREP-DEBUG] Ollama JSON decode error: {exc}", flush=True)
+        logger.error("❌ 备课·Ollama JSON解析失败: %s", exc)
     except Exception as exc:
-        print(f"[PREP-DEBUG] Ollama error: {type(exc).__name__}: {exc}", flush=True)
+        logger.error("❌ 备课·Ollama异常: %s: %s", type(exc).__name__, exc)
     return None
 
 
 def _normalize_unit(unit: Dict[str, Any], fallback_index: int) -> Dict[str, Any]:
-    """规范化单个 unit：补全字段、规整 quiz_preset 答案。"""
+    """规范化单个 unit：补全字段、规整 quiz_preset 答案，并保证 target/modules 教案骨架完整。"""
     if not isinstance(unit, dict):
         unit = {}
     title = (unit.get("title") or f"第 {fallback_index + 1} 课").strip()
@@ -214,16 +465,64 @@ def _normalize_unit(unit: Dict[str, Any], fallback_index: int) -> Dict[str, Any]
         ans = str(quiz.get("answer", "")).strip()
         if ans:
             quiz["answer"] = ans[0].upper()
+
+    # 教案骨架：target（学习目标）+ modules（讲解模块序列）
+    target = (unit.get("target") or summary or f"理解并应用本课的核心概念").strip()
+    raw_modules = unit.get("modules")
+    modules: List[Dict[str, Any]] = []
+    if isinstance(raw_modules, list):
+        for mi, m in enumerate(raw_modules):
+            if not isinstance(m, dict):
+                continue
+            mid = str(m.get("id") or f"M{mi + 1}").strip() or f"M{mi + 1}"
+            modules.append({
+                "id": mid,
+                "title": str(m.get("title") or "").strip(),
+                "concept": str(m.get("concept") or "").strip(),
+                "example": str(m.get("example") or "").strip(),
+                "anchor": str(m.get("anchor") or "").strip(),
+                "interaction": str(m.get("interaction") or "").strip(),
+                "action": str(m.get("action") or "").strip(),
+            })
+    # 兜底：如果模型没给 modules，用 key_points 派生一份最简骨架，保证讲课 prompt 有东西可循
+    if not modules:
+        kp_fallback = [str(k).strip() for k in key_points if str(k).strip()] or ["核心概念"]
+        modules = []
+        for mi, kp in enumerate(kp_fallback[:5]):
+            modules.append({
+                "id": f"M{mi + 1}",
+                "title": f"理解「{kp}」",
+                "concept": kp,
+                "example": "结合生活中的类比或最小例子说明。",
+                "anchor": f"一句话：{kp} 是本课的关键要点之一。",
+                "interaction": "提问：你对这个概念熟悉吗？",
+                "action": "指向黑板",
+            })
+    # 过滤空字段模块
+    modules = [m for m in modules if m.get("concept") or m.get("title")]
+    if not modules:
+        modules = [{
+            "id": "M1",
+            "title": "理解本课核心",
+            "concept": summary or title,
+            "example": "用一个生活例子帮助理解。",
+            "anchor": "一句话：抓住本课主线。",
+            "interaction": "提问：你有什么疑问？",
+            "action": "点头",
+        }]
+
     return {
         "title": title,
         "summary": summary,
         "key_points": key_points,
+        "target": target,
+        "modules": modules,
         "source_files": source_files,
         "quiz_preset": quiz_preset,
     }
 
 
-def prepare_lesson(topic: str, config: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def prepare_lesson(topic: str, config: Dict[str, Any] | None = None, document_markdown: str = "") -> Dict[str, Any]:
     """Return a lesson plan payload and gracefully fall back if external API is unavailable.
 
     Args:
@@ -231,6 +530,8 @@ def prepare_lesson(topic: str, config: Dict[str, Any] | None = None) -> Dict[str
         config: Optional runtime config dict (from config.json). When provided,
                 its cloud_api_key / cloud_model / cloud_base_url / enable_search
                 are used instead of environment variables.
+        document_markdown: Optional uploaded course document (Markdown). When provided,
+                the model must split units based on this document.
 
     Returns:
         dict with keys: topic, syllabus, key_points, resources, quiz_preset, units
@@ -238,15 +539,16 @@ def prepare_lesson(topic: str, config: Dict[str, Any] | None = None) -> Dict[str
         旧字段 syllabus/key_points/resources/quiz_preset 保留兼容。
     """
     provider = (str((config or {}).get("lesson_provider") or "cloud")).strip().lower()
+    logger.info("📦 备课·开始 provider=%s topic=%r 文档%d字", provider, topic, len(document_markdown))
     if provider == "ollama":
         # 本地 Ollama 备课，失败回退云端
-        data = _call_ollama_lesson(topic, config=config)
+        data = _call_ollama_lesson(topic, config=config, document_markdown=document_markdown)
         if not data:
-            print("[PREP-DEBUG] Ollama 备课失败，回退云端", flush=True)
-            data = _call_siliconflow(topic, config=config)
+            logger.warning("⚠️ 备课·Ollama 备课失败，回退云端")
+            data = _call_siliconflow(topic, config=config, document_markdown=document_markdown)
     else:
         # cloud / auto：云端备课（失败时内部回退到本地兜底教案）
-        data = _call_siliconflow(topic, config=config)
+        data = _call_siliconflow(topic, config=config, document_markdown=document_markdown)
     data.setdefault("topic", topic)
     data.setdefault("syllabus", f"# {topic}\n\n请根据实际课程内容补充。")
     data.setdefault("key_points", ["基础概念", "核心原理", "实践应用"])
@@ -367,7 +669,13 @@ def generate_quiz_with_model(
         "2. 题目内容需结合课程内容，体现角色的语言风格和教学特点。\n"
         "3. 单选题 2-3 道，选项 A/B/C/D；多选题 1-2 道；判断题 1 道；填空题 1 道。\n"
         "4. 答案必须准确，与课程内容一致。\n"
-        "5. 只返回 JSON 数组，不要返回其他内容。"
+        "5. 只返回 JSON 数组，不要返回其他内容。\n"
+        "6. 【绝对禁止】不得出现与具体知识点无关的泛化题、元认知题或学习态度题，例如：\n"
+        "   - 『关于「xx」中的关键概念，以下说法正确的是？（多选）』这类没有明确考点的题；\n"
+        "   - 选项含『只需记住结论即可 / 不需要思考为什么 / 需要理解概念的内涵和适用条件 / "
+        "通过实例加深理解』等学习态度套话的题；\n"
+        "   - 『学习「xx」不需要理解，只需记忆』这类判断题。\n"
+        "   每道题的考点必须是本单元的具体知识点，题目对错应能依据课程资料独立判断。"
     )
 
     payload = {
@@ -389,6 +697,7 @@ def generate_quiz_with_model(
         response.raise_for_status()
         result = response.json()
         content = result["choices"][0]["message"]["content"]
+        content = _strip_thinking_lead(content)
         text = _strip_code_fence(content)
         questions = json.loads(text)
         if isinstance(questions, list):
@@ -411,17 +720,44 @@ def _strip_code_fence(text: str) -> str:
 def _parse_markdown_quiz_table(text: str) -> List[Dict[str, Any]]:
     """Parse Markdown table output from exam_prompt_template into quiz questions."""
     questions: List[Dict[str, Any]] = []
-    lines = text.strip().split("\n")
-    # 找到表格行（以 | 开头）
-    table_lines = [l.strip() for l in lines if l.strip().startswith("|")]
-    if len(table_lines) < 2:
+    if not text:
         return questions
 
-    # 跳过表头和分隔行
+    # 容错1：模型可能在题干里输出 ``` 多行代码块，把表格行拆断成多行。
+    # 先把代码块内的换行压成 <br>，保证表格每行是单一逻辑行。
+    text = re.sub(r"```[\s\S]*?```", lambda m: m.group(0).replace("\n", "<br>"), text)
+
+    # 容错2：重构逻辑表格行——表格区域中非 "|" 开头的行（如代码续行）拼回上一表格行；
+    # 连续 2 个空行视为表格结束。
+    logical_rows: List[str] = []
+    in_table = False
+    blank_run = 0
+    for raw in text.split("\n"):
+        s = raw.strip()
+        if s.startswith("|"):
+            logical_rows.append(raw)
+            in_table = True
+            blank_run = 0
+        elif in_table and s:
+            logical_rows[-1] += "\n" + raw
+            blank_run = 0
+        elif in_table:
+            blank_run += 1
+            if blank_run >= 2:
+                in_table = False
+    if len(logical_rows) < 2:
+        return questions
+
+    # 模型常会先输出一版表再输出"修订版"，检测到新表头（含"题号/题型/题干"列）时
+    # 丢弃之前收集的所有行，只保留最后一张表，避免重复题/垃圾行（如 qwen3.5 实测）。
     data_lines = []
-    for line in table_lines[1:]:
+    for line in logical_rows[1:]:
         # 跳过分隔行 |---|---|...
         if re.match(r"^\|[\s\-:|]+\|$", line):
+            continue
+        # 新表头：列名含 题号/题型/题干，说明进入下一张表 → 丢弃旧数据
+        if re.search(r"题号|题型|题干", line) and re.search(r"选项|正确答案|答案", line):
+            data_lines = []
             continue
         data_lines.append(line)
 
@@ -466,15 +802,43 @@ def _parse_markdown_quiz_table(text: str) -> List[Dict[str, Any]]:
         answer = cells[7].strip()
         explanation = cells[8].strip() if len(cells) > 8 else ""
 
+        # 容错：qwen3.5 等模型把选项文本内嵌在题干列（<br>A. xxx），
+        # 而"选项A-D"列只填 A/B/C/D 字母占位。此时从题干拆分出真实选项。
+        embedded_opts = []  # [(letter, text), ...]
+        if "<br" in question_text.lower():
+            br_parts = re.split(r"<br\s*/?>", question_text, flags=re.I)
+            for p in br_parts[1:]:
+                mm = re.match(r"^\s*([A-D])[.、)．:：]?\s*(.+)$", p.strip(), flags=re.S)
+                if mm and len(embedded_opts) < 4:
+                    embedded_opts.append((mm.group(1).upper(), mm.group(2).strip()))
+            if len(embedded_opts) >= 2:
+                question_text = br_parts[0].strip()
+
+        def _is_letter_placeholder(opts):
+            """表格选项列是否全是字母占位（如 'A' / 'A, B'），而非真实选项文本。"""
+            vals = [o for o in opts if o and o not in ("/", "（留空）")]
+            if not vals:
+                return False
+            return all(
+                len(o) <= 10
+                and re.fullmatch(r"[A-D](?:[,\s，、]+[A-D])*", o, flags=re.I)
+                for o in vals
+            )
+
         options = []
         if qtype in ("single", "multiple", "boolean"):
-            for letter, opt in [("A", opt_a), ("B", opt_b), ("C", opt_c), ("D", opt_d)]:
-                if opt and opt != "/" and opt != "（留空）":
-                    # 去掉选项前缀如 "A." "A、" "A)"
-                    opt_clean = re.sub(r"^[A-D][.、)：:]\s*", "", opt)
-                    options.append(f"{letter}. {opt_clean}")
-                else:
-                    options.append(f"{letter}. /")
+            table_opts = [opt_a, opt_b, opt_c, opt_d]
+            if embedded_opts and _is_letter_placeholder(table_opts):
+                # 使用题干内嵌的选项
+                options = [f"{letter}. {text}" for letter, text in embedded_opts]
+            else:
+                for letter, opt in [("A", opt_a), ("B", opt_b), ("C", opt_c), ("D", opt_d)]:
+                    if opt and opt != "/" and opt != "（留空）":
+                        # 去掉选项前缀如 "A." "A、" "A)"
+                        opt_clean = re.sub(r"^[A-D][.、)：:]\s*", "", opt)
+                        options.append(f"{letter}. {opt_clean}")
+                    else:
+                        options.append(f"{letter}. /")
             if qtype == "boolean":
                 # 判断题：用 T/F
                 if answer.upper().startswith("T") or answer in ("正确", "对", "是"):
@@ -549,7 +913,9 @@ def generate_quiz_with_ollama(
 
     # 使用用户的提示词模板
     seed = unit_content.get("random_seed", 42)
-    exam_prompt = f"""你是一位资深学科教师，正在为【{topic}】这门课设计一份高质量的随堂测验。
+
+    def _build_exam_prompt(seed_val: int) -> str:
+        return f"""你是一位资深学科教师，正在为【{topic}】这门课设计一份高质量的随堂测验。
 
 以下是你需要参考的课程资料（来自教材/讲义）：
 ---
@@ -558,7 +924,7 @@ def generate_quiz_with_ollama(
 
 请根据以上资料，生成 6-8 道题目，题型包括：单选题3-4道、多选题1-2道、判断题1道、填空题1-2道，难度为：中等。
 
-【重要】本次出题的随机种子为 {seed}，请基于此种子设计**全新、独特**的题目，不要使用任何模板化或通用的问题。
+【重要】本次出题的随机种子为 {seed_val}，请基于此种子设计**全新、独特**的题目，不要使用任何模板化或通用的问题。
 每次测验的题目都必须不同 —— 请变换题干措辞、选项干扰、考察角度。
 
 设计要求：
@@ -567,8 +933,13 @@ def generate_quiz_with_ollama(
 3. **避免"全是正确选项"或"全是错误选项"**，尤其是多选题，必须确保至少有一个错误项。
 4. **填空题答案要具体、明确**，不要用通用词语。
 5. **所有题目必须附带详细解析**（不仅给出答案，还要解释为什么对/为什么错）。
+6. **【绝对禁止】严禁出现任何泛化的、与具体知识点无关的题目**，尤其是：
+   - 『关于「xx」中的关键概念，以下说法正确的是？（多选）』这类没有明确考点的题；
+   - 含『只需记住结论即可 / 不需要思考为什么 / 需要理解概念的内涵和适用条件 / 通过实例加深理解』等学习态度套话选项的题；
+   - 『学习「xx」不需要理解，只需记忆』这类判断学习态度的题。
+   每道题的题干和选项都必须落在本课的具体知识点上，能根据上文资料独立判断对错。
 
-请严格按照以下 Markdown 表格格式输出（不要有多余的文字）：
+请严格按照以下 Markdown 表格格式输出（直接输出表格本身，不要任何开场白、分析、思考过程或额外文字）：
 | 题号 | 题型 | 题干 | 选项A | 选项B | 选项C | 选项D | 正确答案 | 解析 |
 |------|------|------|-------|-------|-------|-------|----------|------|
 | 1    | 单选 | ...  | ...   | ...   | ...   | ...   | A        | ...  |
@@ -576,61 +947,136 @@ def generate_quiz_with_ollama(
 | 3    | 填空 | ...  | (留空) | (留空) | (留空) | (留空) | 具体答案 | ...  |
 
 注意：填空没有选项，请在"选项A~D"列填写"/"占位，但"正确答案"列必须填标准答案。
-判断题的选项A填"正确"，选项B填"错误"，正确答案填T或F。"""
+判断题的选项A填"正确"，选项B填"错误"，正确答案填T或F。
+【重要】严禁在题干中使用多行代码块（``` 或 <br> 换行）。如题干需要展示代码，请把代码压缩为一行，或写成"代码：<code>...</code>"的简化写法，确保每个题目只占表格的一行。"""
 
     system_content = "你是一位资深学科教师，擅长设计高质量考试题。"
     if personality_prompt:
         system_content += f"\n你的教学风格：{personality_prompt}"
 
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": exam_prompt},
-        ],
-        "stream": False,
-        "options": {
-            "temperature": 0.8,
-            "num_ctx": 8192,
-            "num_predict": 4096,
-            "seed": seed,
-        },
-    }
-
-    try:
-        response = requests.post(f"{base_url}/api/chat", json=payload, timeout=60)
-        response.raise_for_status()
-        result = response.json()
-        content = (result.get("message", {}).get("content") or result.get("response", "")).strip()
-        print(f"[ollama-quiz] raw_response_len={len(content)}, preview={content[:300]}", flush=True)
-
-        # 尝试解析 Markdown 表格
-        questions = _parse_markdown_quiz_table(content)
-        if questions:
-            normalized = _normalize_quiz_questions(questions)
-            print(f"[ollama-quiz] parsed {len(normalized)} questions from markdown table", flush=True)
-            if normalized:
-                print(f"[ollama-quiz] first_q: {normalized[0].get('question', '')[:100]}", flush=True)
-            return normalized
-
-        # 如果表格解析失败，尝试 JSON 解析
-        text = _strip_code_fence(content)
+    def _request_and_parse(seed_val: int) -> Optional[List[Dict[str, Any]]]:
+        """请求一次 Ollama 并尝试解析出题目；解析失败返回 None。"""
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": _build_exam_prompt(seed_val)},
+            ],
+            "stream": False,
+            # qwen3 默认 thinking 会消耗大量时间（4B 模型实测 60s 超时仍无输出），显式关闭
+            "think": False,
+            "options": {
+                "temperature": 0.8,
+                "num_ctx": 8192,
+                "num_predict": 3000,
+                "seed": seed_val,
+            },
+        }
         try:
-            json_questions = json.loads(text)
-            if isinstance(json_questions, list):
-                normalized = _normalize_quiz_questions(json_questions)
-                print(f"[ollama-quiz] parsed {len(normalized)} questions from JSON fallback", flush=True)
+            # 4B 本地模型生成 6-8 道题较慢：60s 太紧会超时导致"exam 没输出"，放宽到 180s
+            response = requests.post(f"{base_url}/api/chat", json=payload, timeout=180)
+            response.raise_for_status()
+            result = response.json()
+            content = (result.get("message", {}).get("content") or result.get("response", "")).strip()
+            # 清理 qwen3 思考残留 + 开头独白（"首先，用户要求我…"）
+            content = _strip_thinking_residue(content)
+            content = _strip_thinking_lead(content)
+            print(f"[ollama-quiz] raw_response_len={len(content)}, preview={content[:300]}", flush=True)
+
+            # 尝试解析 Markdown 表格
+            questions = _parse_markdown_quiz_table(content)
+            if questions:
+                normalized = _normalize_quiz_questions(questions)
+                print(f"[ollama-quiz] parsed {len(normalized)} questions from markdown table", flush=True)
+                if normalized:
+                    print(f"[ollama-quiz] first_q: {normalized[0].get('question', '')[:100]}", flush=True)
                 return normalized
-        except json.JSONDecodeError:
-            pass
 
-        print(f"[ollama-quiz] failed to parse response, using fallback", flush=True)
-    except Exception as exc:
-        print(f"[ollama-quiz] 出题异常: {exc}", flush=True)
-        import traceback
-        traceback.print_exc()
+            # 如果表格解析失败，尝试 JSON 解析
+            text = _strip_code_fence(content)
+            try:
+                json_questions = json.loads(text)
+                if isinstance(json_questions, list):
+                    normalized = _normalize_quiz_questions(json_questions)
+                    print(f"[ollama-quiz] parsed {len(normalized)} questions from JSON fallback", flush=True)
+                    return normalized
+            except json.JSONDecodeError:
+                pass
 
+            print(f"[ollama-quiz] 本次解析失败（表格/JSON 均不可用）", flush=True)
+        except Exception as exc:
+            print(f"[ollama-quiz] 出题异常: {exc}", flush=True)
+            import traceback
+            traceback.print_exc()
+        return None
+
+    # 4B 模型输出格式不稳定（表格缺列/多表/题干嵌代码块），解析失败时换随机种子重试
+    for attempt in range(3):
+        seed_val = seed if attempt == 0 else random.randint(1, 99999)
+        print(f"[ollama-quiz] 出题尝试 {attempt + 1}/3 (seed={seed_val})", flush=True)
+        parsed = _request_and_parse(seed_val)
+        if parsed:
+            return parsed
+
+    print(f"[ollama-quiz] 3 次尝试均失败，使用 fallback", flush=True)
     return _fallback_quiz(unit_content)
+
+
+# 无意义题检测：选项中的"学习态度/元认知"套话
+_MEANINGLESS_OPTION_RE = re.compile(
+    r"只需记住|只要记住|死记硬背|记住结论|背下来|"
+    r"不需要思考|不用思考|不需思考|无需思考|"
+    r"不需要理解|不需理解|不用理解|无需理解|不要理解|不理解也|"
+    r"跳过此部分|跳过即可|"
+    r"需要理解概念|理解概念的内|通过实例加深理解|理解比记忆|重在理解|"
+    r"以上都对|以上都不对"
+)
+# 题干是"学习/掌握/理解……只需记住/不需理解/不需思考"这类方法论套路句
+_MEANINGLESS_QUESTION_RE = re.compile(
+    r"(?:学习|掌握|理解).{0,12}?(?:只需记住|死记硬背|不需要理解|不需理解|不需要思考)"
+)
+# 题干是"「x」中最关键的知识点是 / 最基础的概念是 / 核心要点是什么"这类无具体考点的问法
+_MEANINGLESS_QUESTION_RE2 = re.compile(r"最关键的知识点|最基础的概念|核心要点是什么")
+# 题干是"关于…关键概念/核心要点，以下说法正确的是"这类泛化问法
+_MEANINGLESS_QUESTION_RE3 = re.compile(
+    r"关于.{0,20}?(?:的关键概念|中的关键概念|的核心要点|中的核心要点|的核心概念)"
+)
+
+
+def _is_meaningful_question(q: Dict[str, Any]) -> bool:
+    """过滤"元认知/学习态度"套路题 —— 这类题与具体知识点无关，无法独立判断对错。
+
+    **绝对不允许出现**的典型题：
+    - 关于「流程控制语句」中的关键概念，以下说法正确的是？（多选）
+      A. 需要理解概念的内涵和适用条件  B. 只需记住结论即可  C. 通过实例加深理解  D. 不需要思考为什么
+    - 学习「xx」不需要理解，只需记忆。
+    - 「xx」中最关键的知识点是______。
+    """
+    question = str(q.get("question", "")).strip()
+    if not question:
+        return False
+    # 题干过短或纯占位符（如表格解析出的 "/"、"-"）→ 无意义题
+    if len(question) < 2 or question in ("/", "-", "—", "|", "…"):
+        return False
+    # 题干中泄漏了答案/模型自改痕迹（"**正确答案** / Revised Q"）→ 无效题
+    if re.search(r"\*\*?正确答案\*\*?|标准答案|Correct answer|Revised", question, re.IGNORECASE):
+        return False
+    options = [str(o) for o in (q.get("options") or []) if str(o).strip()]
+
+    meta_hits = sum(1 for o in options if _MEANINGLESS_OPTION_RE.search(o))
+    # 选项大面积是"只需记住/不需思考/不需理解/跳过/以上都对"等套话 → 无意义题
+    if options and meta_hits >= max(2, int(len(options) * 0.5)):
+        return False
+    # 题干是学习方法/学习态度套路句
+    if _MEANINGLESS_QUESTION_RE.search(question):
+        return False
+    # 题干是"最关键的知识点是 / 最基础的概念是"这类无具体考点的问法
+    if _MEANINGLESS_QUESTION_RE2.search(question):
+        return False
+    # 题干是"关于…关键概念…说法正确的是"且选项含套话 → 泛化题
+    if _MEANINGLESS_QUESTION_RE3.search(question) and meta_hits >= 1:
+        return False
+    return True
 
 
 def _normalize_quiz_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -679,52 +1125,72 @@ def _normalize_quiz_questions(questions: List[Dict[str, Any]]) -> List[Dict[str,
         explanation = str(q.get("explanation", "")).strip()
         if explanation:
             item["explanation"] = explanation
+        # 过滤"元认知/学习态度"套路题（绝对不允许出现无意义题）
+        if not _is_meaningful_question(item):
+            continue
         normalized.append(item)
     return normalized
 
 
-def _fallback_quiz(unit_content: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Local fallback quiz when model API is unavailable — uses content-based questions."""
-    title = unit_content.get("title", "本单元")
-    summary = unit_content.get("summary", "")
-    kp = unit_content.get("key_points", [])
-    kp_text = "、".join(str(k) for k in kp[:3]) if kp else title
+def _fallback_quiz(unit_content: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """本地兜底题库：基于单元 key_points 构造与具体知识点绑定的题目。
 
-    # 从 key_points 中提取第一个具体概念作为示例
-    first_kp = str(kp[0])[:20] if kp else title
+    **绝对禁止**出现"关于「xx」中的关键概念，以下说法正确的是？（多选）"、
+    "只需记住结论即可 / 不需要思考为什么"这类与具体知识点无关的元认知/学习态度套路题。
+    本函数的所有题目都以 key_points（或 summary 拆分出的短语）为考点，可脱离上下文独立判断。
+    """
+    unit_content = unit_content or {}
+    title = str(unit_content.get("title") or "本单元")
+    summary = str(unit_content.get("summary") or "")
+    kp = [str(k).strip() for k in (unit_content.get("key_points") or []) if str(k).strip()]
+    if not kp and summary:
+        # 无 key_points 时从 summary 中拆分具体短语作为考点
+        kp = [p.strip() for p in re.split(r"[，。、；;：:]|以及|和|与", summary) if len(p.strip()) >= 2]
+    kp = list(dict.fromkeys(kp))[:4]
+    if len(kp) < 2:
+        while len(kp) < 2:
+            kp.append(f"「{title}」的核心内容")
+
+    def _lab(i: int) -> str:
+        k = kp[i]
+        return k if len(k) <= 18 else k[:15] + "…"
 
     return [
         {
-            "question": f"在「{title}」中，{kp_text} 相关的核心要点是？",
+            # 单选：辨认本课具体知识点（正确选项来自真实 key_points）
+            "question": f"「{title}」中，{_lab(0)} 是本课知识点之一。下列哪一项同样属于本课知识点？",
             "type": "single",
             "options": [
-                f"A. {first_kp}等概念的理解与应用",
-                "B. 只需记住结论即可",
-                "C. 不需要实践练习",
-                "D. 以上都不对",
+                _lab(1),
+                "与本课内容无关的概念",
+                "仅在其他课程中出现的概念",
+                "以上均不属于本课知识点",
             ],
             "answer": "A",
         },
         {
-            "question": f"关于「{title}」中的关键概念，以下说法正确的是？（多选）",
+            # 多选：辨认本课包含的知识点（正确选项来自真实 key_points）
+            "question": f"下列选项中，属于「{title}」所讲知识点的有？（多选）",
             "type": "multiple",
             "options": [
-                "A. 需要理解概念的内涵和适用条件",
-                "B. 只需记住结论即可",
-                "C. 通过实例加深理解",
-                "D. 不需要思考为什么",
+                _lab(0),
+                _lab(1),
+                "与本课内容无关的概念",
+                "仅在其他课程中出现的概念",
             ],
-            "answer": "AC",
+            "answer": "AB",
         },
         {
-            "question": f"学习「{title}」时，理解概念比死记硬背更重要。",
+            # 判断：知识点归属（判定依据 = 本课 key_points）
+            "question": f"「{title}」的课程要点中包含「{_lab(2) if len(kp) > 2 else _lab(0)}」。",
             "type": "boolean",
-            "options": ["A. 正确", "B. 错误"],
+            "options": ["正确", "错误"],
             "answer": "T",
         },
         {
-            "question": f"「{title}」中最关键的知识点是______。",
+            # 填空：回忆本课另一个具体知识点（答案 = 真实 key_points）
+            "question": f"「{title}」中，除了「{_lab(0)}」，本课还重点讲解了______。",
             "type": "fill",
-            "answer": kp_text or first_kp or "核心概念",
+            "answer": kp[1],
         },
     ]

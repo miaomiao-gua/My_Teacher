@@ -166,7 +166,7 @@
         }
     </script>
 
-    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/style.css?v=9">
 </head>
 <body>
     <!-- ========== 首页菜单（覆盖层） ========== -->
@@ -188,8 +188,66 @@
                 <div class="menu-loading"><div class="menu-loading-dot"></div><div class="menu-loading-dot"></div><div class="menu-loading-dot"></div><span style="color:var(--text-muted);font-size:13px;margin-top:6px;">加载课程中…</span></div>
             </div>
             <div class="menu-actions">
-                <button id="menu-create-btn" class="menu-btn primary">➕ 创建课程</button>
+                <button id="menu-create-btn" class="menu-btn primary">✨ 一句话备课</button>
+                <button id="menu-create-import-btn" class="menu-btn">📚 导入课件备课</button>
                 <button id="menu-settings-btn" class="menu-btn">⚙️ 更改配置</button>
+            </div>
+
+            <!-- 方法 1：一句话备课（独立 modal 弹窗） -->
+            <div id="quick-prep-modal" class="preview-overlay" role="dialog" aria-modal="true" aria-label="一句话备课">
+                <div class="preview-panel quick-prep-panel">
+                    <div class="quick-prep-header">
+                        <span class="quick-prep-title">✨ 一句话备课</span>
+                        <button class="quick-prep-close" data-close-quick-prep aria-label="关闭">✕</button>
+                    </div>
+                    <div class="quick-prep-body">
+                        <div class="quick-prep-desc">只需一句话主题，AI 自动生成教案（含目标 / 讲解模块 / 节奏点 / Live2D 动作）。</div>
+                        <div class="quick-prep-row">
+                            <label class="quick-prep-label">课程主题</label>
+                            <input type="text" id="quick-prep-topic" class="quick-prep-input"
+                                   placeholder="例如：Python 入门 / 高中物理·力学 / Alevel 数学 M1P1">
+                        </div>
+                        <div class="quick-prep-tip">💡 主题越具体，备课越精准。可以加上学段 / 版本（如『高中数学·人教 A 版必修一』）。</div>
+                    </div>
+                    <div class="quick-prep-actions">
+                        <button id="quick-prep-cancel" class="menu-btn">取消</button>
+                        <button id="quick-prep-start" class="menu-btn primary">🚀 开始备课</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 方法 2：导入课件备课（独立 modal 弹窗） -->
+            <div id="import-prep-modal" class="preview-overlay" role="dialog" aria-modal="true" aria-label="导入课件备课">
+                <div class="preview-panel quick-prep-panel">
+                    <div class="quick-prep-header">
+                        <span class="quick-prep-title">📚 导入课件备课</span>
+                        <button class="quick-prep-close" data-close-import-prep aria-label="关闭">✕</button>
+                    </div>
+                    <div class="quick-prep-body">
+                        <div class="quick-prep-desc">先把 PDF / Word / PPT 拖到这里，再给一句话主题。AI 会自动转 Markdown 并拆分为单元。</div>
+                        <div class="quick-prep-row">
+                            <label class="quick-prep-label">课程主题</label>
+                            <input type="text" id="menu-import-topic" class="quick-prep-input"
+                                   placeholder="例如：高中物理·力学 / Python 入门">
+                        </div>
+                        <div class="quick-prep-row">
+                            <label class="quick-prep-label">课件文件</label>
+                            <div class="quick-prep-file-row">
+                                <label for="menu-create-files" class="quick-prep-file-label">
+                                    📎 选择课件文件（可多选）
+                                </label>
+                                <input type="file" id="menu-create-files" multiple
+                                       accept=".pdf,.doc,.docx,.ppt,.pptx,.txt,.md,.html" style="display:none;">
+                                <span id="menu-create-files-hint" class="quick-prep-hint">未选择文件</span>
+                            </div>
+                            <div class="quick-prep-tip">💡 支持 PDF / Word / PPT / TXT / Markdown / HTML。可以一次拖多个文件。</div>
+                        </div>
+                    </div>
+                    <div class="quick-prep-actions">
+                        <button id="menu-import-cancel-btn" class="menu-btn">取消</button>
+                        <button id="menu-import-start-btn" class="menu-btn primary">🚀 开始备课</button>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -397,267 +455,374 @@
                     <div id="view-settings" class="view-content">
                         <button class="view-close" data-view="settings" title="关闭">✕</button>
                         <div class="view-content-body">
-                            <div class="card">
-                                <h3>🤖 模型与 API</h3>
-                                <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
-                                    分别配置对话、备课、朗读与识图所用的模型。API Key 仅保存在本地 config.json，不会上传到任何服务器。
-                                </p>
+                            <!-- 设置面板顶部分类 tabs -->
+                            <div class="settings-tabs" id="settings-tabs">
+                                <button class="settings-tab active" data-tab="model"><span class="tab-icon">🤖</span><span>模型</span></button>
+                                <button class="settings-tab" data-tab="tts"><span class="tab-icon">🔊</span><span>语音</span></button>
+                                <button class="settings-tab" data-tab="prompt"><span class="tab-icon">✍️</span><span>提示词</span></button>
+                                <button class="settings-tab" data-tab="character"><span class="tab-icon">🎨</span><span>角色</span></button>
+                                <button class="settings-tab" data-tab="background"><span class="tab-icon">🖼️</span><span>背景</span></button>
+                                <button class="settings-tab" data-tab="advanced"><span class="tab-icon">⚙️</span><span>高级</span></button>
+                            </div>
 
-                                <div class="setting-row" style="border-top:1px dashed var(--border-subtle); padding-top:10px;">
-                                    <div class="setting-label">💬 对话模型</div>
-                                    <div class="slider-control">
-                                        <select id="chat-provider" style="flex:1;">
-                                            <option value="auto">自动（本地 Ollama 优先，失败回退云端）</option>
-                                            <option value="ollama">仅本地 Ollama</option>
-                                            <option value="cloud">仅云端 API</option>
-                                        </select>
+                            <!-- ====== 模型 section ====== -->
+                            <div class="settings-section active" data-section="model">
+                                <div class="card">
+                                    <h3>💬 对话模型（讲课用）</h3>
+                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                        控制讲课时的对话。API Key 仅保存在本地 config.json，不会上传到任何服务器。
+                                    </p>
+                                    <div class="setting-row">
+                                        <div class="setting-label">对话引擎</div>
+                                        <div class="slider-control">
+                                            <select id="chat-provider" style="flex:1;">
+                                                <option value="auto">自动（本地 Ollama 优先，失败回退云端）</option>
+                                                <option value="ollama">仅本地 Ollama</option>
+                                                <option value="cloud">仅云端 API</option>
+                                            </select>
+                                        </div>
                                     </div>
-                                </div>
-                                <div class="setting-row chat-cloud-field" style="display:none;">
-                                    <div class="setting-label">云端 Base URL</div>
-                                    <input type="text" id="chat-base-url" placeholder="https://api.siliconflow.cn/v1">
-                                </div>
-                                <div class="setting-row chat-cloud-field" style="display:none;">
-                                    <div class="setting-label">云端 API Key</div>
-                                    <input type="password" id="chat-api-key" placeholder="sk-...">
-                                </div>
-                                <div class="setting-row chat-cloud-field" style="display:none;">
-                                    <div class="setting-label">云端模型</div>
-                                    <input type="text" id="chat-model" placeholder="deepseek-ai/DeepSeek-V3">
-                                </div>
-                                <div class="setting-row chat-ollama-field" style="display:none;">
-                                    <div class="setting-label">Ollama 地址</div>
-                                    <input type="text" id="ollama-base-url" placeholder="http://127.0.0.1:11434">
-                                </div>
-                                <div class="setting-row chat-ollama-field" style="display:none;">
-                                    <div class="setting-label">Ollama 模型</div>
-                                    <input type="text" id="ollama-model" placeholder="qwen2.5:7b">
-                                </div>
-                                <div style="margin-top:8px;">
-                                    <button id="chat-test-btn" class="btn-sm">测试 Ollama 连接</button>
-                                    <span id="chat-test-status" style="font-size:12px; color:var(--text-muted); margin-left:8px;"></span>
-                                </div>
-
-                                <div class="setting-row" style="border-top:1px dashed var(--border-subtle); padding-top:10px; margin-top:12px;">
-                                    <div class="setting-label">📚 备课模型</div>
-                                    <div class="slider-control">
-                                        <select id="lesson-provider" style="flex:1;">
-                                            <option value="cloud">云端 API</option>
-                                            <option value="ollama">本地 Ollama</option>
-                                        </select>
+                                    <div class="setting-row chat-cloud-field" style="display:none;">
+                                        <div class="setting-label">云端 Base URL</div>
+                                        <input type="text" id="chat-base-url" placeholder="https://api.siliconflow.cn/v1">
                                     </div>
-                                </div>
-                                <div class="setting-row lesson-cloud-field">
-                                    <div class="setting-label">Base URL</div>
-                                    <input type="text" id="cloud-base-url" placeholder="https://api.siliconflow.cn/v1">
-                                </div>
-                                <div class="setting-row lesson-cloud-field">
-                                    <div class="setting-label">API Key</div>
-                                    <input type="password" id="cloud-api-key" placeholder="sk-...">
-                                </div>
-                                <div class="setting-row lesson-cloud-field">
-                                    <div class="setting-label">模型</div>
-                                    <input type="text" id="cloud-model" placeholder="deepseek-ai/DeepSeek-V3">
-                                </div>
-                                <div class="setting-row lesson-cloud-field">
-                                    <div class="setting-label">联网搜索</div>
-                                    <div class="slider-control">
-                                        <label style="min-width:auto;"><input type="checkbox" id="lesson-search" style="width:16px;height:16px;accent-color:var(--gold);cursor:pointer;vertical-align:middle;"></label>
-                                        <span class="val" id="lesson-search-val"></span>
+                                    <div class="setting-row chat-cloud-field" style="display:none;">
+                                        <div class="setting-label">云端 API Key</div>
+                                        <input type="password" id="chat-api-key" placeholder="sk-...">
+                                    </div>
+                                    <div class="setting-row chat-cloud-field" style="display:none;">
+                                        <div class="setting-label">云端模型</div>
+                                        <input type="text" id="chat-model" placeholder="deepseek-ai/DeepSeek-V3">
+                                    </div>
+                                    <div class="setting-row chat-ollama-field" style="display:none;">
+                                        <div class="setting-label">Ollama 地址</div>
+                                        <input type="text" id="ollama-base-url" placeholder="http://127.0.0.1:11434">
+                                    </div>
+                                    <div class="setting-row chat-ollama-field" style="display:none;">
+                                        <div class="setting-label">Ollama 模型</div>
+                                        <input type="text" id="ollama-model" placeholder="qwen2.5:7b">
+                                    </div>
+                                    <div style="margin-top:8px;">
+                                        <button id="chat-test-btn" class="btn-sm">测试 Ollama 连接</button>
+                                        <span id="chat-test-status" style="font-size:12px; color:var(--text-muted); margin-left:8px;"></span>
                                     </div>
                                 </div>
 
-                                <div class="setting-row" style="border-top:1px dashed var(--border-subtle); padding-top:10px; margin-top:12px;">
-                                    <div class="setting-label">🔊 朗读（TTS）</div>
-                                    <div class="slider-control">
-                                        <select id="tts-provider" style="flex:1;">
-                                            <option value="cloud">云端（硅基流动 CosyVoice）</option>
-                                            <option value="local">本地服务</option>
-                                        </select>
+                                <div class="card">
+                                    <h3>📚 备课模型（生成教案用）</h3>
+                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                        控制「一句话备课」「导入课件备课」时调用哪个模型生成教案。
+                                    </p>
+                                    <div class="setting-row">
+                                        <div class="setting-label">备课引擎</div>
+                                        <div class="slider-control">
+                                            <select id="lesson-provider" style="flex:1;">
+                                                <option value="cloud">云端 API</option>
+                                                <option value="ollama">本地 Ollama</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="setting-row lesson-cloud-field">
+                                        <div class="setting-label">Base URL</div>
+                                        <input type="text" id="cloud-base-url" placeholder="https://api.siliconflow.cn/v1">
+                                    </div>
+                                    <div class="setting-row lesson-cloud-field">
+                                        <div class="setting-label">API Key</div>
+                                        <input type="password" id="cloud-api-key" placeholder="sk-...">
+                                    </div>
+                                    <div class="setting-row lesson-cloud-field">
+                                        <div class="setting-label">模型</div>
+                                        <input type="text" id="cloud-model" placeholder="deepseek-ai/DeepSeek-V3">
+                                    </div>
+                                    <div class="setting-row lesson-cloud-field">
+                                        <div class="setting-label">联网搜索</div>
+                                        <div class="slider-control">
+                                            <label style="min-width:auto;"><input type="checkbox" id="lesson-search" style="width:16px;height:16px;accent-color:var(--gold);cursor:pointer;vertical-align:middle;"></label>
+                                            <span class="val" id="lesson-search-val"></span>
+                                        </div>
                                     </div>
                                 </div>
-                                <div class="setting-row tts-cloud-field">
-                                    <div class="setting-label">云端 Base URL</div>
-                                    <input type="text" id="tts-cloud-base-url" placeholder="https://api.siliconflow.cn/v1">
-                                </div>
-                                <div class="setting-row tts-cloud-field">
-                                    <div class="setting-label">云端模型</div>
-                                    <input type="text" id="tts-cloud-model" placeholder="FunAudioLLM/CosyVoice2-0.5B">
-                                </div>
-                                <div class="setting-row tts-cloud-field">
-                                    <div class="setting-label">云端音色</div>
-                                    <input type="text" id="tts-cloud-voice" placeholder="anna / bella / claire ...">
-                                </div>
-                                <div class="setting-row tts-local-field" style="display:none;">
-                                    <div class="setting-label">本地地址</div>
-                                    <input type="text" id="tts-base-url" placeholder="http://127.0.0.1:8000">
-                                </div>
-                                <div style="margin-top:8px;">
-                                    <button id="tts-test-btn" class="btn-sm">测试 TTS</button>
-                                    <span id="tts-test-status" style="font-size:12px; color:var(--text-muted); margin-left:8px;"></span>
-                                </div>
-                                <p style="font-size:11px; color:var(--text-dim); margin-top:6px;">
-                                    云端 TTS 复用备课模型的 API Key；本地音色在「其他设置」→ 声线中调整。
-                                </p>
 
-                                <div class="setting-row" style="border-top:1px dashed var(--border-subtle); padding-top:10px; margin-top:12px;">
-                                    <div class="setting-label">🖼️ 识图模型（可选）</div>
-                                    <div class="slider-control">
-                                        <label style="min-width:auto;"><input type="checkbox" id="vision-enabled" style="width:16px;height:16px;accent-color:var(--gold);cursor:pointer;vertical-align:middle;"></label>
-                                        <span class="val" id="vision-enabled-val">关</span>
+                                <div class="card">
+                                    <h3>🖼️ 识图模型（可选）</h3>
+                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                        启用后，聊天里上传的图片会先经识图模型识别，再把内容交给对话模型回答。
+                                    </p>
+                                    <div class="setting-row">
+                                        <div class="setting-label">启用识图</div>
+                                        <div class="slider-control">
+                                            <label style="min-width:auto;"><input type="checkbox" id="vision-enabled" style="width:16px;height:16px;accent-color:var(--gold);cursor:pointer;vertical-align:middle;"></label>
+                                            <span class="val" id="vision-enabled-val">关</span>
+                                        </div>
                                     </div>
-                                </div>
-                                <p style="font-size:11px; color:var(--text-dim); margin:4px 0 8px;">
-                                    启用后，聊天里上传的图片会先经识图模型识别，再把内容交给对话模型回答。
-                                </p>
-                                <div class="setting-row vision-field" style="display:none;">
-                                    <div class="setting-label">Base URL</div>
-                                    <input type="text" id="vision-base-url" placeholder="https://api.siliconflow.cn/v1">
-                                </div>
-                                <div class="setting-row vision-field" style="display:none;">
-                                    <div class="setting-label">API Key</div>
-                                    <input type="password" id="vision-api-key" placeholder="sk-...">
-                                </div>
-                                <div class="setting-row vision-field" style="display:none;">
-                                    <div class="setting-label">模型</div>
-                                    <input type="text" id="vision-model" placeholder="Qwen/Qwen2.5-VL-72B-Instruct">
+                                    <div class="setting-row vision-field" style="display:none;">
+                                        <div class="setting-label">Base URL</div>
+                                        <input type="text" id="vision-base-url" placeholder="https://api.siliconflow.cn/v1">
+                                    </div>
+                                    <div class="setting-row vision-field" style="display:none;">
+                                        <div class="setting-label">API Key</div>
+                                        <input type="password" id="vision-api-key" placeholder="sk-...">
+                                    </div>
+                                    <div class="setting-row vision-field" style="display:none;">
+                                        <div class="setting-label">模型</div>
+                                        <input type="text" id="vision-model" placeholder="Qwen/Qwen2.5-VL-72B-Instruct">
+                                    </div>
                                 </div>
                             </div>
-                            <div class="card">
-                                <h3>✍️ 提示词</h3>
-                                <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
-                                    自定义老师的人格与备课（分课教案生成）提示词，可自由发挥 AI 的性格和教学风格。
-                                </p>
-                                <div class="setting-label">🧑‍🏫 老师人格提示词</div>
-                                <textarea id="personality-prompt-input" rows="4" placeholder="你是一位温柔、专业、耐心的 AI 学习导师。请以启发式提问方式指导学生..."></textarea>
-                                <div class="setting-label" style="margin-top:12px;">📚 备课提示词</div>
-                                <textarea id="lesson-prompt-input" rows="7" placeholder="定义生成分课教案的格式与要求（JSON 结构）..."></textarea>
-                                <p style="font-size:11px; color:var(--text-dim); margin-top:6px;">
-                                    留空则保存为空值，后端会回退使用内置默认提示词。
-                                </p>
+
+                            <!-- ====== 语音 / TTS section ====== -->
+                            <div class="settings-section" data-section="tts">
+                                <div class="card">
+                                    <h3>🔊 语音总开关</h3>
+                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                        关闭后，AI 回复不再自动朗读，手动点 🔊 也不会发声。
+                                    </p>
+                                    <div class="setting-row">
+                                        <div class="setting-label">启用语音朗读</div>
+                                        <div class="slider-control">
+                                            <label style="min-width:auto;"><input type="checkbox" id="voice-enabled" style="width:16px;height:16px;accent-color:var(--gold);cursor:pointer;vertical-align:middle;"></label>
+                                            <span class="val" id="voice-enabled-val">开</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="card">
+                                    <h3>☁️ 云端 TTS（硅基流动 CosyVoice）</h3>
+                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                        需要云端 API Key（与备课模型共用），无需本地 TTS 服务。
+                                    </p>
+                                    <div class="setting-row">
+                                        <div class="setting-label">启用云端 TTS</div>
+                                        <div class="slider-control">
+                                            <label style="min-width:auto;" title="云端 TTS 独立开关"><input type="checkbox" id="tts-cloud-enabled" style="width:14px;height:14px;accent-color:var(--gold);cursor:pointer;vertical-align:middle;"> 开</label>
+                                            <span class="val" id="tts-cloud-enabled-val">关</span>
+                                        </div>
+                                    </div>
+                                    <div class="setting-row tts-cloud-field">
+                                        <div class="setting-label">云端 Base URL</div>
+                                        <input type="text" id="tts-cloud-base-url" placeholder="https://api.siliconflow.cn/v1">
+                                    </div>
+                                    <div class="setting-row tts-cloud-field">
+                                        <div class="setting-label">云端模型</div>
+                                        <input type="text" id="tts-cloud-model" placeholder="FunAudioLLM/CosyVoice2-0.5B">
+                                    </div>
+                                    <div class="setting-row tts-cloud-field">
+                                        <div class="setting-label">云端音色</div>
+                                        <input type="text" id="tts-cloud-voice" placeholder="anna / bella / claire ...">
+                                    </div>
+                                </div>
+
+                                <div class="card">
+                                    <h3>🖥️ 本地 TTS 服务</h3>
+                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                        需要本地启动 TTS 服务（默认端口 8000）。
+                                    </p>
+                                    <div class="setting-row">
+                                        <div class="setting-label">TTS 引擎选择</div>
+                                        <div class="slider-control">
+                                            <select id="tts-provider" style="flex:1;">
+                                                <option value="cloud">云端（硅基流动 CosyVoice）</option>
+                                                <option value="local">本地服务</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="setting-row tts-local-field" style="display:none;">
+                                        <div class="setting-label">本地服务地址</div>
+                                        <input type="text" id="tts-base-url" placeholder="http://127.0.0.1:8000">
+                                    </div>
+                                    <div class="setting-row">
+                                        <div class="setting-label">本地音色</div>
+                                        <div class="slider-control">
+                                            <select id="voice-select" style="flex:1;">
+                                                <option value="zh-CN-XiaoxiaoNeural">温柔女声</option>
+                                                <option value="zh-CN-YunxiNeural">成熟男声</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div style="margin-top:8px;">
+                                        <button id="tts-test-btn" class="btn-sm">测试 TTS</button>
+                                        <span id="tts-test-status" style="font-size:12px; color:var(--text-muted); margin-left:8px;"></span>
+                                    </div>
+                                </div>
                             </div>
-                            <div class="card">
-                                <h3>🎨 角色外观</h3>
-                                <div class="setting-row">
-                                    <div class="setting-label">位置</div>
-                                    <div class="slider-control">
-                                        <label>水平</label>
-                                        <input type="range" id="portrait-pos-x" min="0" max="100" value="50">
-                                        <span class="val" id="portrait-pos-x-val">50%</span>
+
+                            <!-- ====== 提示词 section ====== -->
+                            <div class="settings-section" data-section="prompt">
+                                <div class="card">
+                                    <h3>🧑‍🏫 老师人格提示词</h3>
+                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                        定义 AI 讲课时的性格、教学风格、口吻。留空使用内置默认。
+                                    </p>
+                                    <textarea id="personality-prompt-input" rows="6" placeholder="你是一位温柔、专业、耐心的 AI 学习导师..."></textarea>
+                                </div>
+                                <div class="card">
+                                    <h3>📚 备课系统提示词</h3>
+                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                        控制「一句话备课」「导入课件备课」时如何生成教案 JSON。留空使用内置默认。
+                                    </p>
+                                    <textarea id="lesson-prompt-input" rows="10" placeholder="定义生成分课教案的格式与要求（JSON 结构）..."></textarea>
+                                </div>
+                            </div>
+
+                            <!-- ====== 角色 section ====== -->
+                            <div class="settings-section" data-section="character">
+                                <div class="card">
+                                    <h3>📍 角色位置与大小</h3>
+                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                        调整 Live2D 角色在屏幕上的位置与缩放。改动立即生效。
+                                    </p>
+                                    <div class="setting-row">
+                                        <div class="setting-label">水平位置</div>
+                                        <div class="slider-control">
+                                            <input type="range" id="portrait-pos-x" min="0" max="100" value="50">
+                                            <span class="val" id="portrait-pos-x-val">50%</span>
+                                        </div>
                                     </div>
-                                    <div class="slider-control">
-                                        <label>垂直</label>
-                                        <input type="range" id="portrait-pos-y" min="0" max="100" value="50">
-                                        <span class="val" id="portrait-pos-y-val">50%</span>
+                                    <div class="setting-row">
+                                        <div class="setting-label">垂直位置</div>
+                                        <div class="slider-control">
+                                            <input type="range" id="portrait-pos-y" min="0" max="100" value="50">
+                                            <span class="val" id="portrait-pos-y-val">50%</span>
+                                        </div>
+                                    </div>
+                                    <div class="setting-row">
+                                        <div class="setting-label">角色缩放</div>
+                                        <div class="slider-control">
+                                            <input type="range" id="portrait-scale" min="10" max="80" value="32">
+                                            <span class="val" id="portrait-scale-val">0.32</span>
+                                        </div>
                                     </div>
                                 </div>
-                                <div class="setting-row">
-                                    <div class="setting-label">大小</div>
-                                    <div class="slider-control">
-                                        <label>缩放</label>
-                                        <input type="range" id="portrait-scale" min="10" max="80" value="32">
-                                        <span class="val" id="portrait-scale-val">0.32</span>
-                                    </div>
-                                </div>
-                                <div class="setting-row" style="margin-top:10px;">
-                                    <div class="setting-label">自定义模型</div>
-                                    <div style="flex:1; min-width:0;">
-                                        <input type="file" id="model-upload" accept=".zip,.json,.moc3,.moc"
-                                               title="支持 .zip（模型包，内含 model3.json 或 model.json）、.model3.json / .moc3（Cubism 3/4/5）、model.json / .moc（Cubism 2.1）">
+
+                                <div class="card">
+                                    <h3>🦊 Live2D 模型</h3>
+                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                        支持 .zip（模型包，内含 model3.json 或 model.json）、.model3.json / .moc3（Cubism 3/4/5）、model.json / .moc（Cubism 2.1）。
+                                    </p>
+                                    <div class="setting-row">
+                                        <div class="setting-label">自定义模型</div>
+                                        <input type="file" id="model-upload" accept=".zip,.json,.moc3,.moc">
                                         <div style="display:flex; align-items:center; gap:8px; margin-top:6px; flex-wrap:wrap;">
                                             <button id="reset-model-btn" class="btn-sm">恢复默认模型</button>
                                             <span id="model-upload-status" style="font-size:12px; color:var(--text-muted);"></span>
                                         </div>
                                     </div>
                                 </div>
-                            </div>
-                            <div class="card">
-                                <h3>🖼️ 背景</h3>
-                                <div class="bg-preset-grid">
-                                    <button class="bg-preset-btn" data-theme="warm">暖色</button>
-                                    <button class="bg-preset-btn" data-theme="sakura">樱花</button>
-                                    <button class="bg-preset-btn" data-theme="bamboo">竹影</button>
-                                    <button class="bg-preset-btn" data-theme="snow">雪景</button>
-                                    <button class="bg-preset-btn" data-theme="dusk">黄昏</button>
-                                    <button class="bg-preset-btn" data-theme="night">夜晚</button>
-                                </div>
-                                <div class="bg-custom-field">
-                                    <input type="file" id="bg-upload" accept="image/*">
-                                    <button id="bg-reset-btn" class="btn-sm">恢复默认</button>
-                                </div>
-                            </div>
-                            <div class="card">
-                                <h3>⚙️ 其他设置</h3>
-                                <div style="display:flex; gap:14px; flex-wrap:wrap;">
-                                    <div style="flex:1; min-width:160px;">
-                                        <label style="font-size:13px; color:var(--text-muted);">头像</label>
-                                        <input type="file" id="avatar-upload" accept="image/*" style="margin-top:6px;">
+
+                                <div class="card">
+                                    <h3>🖼️ 头像 / 字号</h3>
+                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                        头像在菜单页和课程列表显示；字号影响整个右侧聊天与设置面板。
+                                    </p>
+                                    <div class="setting-row">
+                                        <div class="setting-label">自定义头像</div>
+                                        <input type="file" id="avatar-upload" accept="image/*">
                                         <button id="reset-avatar-btn" class="btn-sm" style="margin-top:6px;">恢复默认</button>
                                     </div>
-                                    <div style="flex:1; min-width:160px;">
-                                        <label style="font-size:13px; color:var(--text-muted);">声线</label>
-                                        <select id="voice-select" style="margin-top:6px;">
-                                            <option value="zh-CN-XiaoxiaoNeural">温柔女声</option>
-                                            <option value="zh-CN-YunxiNeural">成熟男声</option>
-                                        </select>
+                                    <div class="setting-row" style="margin-top:14px;">
+                                        <div class="setting-label">正文字号</div>
+                                        <div class="slider-control">
+                                            <input type="range" id="font-size-input" min="12" max="20" value="14">
+                                            <span class="val" id="font-size-val">14 px</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="card">
+                                    <h3>🎭 情绪映射（Open-LLM-VTuber 协议）</h3>
+                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                        本地模型在回复中输出情绪标签（[joy] / [sadness] 等），自动调用对应表情与动作。
+                                        留空则回退到默认映射（neutral→0、happy→3、sad→1 等）。
+                                    </p>
+                                    <div id="emotion-map-grid" style="display:grid; grid-template-columns:repeat(2, 1fr); gap:10px;"></div>
+                                </div>
+                            </div>
+
+                            <!-- ====== 背景 section ====== -->
+                            <div class="settings-section" data-section="background">
+                                <div class="card">
+                                    <h3>🖼️ 主题背景</h3>
+                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                        选择预设主题或上传自定义图片作为整个应用的背景。
+                                    </p>
+                                    <div class="bg-preset-grid">
+                                        <button class="bg-preset-btn" data-theme="warm">暖色</button>
+                                        <button class="bg-preset-btn" data-theme="sakura">樱花</button>
+                                        <button class="bg-preset-btn" data-theme="bamboo">竹影</button>
+                                        <button class="bg-preset-btn" data-theme="snow">雪景</button>
+                                        <button class="bg-preset-btn" data-theme="dusk">黄昏</button>
+                                        <button class="bg-preset-btn" data-theme="night">夜晚</button>
+                                    </div>
+                                    <div class="bg-custom-field" style="margin-top:10px;">
+                                        <input type="file" id="bg-upload" accept="image/*">
+                                        <button id="bg-reset-btn" class="btn-sm" style="margin-top:6px;">恢复默认</button>
                                     </div>
                                 </div>
                             </div>
-                            <div class="card">
-                                <h3>🎭 情绪映射（Open-LLM-VTuber 协议）</h3>
-                                <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
-                                    本地模型在回复中输出情绪标签（[joy] / [sadness] 等），自动调用对应表情与动作。
-                                    留空则回退到默认映射（neutral→0、happy→3、sad→1 等）。
-                                </p>
-                                <div id="emotion-map-grid" style="display:grid; grid-template-columns:repeat(2, 1fr); gap:10px;"></div>
-                            </div>
-                            <div class="card">
-                                <h3>✂️ 回复分段</h3>
-                                <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
-                                    老师的回复按分段标记拆成小段逐句展示。若本地模型把标记误写成代码块围栏（如
-                                    <code>```c</code>）导致格式错乱，系统会自动清洗并还原。
-                                </p>
-                                <div class="setting-row">
-                                    <div class="setting-label">启用分段</div>
-                                    <div class="slider-control">
-                                        <label style="min-width:auto;"><input type="checkbox" id="segment-enabled" checked style="width:16px;height:16px;accent-color:var(--gold);cursor:pointer;vertical-align:middle;"></label>
-                                        <span class="val" id="segment-enabled-val">开</span>
+
+                            <!-- ====== 高级 section ====== -->
+                            <div class="settings-section" data-section="advanced">
+                                <div class="card">
+                                    <h3>✂️ 回复分段</h3>
+                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                        老师的回复按分段标记拆成小段逐句展示。若本地模型把标记误写成代码块围栏（如 <code>```c</code>）导致格式错乱，系统会自动清洗并还原。
+                                    </p>
+                                    <div class="setting-row">
+                                        <div class="setting-label">启用分段</div>
+                                        <div class="slider-control">
+                                            <label style="min-width:auto;"><input type="checkbox" id="segment-enabled" style="width:16px;height:16px;accent-color:var(--gold);cursor:pointer;vertical-align:middle;"></label>
+                                            <span class="val" id="segment-enabled-val">开</span>
+                                        </div>
+                                    </div>
+                                    <div class="setting-row">
+                                        <div class="setting-label">分段标记</div>
+                                        <input type="text" id="segment-marker" value="\c" spellcheck="false" style="background:rgba(0,0,0,0.25); border:1px solid var(--border-mid); border-radius:8px; padding:8px 10px; color:var(--text-primary); font-family:ui-monospace,Consolas,monospace; font-size:13px;">
+                                    </div>
+                                    <div class="setting-row">
+                                        <div class="setting-label">每段行数上限</div>
+                                        <div class="slider-control">
+                                            <input type="range" id="segment-max-lines" min="2" max="15" value="6" style="flex:1;">
+                                            <span class="val" id="segment-max-lines-val">6 行</span>
+                                        </div>
                                     </div>
                                 </div>
-                                <div class="setting-row">
-                                    <div class="setting-label">分段标记</div>
-                                    <div class="slider-control">
-                                        <input type="text" id="segment-marker" value="\c" spellcheck="false"
-                                               style="flex:1; min-width:0; background:rgba(0,0,0,0.25); border:1px solid var(--border-mid); border-radius:8px; padding:8px 10px; color:var(--text-primary); font-family:ui-monospace,Consolas,monospace; font-size:13px;">
-                                        <span class="val" id="segment-marker-val"></span>
+
+                                <div class="card">
+                                    <h3>📐 右侧栏宽度</h3>
+                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                        调整右侧聊天/设置面板占屏幕的百分比（25-60%）。也可以直接拖动分隔条。
+                                    </p>
+                                    <div class="setting-row">
+                                        <div class="setting-label">侧栏宽度</div>
+                                        <div class="slider-control">
+                                            <input type="range" id="sidebar-width-input" min="25" max="60" value="36" style="flex:1;">
+                                            <span class="val" id="sidebar-width-val">36%</span>
+                                        </div>
                                     </div>
                                 </div>
-                                <div class="setting-row">
-                                    <div class="setting-label">每段行数上限</div>
-                                    <div class="slider-control">
-                                        <input type="range" id="segment-max-lines" min="2" max="15" value="6" style="flex:1;">
-                                        <span class="val" id="segment-max-lines-val">6 行</span>
-                                    </div>
+
+                                <div class="card">
+                                    <h3>🎬 自定义动作</h3>
+                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                        每个动作一行：左侧填<em>模型动作 ID</em>（如 wave / speak / think / idle / listen），
+                                        右侧填<em>UI 名字</em>（触发关键字）。拖动下方滑条可实时调试动作强度。
+                                        保存后用 <code>/action &lt;名字&gt;</code> 或让 AI 触发。
+                                    </p>
+                                    <div id="custom-actions-list"></div>
+                                    <button id="custom-action-add" class="btn-sm">＋ 添加动作</button>
                                 </div>
                             </div>
-                            <div class="card">
-                                <h3>🎬 自定义动作</h3>
-                                <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
-                                    每个动作一行：左侧填<em>模型动作 ID</em>（如 wave / speak / think / idle / listen），
-                                    右侧填<em>UI 名字</em>（触发关键字）。拖动下方滑条可实时调试动作强度。
-                                    保存后用 <code>/action &lt;名字&gt;</code> 或让 AI 触发。
-                                </p>
-                                <div id="custom-actions-list"></div>
-                                <button id="custom-action-add" class="btn-sm">＋ 添加动作</button>
-                            </div>
+
                             <div class="settings-save-bar">
-                                <button id="save-settings-btn" class="settings-save-btn">💾 保存设置</button>
+                                <button id="save-settings-btn" class="settings-save-btn">💾 立即保存</button>
+                                <span id="settings-save-status" data-kind="pending" style="margin-left:12px; font-size:12px; color:var(--text-muted); font-family:var(--font-serif);">自动保存已启用 · 改动后 0.5 秒生效</span>
                             </div>
                         </div>
                     </div>
+
+                    </div>
                 </div>
             </div>
-        </div>
 
         <!-- Bottom Input Area（放在 main-area 外部，与 main-area 平级） -->
         <div class="input-area">
@@ -665,6 +830,7 @@
             <button id="attach-btn" class="btn btn-icon" title="上传文件 / 图片">📎</button>
             <input type="file" id="attach-file-input" accept="image/*,.txt,.md,.py,.js,.ts,.json,.csv,.log,.html,.css,.xml,.yaml,.yml,.c,.cpp,.h,.java,.go,.rs,.sql,.sh,.bat,.ps1,.ipynb" multiple style="display:none;">
             <textarea id="message-input" rows="1" placeholder="输入你的问题..."></textarea>
+            <button id="long-input-btn" class="btn btn-icon" title="长文本模式（写作文 / 长代码）">📝</button>
             <button id="send-btn" class="btn btn-primary">发送</button>
             <button id="play-btn" class="btn btn-icon" title="朗读">🔊</button>
         </div>
@@ -691,9 +857,9 @@
             </div>
         </div>
     </div>
-    <!-- 应用逻辑：按依赖顺序加载（共享全局词法作用域） -->
-    <script src="/static/js/base.js"></script>
-    <script src="/static/js/interact.js"></script>
-    <script src="/static/js/settings.js"></script>
+    <!-- 应用逻辑：按依赖顺序加载（共享全局词法作用域）；?v= 用于开发期绕过浏览器缓存 -->
+    <script src="/static/js/base.js?v=14"></script>
+    <script src="/static/js/interact.js?v=14"></script>
+    <script src="/static/js/settings.js?v=14"></script>
 </body>
 </html>

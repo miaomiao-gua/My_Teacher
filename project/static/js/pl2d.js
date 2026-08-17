@@ -8075,7 +8075,7 @@ var __async = (__this, __arguments, generator) => {
         this.idParamAngleZ,
         this.focusController.x * this.focusController.y * -30
       );
-      this.coreModel.addParameterValueById(this.idParamBodyAngleX, this.focusController.x * 10);
+      this.coreModel.addParameterValueById(this.idParamBodyAngleX, this.focusController.x * 3);
     }
     updateNaturalMovements(dt, now) {
       var _a;
