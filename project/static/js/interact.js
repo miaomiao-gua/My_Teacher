@@ -727,6 +727,12 @@
             function stripMarkdownSyntax(text) {
                 if (!text) return '';
                 let s = String(text);
+                // LaTeX 公式（$$...$$ / $...$ / \[...\] / \(...\)）→ 纯文本可读形式，
+                // 避免对话条打字机里出现 $$ \sum F = 0 $$ 这类原始公式符号
+                s = s.replace(/\$\$([\s\S]*?)\$\$/g, (m, inner) => ' ' + latexToPlain(inner) + ' ');
+                s = s.replace(/\\\[([\s\S]*?)\\\]/g, (m, inner) => ' ' + latexToPlain(inner) + ' ');
+                s = s.replace(/\$([^$\n]*?)\$/g, (m, inner) => ' ' + latexToPlain(inner) + ' ');
+                s = s.replace(/\\\(([^\\\n]*?)\\\)/g, (m, inner) => ' ' + latexToPlain(inner) + ' ');
                 // 行内反引号代码：`xxx` → xxx
                 s = s.replace(/`([^`\n]+)`/g, '$1');
                 // 加粗 / 斜体 / 删除线：***x*** / **x** / *x* / ~~x~~ → x
@@ -793,7 +799,14 @@
                 out = repairCodeFences(out);
                 const marker = segmentMarker ? (segmentMarker.value || '\\c') : '\\c';
                 if (marker === '\\c') {
-                    out = out.replace(/\\+c/g, '');       // \c / \\c 分段符
+                    // 先保护 LaTeX 公式（$$...$$ / $...$ / \(...\) / \[...\]），
+                    // 再清 \c 分段符，避免公式里的 \cdot / \cancel 被误删
+                    const latexHeld = [];
+                    out = out
+                        .replace(/\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\$[^$\n]*\$|\\\([\s\S]*?\\\)/g,
+                            m => { latexHeld.push(m); return '\u0000L' + (latexHeld.length - 1) + '\u0000'; });
+                    out = out.replace(/\\+c/g, '');
+                    out = out.replace(/\u0000L(\d+)\u0000/g, (m, i) => latexHeld[+i] || m);
                 } else if (marker) {
                     out = out.split(marker).join('');     // 自定义分段标记
                 }
@@ -848,9 +861,108 @@
                 }
             }
 
+            // ========================
+            // 富文本渲染：Markdown + LaTeX 公式（KaTeX）
+            // ========================
+            // 占位符用 ⟦K<i>⟧（U+27E6/U+27E7 文本 token）而非 \u0000 NUL：
+            // NUL 控制字符会被 DOMPurify 剥离（残留 "L0" 之类碎片），导致还原失败。
+            // ⟦ ⟧ 不参与 markdown 解析，DOMPurify 也不会动它。
+            function extractLatex(text) {
+                const blocks = [];
+                let s = String(text);
+                s = s.replace(/\$\$([\s\S]*?)\$\$/g, (m, inner) => {
+                    blocks.push({ expr: inner.trim(), display: true });
+                    return '\u27E6K' + (blocks.length - 1) + '\u27E7';
+                });
+                s = s.replace(/\\\[([\s\S]*?)\\\]/g, (m, inner) => {
+                    blocks.push({ expr: inner.trim(), display: true });
+                    return '\u27E6K' + (blocks.length - 1) + '\u27E7';
+                });
+                s = s.replace(/\$([^$\n]*?)\$/g, (m, inner) => {
+                    blocks.push({ expr: inner.trim(), display: false });
+                    return '\u27E6K' + (blocks.length - 1) + '\u27E7';
+                });
+                s = s.replace(/\\\(([^\\\n]*?)\\\)/g, (m, inner) => {
+                    blocks.push({ expr: inner.trim(), display: false });
+                    return '\u27E6K' + (blocks.length - 1) + '\u27E7';
+                });
+                return { text: s, blocks };
+            }
+
+            // 把占位符还原为 KaTeX 渲染的 HTML；KaTeX 不可用时回退为纯文本公式
+            function restoreLatex(html, blocks) {
+                if (!blocks.length) return html;
+                return html.replace(/\u27E6K(\d+)\u27E7/g, function(m, i) {
+                    const b = blocks[+i];
+                    if (!b) return m;
+                    try {
+                        return window.katex.renderToString(b.expr, {
+                            displayMode: b.display,
+                            throwOnError: false,
+                            strict: false
+                        });
+                    } catch (e) {
+                        return b.expr; // 渲染失败回退为原公式文本
+                    }
+                });
+            }
+
+            // LaTeX → 纯文本（对话条打字机用）：$$...$$ 转成 ∑F = 0 这类可读文本
+            function latexToPlain(expr) {
+                if (!expr) return '';
+                let s = String(expr).trim();
+                s = s.replace(/\\frac\{([^{}]*)\}\{([^{}]*)\}/g, '($1)/($2)');
+                s = s.replace(/\\sqrt\{([^{}]*)\}/g, '√($1)');
+                const cmds = {
+                    '\\sum': '∑', '\\int': '∫', '\\prod': '∏', '\\sqrt': '√',
+                    '\\times': '×', '\\cdot': '·', '\\div': '÷', '\\pm': '±',
+                    '\\leq': '≤', '\\geq': '≥', '\\neq': '≠', '\\approx': '≈',
+                    '\\rightarrow': '→', '\\Rightarrow': '⇒', '\\leftarrow': '←',
+                    '\\infty': '∞', '\\alpha': 'α', '\\beta': 'β', '\\gamma': 'γ',
+                    '\\theta': 'θ', '\\pi': 'π', '\\mu': 'μ', '\\sigma': 'σ',
+                    '\\omega': 'ω', '\\Delta': 'Δ', '\\lambda': 'λ'
+                };
+                s = s.replace(/\\[a-zA-Z]+/g, m => cmds[m] || m);
+                s = s.replace(/\\left|\\right/g, '');
+                s = s.replace(/_\{([^}]*)\}/g, '_$1').replace(/\^\{([^}]*)\}/g, '^$1');
+                s = s.replace(/[{}]/g, '');
+                return s;
+            }
+
             function renderMarkdown(text) {
                 if (!text) return '';
-                return DOMPurify.sanitize(marked.parse(cleanSeg(text)));
+                // 1) 先清分段符/标签（cleanSeg 内部已保护 LaTeX 公式）
+                // 2) 提取公式 → 占位符（保护 _ * \ 不被 marked 误解析）
+                // 3) fixMarkdownPunct 只处理公式外的星号，不会破坏公式
+                // 4) marked → DOMPurify → 还原 KaTeX（KaTeX 输出可信，最后注入）
+                const cleaned = cleanSeg(text);
+                const extracted = extractLatex(cleaned);
+                const fixed = fixMarkdownPunct(extracted.text);
+                let html = marked.parse(fixed);
+                html = DOMPurify.sanitize(html);
+                return restoreLatex(html, extracted.blocks);
+            }
+
+            // 修复模型输出中的异常 markdown 标点（未配对的 ** / 孤立星号 / 空加粗 / 连续星号），
+            // 避免 marked 把残渣原样输出成 ****** 这类格式化文本（右侧聊天气泡走 markdown 渲染）。
+            function fixMarkdownPunct(text) {
+                if (!text) return '';
+                let s = String(text);
+                // 保护代码块（围栏 + 行内反引号），其中的 * 是代码内容，不参与配平
+                const blocks = [];
+                s = s.replace(/```[\s\S]*?(?:```|$)/g, m => { blocks.push(m); return '\u0000B' + (blocks.length - 1) + '\u0000'; });
+                s = s.replace(/`([^`\n]+)`/g, m => { blocks.push(m); return '\u0000I' + (blocks.length - 1) + '\u0000'; });
+                // 1) 连续纯星号串（>=3，未配对）：直接删除（如 *** / ***** / ****** 残渣）
+                s = s.replace(/\*{3,}/g, '');
+                // 2) 配平双星号：** 数量为奇数 → 删掉最后一个 **（模型常见漏写闭合）
+                const db = (s.match(/\*\*/g) || []).length;
+                if (db % 2 === 1) { const i = s.lastIndexOf('**'); if (i !== -1) s = s.slice(0, i) + s.slice(i + 2); }
+                // 3) 配平单星号（斜体）：孤立 * 数量为奇数 → 删掉最后一个 *
+                const sg = (s.match(/(?<!\*)\*(?!\*)/g) || []).length;
+                if (sg % 2 === 1) { const i = s.lastIndexOf('*'); if (i !== -1) s = s.slice(0, i) + s.slice(i + 1); }
+                // 恢复代码块
+                s = s.replace(/\u0000([BI])(\d+)\u0000/g, (m, t, i) => blocks[+i] || m);
+                return s;
             }
 
             function addBubble(text, sender, opts) {
@@ -928,7 +1040,9 @@
                 dialogueIndicator.textContent = '老师思考中';
                 dialogueIndicator.classList.remove('hidden');
 
-                const teacherBubble = addBubble('', 'teacher');
+                // 每个 \c 分段一个独立右侧气泡（按 segment 索引一一对应）
+                const segmentBubbles = [];
+                let latestSeg = 0;
                 isStreaming = true;
                 sendBtn.disabled = true;
 
@@ -936,7 +1050,10 @@
                 const _streamTimeout = setTimeout(function() {
                     if (isStreaming) {
                         console.warn('[chat] 流式超时（60s），强制释放 isStreaming');
-                        teacherBubble.textContent = (teacherBubble.textContent || '') + '\n（响应超时）';
+                        const b0 = segmentBubbles[0];
+                        const timeoutText = '\n（响应超时）';
+                        if (b0) b0.textContent = (b0.textContent || '') + timeoutText;
+                        else segmentBubbles[0] = addBubble(timeoutText, 'teacher');
                         isStreaming = false;
                         sendBtn.disabled = false;
                         dialogueStreaming = false;
@@ -977,12 +1094,33 @@
                         setTimeout(() => {
                             renderQueued = false;
                             lastRenderTime = performance.now();
-                            // 流式只更新纯文本，避免每帧 renderMarkdown 重解析
-                            teacherBubble.textContent = stripCodeFenceMarks(latestText);
+                            // 流式只更新纯文本（当前分段），避免每帧 renderMarkdown 重解析
+                            const b = segmentBubbles[latestSeg];
+                            if (b) b.textContent = stripCodeFenceMarks(dialogueSegments[latestSeg] || '');
                             // 滚动只在用户已接近底部时跟随，避免抖动
                             const nearBottom = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 80;
                             if (nearBottom) conversation.scrollTop = conversation.scrollHeight;
                         }, wait);
+                    }
+
+                    // 流式结束后：每个 \c 分段各自渲染为一个独立 markdown 气泡
+                    function renderSegmentsToBubbles() {
+                        const segs = dialogueSegments.filter(s => s);
+                        if (!segs.length) {
+                            // 兜底：无分段帧（模型直接返回 done）→ 用全文渲染单一气泡
+                            if (fullText) {
+                                if (!segmentBubbles[0]) segmentBubbles[0] = addBubble('', 'teacher');
+                                segmentBubbles[0].innerHTML = renderMarkdown(fullText);
+                            }
+                            conversation.scrollTop = conversation.scrollHeight;
+                            return;
+                        }
+                        for (let si = 0; si < dialogueSegments.length; si++) {
+                            if (!dialogueSegments[si]) continue;
+                            const b = segmentBubbles[si];
+                            if (b) b.innerHTML = renderMarkdown(dialogueSegments[si]);
+                        }
+                        conversation.scrollTop = conversation.scrollHeight;
                     }
 
                     function finishDialogue() {
@@ -1003,8 +1141,7 @@
                     function read() {
                         reader.read().then(({ done, value }) => {
                             if (done) {
-                                teacherBubble.innerHTML = renderMarkdown(fullText);
-                                conversation.scrollTop = conversation.scrollHeight;
+                                renderSegmentsToBubbles();
                                 finishDialogue();
                                 return;
                             }
@@ -1014,8 +1151,7 @@
                                 if (line.startsWith('data: ')) {
                                     const payload = line.replace('data: ', '').trim();
                                     if (payload === '[DONE]') {
-                                        teacherBubble.innerHTML = renderMarkdown(fullText);
-                                        conversation.scrollTop = conversation.scrollHeight;
+                                        renderSegmentsToBubbles();
                                         finishDialogue();
                                         return;
                                     }
@@ -1025,16 +1161,20 @@
                                         if (data.content && !data.done) {
                                             const seg = data.segment !== undefined ? data.segment : 0;
                                             dialogueSegments[seg] = cleanSeg(data.content);
+                                            // 每个 \c 分段对应右侧一个独立气泡（首次到达时创建）
+                                            if (!segmentBubbles[seg]) {
+                                                segmentBubbles[seg] = addBubble('', 'teacher');
+                                            }
+                                            latestSeg = seg;
                                             fullText = dialogueSegments.filter(s => s).join('\n\n');
                                             latestText = fullText;
                                             scheduleBubbleUpdate();
                                         }
-                                        // done 帧：用完整内容更新侧边栏
+                                        // done 帧：每个分段独立渲染为右侧气泡
                                         if (data.done && data.content) {
                                             // done 帧内容也要走 cleanSeg（修复模型输出孤立的 ```c / 裸 c）
                                             fullText = cleanSeg(data.content);
-                                            teacherBubble.innerHTML = renderMarkdown(fullText);
-                                            conversation.scrollTop = conversation.scrollHeight;
+                                            renderSegmentsToBubbles();
                                         }
                                         // AI 联动：收到动作指令 → 触发 Live2D 动作
                                         if (data.action) {
@@ -1093,7 +1233,9 @@
                 }).catch(err => {
                     console.error('[chat] fetch error:', err);
                     if (window._chatStreamTimeout) { clearTimeout(window._chatStreamTimeout); window._chatStreamTimeout = null; }
-                    teacherBubble.textContent = '\u274c ' + err.message;
+                    const b0 = segmentBubbles[0];
+                    if (b0) b0.textContent = '\u274c ' + err.message;
+                    else segmentBubbles[0] = addBubble('\u274c ' + err.message, 'teacher');
                     isStreaming = false;
                     sendBtn.disabled = false;
                     dialogueStreaming = false;

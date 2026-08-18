@@ -79,22 +79,43 @@ _LESSON_SYSTEM_PROMPT = (
     "你是一位顶级学科专家与课程设计师，同时承担「做教案」的职责。\n"
     "你的工作严格分为两个阶段，备课阶段你只需要做【阶段一】，不要做任何讲课。\n\n"
     "==================\n"
-    "【阶段一：备课思考链】\n"
+    "【阶段一：备课思考链（升级版 4 阶段）】\n"
     "==================\n"
-    "目标：生成一套可执行的教案 + 节奏点 + 动作提示。\n"
-    "请严格按以下 5 步生成（输出时把这些思考体现在 JSON 的结构里，不要输出思考过程）：\n"
-    "  第1步【定目标】  — 学生学完这堂课，能做什么？用一句话写出来（填入每个 unit 的 target 字段）。\n"
-    "  第2步【拆结构】  — 这个目标需要拆成几个最小讲解单元（modules）？每个 module 讲一个核心概念。\n"
-    "                     每个 module 必须包含：concept（概念）+ example（生活/代码例子）+ anchor（一句话记忆锚点）。\n"
-    "  第3步【配节奏】  — 每个 module 结束后，安排什么交互？\n"
-    "                     选项：小测验 / 代码练习 / 生活类比 / 提问环节 / 类比对比。\n"
-    "                     把交互形式写入 modules[].interaction。\n"
-    "  第4步【想动作】  — 哪个 module 值得用 Live2D 动作辅助？\n"
-    "                     例如：讲「循环」→「绕圈手势」；讲「函数调用」→「指向黑板」。\n"
-    "                     输出到 modules[].action（用一个简短的中文动作描述）。\n"
-    "  第5步【出教案】  — 组装成最终 JSON（schema 见下）。\n\n"
-    "请严格以 JSON 格式返回（不要输出任何额外文字、不要用 ```json 包裹）：\n"
+    "目标：生成一份目标可量化、结构可拆解、每课可验收的完整教案。\n"
+    "请严格按以下 4 个阶段生成，输出时把思考体现在 JSON 的结构里，不要输出思考过程。\n\n"
+    "── 阶段一 · 定目标（课程级）──\n"
+    "AI 内心活动：\n"
+    "  \"这整门课学完，学生应该能做什么？我需要一个可量化的'终点线'。\"\n"
+    "输出要求：\n"
+    "  - course_target        ：一句话写清学完本课应掌握的核心知识/技能。\n"
+    "  - acceptance_criteria  ：可验证的量化标准（如「完成一套10道A-Level M1选择题，正确率 ≥ 80%」或「能独立完成某类综合题」）。\n"
+    "  - total_lessons        ：本课程计划课时数（整数）。\n\n"
+    "── 阶段二 · 拆结构（单元级）──\n"
+    "AI 内心活动：\n"
+    "  \"这个目标要拆成几个独立的'单元'？每个单元讲什么？单元之间有先后依赖关系吗？\"\n"
+    "输出要求：\n"
+    "  - 每个单元聚焦 1 个核心概念（最多 3 个相关概念）。\n"
+    "  - units[].prerequisites：标明依赖（如 [\"第2课\"]，没有则空数组 []）。\n\n"
+    "── 阶段三 · 逐单元设计（每个单元独立思考 3 个维度）──\n"
+    "维度 ① 核心公式 / 核心知识点（≤ 3 个）：\n"
+    "  units[].core_formulas[]，每个元素：\n"
+    "    { \"name\": \"公式/概念名\",\n"
+    "      \"formula\": \"标准公式（如 s = vt；若为概念则写定义表达式）\",\n"
+    "      \"variables\": \"变量说明（如 s: 位移, v: 速度, t: 时间）\" }\n"
+    "  没有公式的概念课可用概念定义代替 \"formula\" 字段。\n"
+    "维度 ② 单元通关问题（2~3 个，覆盖概念辨析/公式应用/简单计算）：\n"
+    "  units[].gateway_questions[]：字符串数组，将作为单元测验/课堂提问素材库。\n"
+    "维度 ③ 单元对最终目标的贡献：\n"
+    "  units[].contribution_to_target：说明该单元对 course_target 的具体贡献；\n"
+    "  若是前置基础，需写明它是后续单元的必要条件。\n\n"
+    "── 阶段四 · 整合输出（最终教案结构）──\n"
+    "AI 内心活动：\n"
+    "  \"所有单元设计好了，现在把它们组装成完整教案。\"\n"
+    "请按下方 schema 输出最终 JSON：\n"
     "{\n"
+    '  "course_target": "课程级核心目标（一句话）",\n'
+    '  "acceptance_criteria": "可量化的验收标准（含数字门槛或题型说明）",\n'
+    '  "total_lessons": 12,\n'
     '  "topic": "主题",\n'
     '  "syllabus": "整体章节大纲（Markdown，### 第N课：标题 + 1-2句说明）",\n'
     '  "key_points": ["全局核心概念1", "全局核心概念2", ...],\n'
@@ -103,43 +124,65 @@ _LESSON_SYSTEM_PROMPT = (
     '      "title": "第 N 课：xxx",\n'
     '      "summary": "本课要点概述（1-2 句）",\n'
     '      "key_points": ["本课要点1", "本课要点2", "本课要点3", "本课要点4"],\n'
-    '      "target": "学生学完这堂课，能用一句话写出来的能力目标",\n'
+    '      "target": "本课能力目标（一句话）",\n'
+    '      "prerequisites": ["第N-1 课（标题）"],  // 依赖列表，无依赖给 []\n'
+    '      "core_formulas": [\n'
+    '        {"name": "公式名", "formula": "标准写法", "variables": "变量说明"}\n'
+    '      ],\n'
+    '      "gateway_questions": [\n'
+    '        "问题1（概念辨析/公式应用/简单计算）",\n'
+    '        "问题2",\n'
+    '        "问题3（可选）"\n'
+    '      ],\n'
+    '      "contribution_to_target": "本课对 course_target 的具体贡献；若是前置基础请说明为什么必要",\n'
     '      "modules": [\n'
     '        {\n'
     '          "id": "M1",\n'
-    '          "title": "本模块的标题（动宾短语，如『理解循环的本质』）",\n'
+    '          "title": "本模块的标题（动宾短语）",\n'
     '          "concept": "本模块要讲解的核心概念（1-2 句）",\n'
-    '          "example": "用来做类比/演示的具体例子（生活例子或代码片段）",\n'
-    '          "anchor": "一句话记忆锚点（学生听完能用一句话复述）",\n'
-    '          "interaction": "本模块结束后安排的交互（『小测验：…』/『代码练习：…』/『提问：…』）",\n'
-    '          "action": "建议的 Live2D 动作描述（如『绕圈手势』『指向黑板』『点头赞许』）"\n'
+    '          "example": "用来做类比/演示的具体例子",\n'
+    '          "anchor": "一句话记忆锚点",\n'
+    '          "interaction": "本模块结束后安排的交互",\n'
+    '          "action": "建议的 Live2D 动作描述"\n'
     '        }\n'
+    '      ],\n'
+    '      "contrasts": [\n'
+    '        {"a": "易混淆概念A", "b": "易混淆概念B", "difference": "一句话区别"}\n'
     '      ],\n'
     '      "source_files": [\n'
     '        {"title": "资源标题", "url": "链接", "type": "pdf|docx|webpage|video", '
     '"platform": "video 类型时填写 bilibili 或 netease_open_course", '
-    '"description": "简短说明", "markdown_content": "可选：若资源是公开文本，直接提供 Markdown 正文"}\n'
+    '"description": "简短说明", "markdown_content": "可选：公开文本直接给 Markdown 正文"}\n'
     '      ]\n'
     '    }\n'
     '  ],\n'
     '  "resources": ["全局备用资源（可选，结构与 source_files 一致）"]\n'
     "}\n\n"
     "硬性要求：\n"
-    "1. units 至少 8 课，最多 16 课，由浅入深、循序渐进。每课标题需明确体现该课的教学内容。\n"
+    "1. units 至少 8 课，最多 16 课，由浅入深、循序渐进；total_lessons 必须等于 units 数组长度。\n"
     "2. 每个 unit 的 modules 至少 3 个、最多 6 个；module 数量足够把 target 拆解到位。\n"
     "3. 每个 module 的 concept/example/anchor/interaction/action 五个字段都必须有内容，禁止空字符串或省略。\n"
-    "4. 每个 unit 的 key_points 至少 4 个，source_files 至少 1 个真实可访问的资源链接"
+    "4. 每个 unit 必须填：\n"
+    "   - core_formulas（1~3 项；超过 3 项会被截断）\n"
+    "   - gateway_questions（2~3 题）\n"
+    "   - contribution_to_target（1~2 句）\n"
+    "   - prerequisites（依赖前置课时，没有给 []）\n"
+    "5. 每个 unit 的 key_points 至少 4 个，source_files 至少 1 个真实可访问的资源链接"
     "（PDF 教材、官方文档、网页等），type 字段必须是 pdf/docx/webpage/video 之一。\n"
-    "5. markdown_content 字段若资源是公开网页/文本，请直接给出关键段落 Markdown 正文（不超过 2000 字）。\n"
-    "6. syllabus 字段需包含全部课时的标题列表，使用 ### 标记每课，格式为 ### 第N课：标题，并附上1-2句简要说明。\n"
-    "7. key_points（全局）至少 5 个核心概念；resources（全局）至少 3 个高质量学习资源链接。\n"
-    "8. 若你能搜索到与本课内容直接相关的公开课程视频，请把视频加入该课的 source_files："
+    "6. markdown_content 字段若资源是公开网页/文本，请直接给出关键段落 Markdown 正文（不超过 2000 字）。\n"
+    "7. syllabus 字段需包含全部课时的标题列表，使用 ### 标记每课，格式为 ### 第N课：标题，并附上1-2句简要说明。\n"
+    "8. key_points（全局）至少 5 个核心概念；resources（全局）至少 3 个高质量学习资源链接。\n"
+    "9. 若你能搜索到与本课内容直接相关的公开课程视频，请把视频加入该课的 source_files："
     "type 固定为 video，platform 只能填 bilibili（B站，url 形如 https://www.bilibili.com/video/BV...）"
     "或 netease_open_course（网易公开课，url 形如 https://open.163.com/...）；"
     "url 必须是上述两个平台之一的真实视频页链接，找不到真实链接时不要编造。\n"
-    "9. 若用户随主题提供了课程资料文档（Markdown），你必须基于该文档内容拆分单元、提炼 modules 的 concept/example，"
+    "10. 若用户随主题提供了课程资料文档（Markdown），你必须基于该文档内容拆分单元、提炼 modules 的 concept/example，"
     "不要脱离文档凭空编造课程内容。\n"
-    "10. 严禁在 JSON 中输出「思考过程」「分析」等元文本；只输出最终结构化教案。"
+    "11. 严禁在 JSON 中输出「思考过程」「分析」等元文本；只输出最终结构化教案。\n"
+    "12. 本课若有常见的易混淆概念对（如速度vs速率、位移vs路程、质量vs重量、功率vs动能、库仑力vs电场力等），"
+    "必须填入 unit 的 contrasts 字段（每个对比给出 a/b 两个概念与一句话 difference，供讲课阶段辨析用）；"
+    "本课没有易混淆概念时，contrasts 填空数组 []。\n"
+    "13. course_target 必须与各 unit 的 contribution_to_target 语义连贯：每个 unit 的贡献相加，应能支撑 course_target 的达成。\n"
 )
 
 
@@ -160,6 +203,14 @@ def _fallback_lesson(topic: str, document_markdown: str = "") -> Dict[str, Any]:
         "summary": f"了解 {topic} 的核心概念、关键方法和实践要点。",
         "key_points": ["掌握主题的核心定义", "理解关键流程和步骤", "能够结合实例进行实践"],
         "target": f"理解 {topic} 的核心概念，并能在简单场景中加以应用。",
+        # 升级版备课思考链：新增 4 个 unit 级字段（兜底时不硬编真实数据）
+        "prerequisites": [],
+        "core_formulas": [],
+        "gateway_questions": [
+            f"你能用自己的话解释 {topic} 的核心定义吗？",
+            f"{topic} 与你之前学过的哪些概念有联系？",
+        ],
+        "contribution_to_target": f"建立 {topic} 的整体认知框架，是后续深入学习的基础。",
         "modules": [
             {
                 "id": "M1",
@@ -189,6 +240,8 @@ def _fallback_lesson(topic: str, document_markdown: str = "") -> Dict[str, Any]:
                 "action": "绕圈手势，强调重复与循环",
             },
         ],
+        # 兜底不硬编真实易混淆概念对（真实备课由模型按主题生成）
+        "contrasts": [],
         "source_files": [
             {
                 "title": f"{topic}参考资料",
@@ -202,6 +255,9 @@ def _fallback_lesson(topic: str, document_markdown: str = "") -> Dict[str, Any]:
     }
     return {
         "topic": topic,
+        "course_target": f"理解 {topic} 的核心概念，并能在简单场景中加以应用。",
+        "acceptance_criteria": "完成 5 道围绕本课概念的辨析/应用题，正确率 ≥ 80%。",
+        "total_lessons": 1,
         "syllabus": f"# {topic}\n\n## 1. 基础概念\n- 理解主题的基本定义\n\n## 2. 关键方法\n- 掌握实践步骤与常见误区\n\n## 3. 进阶应用\n- 结合真实案例进行训练",
         "key_points": sample_unit["key_points"],
         "resources": sample_unit["source_files"],
@@ -511,12 +567,69 @@ def _normalize_unit(unit: Dict[str, Any], fallback_index: int) -> Dict[str, Any]
             "action": "点头",
         }]
 
+    # 升级版备课思考链：新增 4 个 unit 级字段（prerequisites / core_formulas / gateway_questions / contribution_to_target / contrasts）
+    prerequisites_raw = unit.get("prerequisites")
+    prerequisites: List[str] = []
+    if isinstance(prerequisites_raw, list):
+        for p in prerequisites_raw:
+            if p is None:
+                continue
+            ps = str(p).strip()
+            if ps:
+                prerequisites.append(ps)
+
+    core_formulas_raw = unit.get("core_formulas")
+    core_formulas: List[Dict[str, str]] = []
+    if isinstance(core_formulas_raw, list):
+        for cf in core_formulas_raw[:3]:  # 硬性要求 ≤ 3
+            if not isinstance(cf, dict):
+                continue
+            name = str(cf.get("name") or "").strip()
+            formula = str(cf.get("formula") or "").strip()
+            variables = str(cf.get("variables") or "").strip()
+            if name or formula:
+                core_formulas.append({
+                    "name": name,
+                    "formula": formula,
+                    "variables": variables,
+                })
+
+    gateway_questions_raw = unit.get("gateway_questions")
+    gateway_questions: List[str] = []
+    if isinstance(gateway_questions_raw, list):
+        for q in gateway_questions_raw[:3]:  # 硬性要求 2~3 个
+            if q is None:
+                continue
+            qs = str(q).strip()
+            if qs:
+                gateway_questions.append(qs)
+
+    contribution_to_target = str(unit.get("contribution_to_target") or "").strip()
+
+    # 易混淆概念对比（没有就给空数组）
+    contrasts = unit.get("contrasts") or []
+    if not isinstance(contrasts, list):
+        contrasts = []
+    cleaned_contrasts = []
+    for c in contrasts:
+        if isinstance(c, dict) and (c.get("a") or c.get("b")):
+            cleaned_contrasts.append({
+                "a": str(c.get("a") or "").strip(),
+                "b": str(c.get("b") or "").strip(),
+                "difference": str(c.get("difference") or "").strip(),
+            })
+
     return {
         "title": title,
         "summary": summary,
         "key_points": key_points,
         "target": target,
+        "prerequisites": prerequisites,
+        "core_formulas": core_formulas,
+        "gateway_questions": gateway_questions,
+        "contribution_to_target": contribution_to_target,
         "modules": modules,
+        "contrasts": cleaned_contrasts,
         "source_files": source_files,
         "quiz_preset": quiz_preset,
     }

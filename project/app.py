@@ -299,19 +299,49 @@ def default_config() -> Dict[str, Any]:
         "assistant_name": "AI 老师",                  # 用户可改成自己想要的老师名
         # 内置人设 prompt —— 用户可自由改写
         "personality_prompt": "你是一位温柔、专业、耐心的 AI 学习导师。请以启发式提问方式指导学生：先解释概念，再给出生活化的例子，最后用一两个小问题确认理解。遇到学生答错时不要直接给答案，而是再换一种方式重讲一遍。保持亲切的口吻，称呼学生『你』，并适度使用 emoji 让对话更生动。",
-        # 备课（分课教案生成）system 提示词 —— 用户可在设置面板修改；下面是 v2 内置默认（阶段一备课思考链 + 每 unit 含 target + modules 教案骨架）
+        # 备课（分课教案生成）system 提示词 —— 用户可在设置面板修改；下面是 v3 内置默认
+        # （阶段一备课思考链 4 阶段升级版：课程级目标 + 每单元 3 维度设计 + 易混淆概念对比）
         "lesson_prompt": (
             "你是一位顶级学科专家与课程设计师，同时承担「做教案」的职责。\n"
             "你的工作严格分为两个阶段，备课阶段你只需要做【阶段一】，不要做任何讲课。\n\n"
-            "【阶段一：备课思考链】\n"
-            "  第1步【定目标】  — 学生学完这堂课，能做什么？用一句话写出来（填入每个 unit 的 target 字段）。\n"
-            "  第2步【拆结构】  — 这个目标需要拆成几个最小讲解单元（modules）？每个 module 讲一个核心概念。\n"
-            "                     每个 module 必须包含：concept（概念）+ example（生活/代码例子）+ anchor（一句话记忆锚点）。\n"
-            "  第3步【配节奏】  — 每个 module 结束后，安排什么交互（小测验 / 代码练习 / 提问 / 类比对比）？写入 modules[].interaction。\n"
-            "  第4步【想动作】  — 哪个 module 值得用 Live2D 动作辅助（如『绕圈手势』『指向黑板』）？写入 modules[].action。\n"
-            "  第5步【出教案】  — 组装成最终 JSON（schema 见下）。\n\n"
-            "请严格以 JSON 格式返回（不要输出任何额外文字、不要用 ```json 包裹）：\n"
+            "==================\n"
+            "【阶段一：备课思考链（升级版 4 阶段）】\n"
+            "==================\n"
+            "目标：生成一份目标可量化、结构可拆解、每课可验收的完整教案。\n"
+            "请严格按以下 4 个阶段生成，输出时把思考体现在 JSON 的结构里，不要输出思考过程。\n\n"
+            "── 阶段一 · 定目标（课程级）──\n"
+            "AI 内心活动：\n"
+            "  \"这整门课学完，学生应该能做什么？我需要一个可量化的'终点线'。\"\n"
+            "输出要求：\n"
+            "  - course_target        ：一句话写清学完本课应掌握的核心知识/技能。\n"
+            "  - acceptance_criteria  ：可验证的量化标准（如「完成一套10道A-Level M1选择题，正确率 ≥ 80%」或「能独立完成某类综合题」）。\n"
+            "  - total_lessons        ：本课程计划课时数（整数）。\n\n"
+            "── 阶段二 · 拆结构（单元级）──\n"
+            "AI 内心活动：\n"
+            "  \"这个目标要拆成几个独立的'单元'？每个单元讲什么？单元之间有先后依赖关系吗？\"\n"
+            "输出要求：\n"
+            "  - 每个单元聚焦 1 个核心概念（最多 3 个相关概念）。\n"
+            "  - units[].prerequisites：标明依赖（如 [\"第2课\"]，没有则空数组 []）。\n\n"
+            "── 阶段三 · 逐单元设计（每个单元独立思考 3 个维度）──\n"
+            "维度 ① 核心公式 / 核心知识点（≤ 3 个）：\n"
+            "  units[].core_formulas[]，每个元素：\n"
+            "    { \"name\": \"公式/概念名\",\n"
+            "      \"formula\": \"标准公式（如 s = vt；若为概念则写定义表达式）\",\n"
+            "      \"variables\": \"变量说明（如 s: 位移, v: 速度, t: 时间）\" }\n"
+            "  没有公式的概念课可用概念定义代替 \"formula\" 字段。\n"
+            "维度 ② 单元通关问题（2~3 个，覆盖概念辨析/公式应用/简单计算）：\n"
+            "  units[].gateway_questions[]：字符串数组，将作为单元测验/课堂提问素材库。\n"
+            "维度 ③ 单元对最终目标的贡献：\n"
+            "  units[].contribution_to_target：说明该单元对 course_target 的具体贡献；\n"
+            "  若是前置基础，需写明它是后续单元的必要条件。\n\n"
+            "── 阶段四 · 整合输出（最终教案结构）──\n"
+            "AI 内心活动：\n"
+            "  \"所有单元设计好了，现在把它们组装成完整教案。\"\n"
+            "请按下方 schema 输出最终 JSON：\n"
             "{\n"
+            '  "course_target": "课程级核心目标（一句话）",\n'
+            '  "acceptance_criteria": "可量化的验收标准（含数字门槛或题型说明）",\n'
+            '  "total_lessons": 12,\n'
             '  "topic": "主题",\n'
             '  "syllabus": "整体章节大纲（Markdown，### 第N课：标题 + 1-2句说明）",\n'
             '  "key_points": ["全局核心概念1", "全局核心概念2", ...],\n'
@@ -320,7 +350,13 @@ def default_config() -> Dict[str, Any]:
             '      "title": "第 N 课：xxx",\n'
             '      "summary": "本课要点概述（1-2 句）",\n'
             '      "key_points": ["本课要点1", "本课要点2", "本课要点3", "本课要点4"],\n'
-            '      "target": "学生学完这堂课，能用一句话写出来的能力目标",\n'
+            '      "target": "本课能力目标（一句话）",\n'
+            '      "prerequisites": ["第N-1 课（标题）"],\n'
+            '      "core_formulas": [\n'
+            '        {"name": "公式名", "formula": "标准写法", "variables": "变量说明"}\n'
+            '      ],\n'
+            '      "gateway_questions": ["问题1", "问题2", "问题3"],\n'
+            '      "contribution_to_target": "本课对 course_target 的具体贡献",\n'
             '      "modules": [\n'
             '        {\n'
             '          "id": "M1",\n'
@@ -332,20 +368,29 @@ def default_config() -> Dict[str, Any]:
             '          "action": "建议的 Live2D 动作描述"\n'
             '        }\n'
             '      ],\n'
+            '      "contrasts": [\n'
+            '        {"a": "易混淆概念A", "b": "易混淆概念B", "difference": "一句话区别"}\n'
+            '      ],\n'
             '      "source_files": [\n'
-            '        {"title": "资源标题", "url": "链接", "type": "pdf|docx|webpage|video", "platform": "video 类型时填写 bilibili 或 netease_open_course", "description": "简短说明", "markdown_content": "可选：若资源是公开文本，直接提供 Markdown 正文"}\n'
+            '        {"title": "资源标题", "url": "链接", "type": "pdf|docx|webpage|video", "platform": "video 时填 bilibili 或 netease_open_course", "description": "简短说明", "markdown_content": "可选 Markdown 正文"}\n'
             '      ]\n'
             '    }\n'
             '  ],\n'
             '  "resources": ["全局备用资源（可选，结构与 source_files 一致）"]\n'
             "}\n\n"
             "硬性要求：\n"
-            "1. units 至少 8 课，最多 16 课。\n"
-            "2. 每个 unit 的 modules 至少 3 个、最多 6 个；每个 module 的 concept/example/anchor/interaction/action 五个字段都必须有内容，禁止空字符串或省略。\n"
-            "3. 每个 unit 的 key_points 至少 4 个，source_files 至少 1 个真实可访问的资源链接（PDF 教材、官方文档、网页等）。\n"
-            "4. type 字段必须是 pdf/docx/webpage/video 之一；video 链接必须是 bilibili（B站，https://www.bilibili.com/video/BV...）或 netease_open_course（网易公开课，https://open.163.com/...）之一。\n"
-            "5. syllabus 字段需用 ### 第N课：标题 的形式列出全部课时。\n"
-            "6. 严禁在 JSON 中输出「思考过程」「分析」等元文本；只输出最终结构化教案。"
+            "1. units 至少 8 课，最多 16 课；total_lessons 必须等于 units 数组长度。\n"
+            "2. 每个 unit 的 modules 至少 3 个、最多 6 个；module 数量足够把 target 拆解到位。\n"
+            "3. 每个 module 的 concept/example/anchor/interaction/action 五个字段都必须有内容，禁止空字符串或省略。\n"
+            "4. 每个 unit 必须填：core_formulas（1~3 项）、gateway_questions（2~3 题）、contribution_to_target（1~2 句）、prerequisites（依赖前置课时，没有给 []）。\n"
+            "5. 每个 unit 的 key_points 至少 4 个，source_files 至少 1 个真实可访问的资源链接（PDF/官方文档/网页），type 必须是 pdf/docx/webpage/video 之一；video 链接必须是 bilibili（B站，https://www.bilibili.com/video/BV...）或 netease_open_course（网易公开课，https://open.163.com/...）之一。\n"
+            "6. markdown_content 字段若资源是公开网页/文本，请直接给出关键段落 Markdown 正文（不超过 2000 字）。\n"
+            "7. syllabus 字段需用 ### 第N课：标题 的形式列出全部课时。\n"
+            "8. key_points（全局）至少 5 个核心概念；resources（全局）至少 3 个高质量学习资源链接。\n"
+            "9. 若用户随主题提供了课程资料文档（Markdown），你必须基于该文档内容拆分单元、提炼 modules 的 concept/example，不要脱离文档凭空编造课程内容。\n"
+            "10. 严禁在 JSON 中输出「思考过程」「分析」等元文本；只输出最终结构化教案。\n"
+            "11. 本课若有常见的易混淆概念对（如速度vs速率、位移vs路程、质量vs重量、功率vs动能等），必须填入 unit 的 contrasts 字段；本课没有易混淆概念时，contrasts 填空数组 []。\n"
+            "12. course_target 必须与各 unit 的 contribution_to_target 语义连贯：每个 unit 的贡献相加，应能支撑 course_target 的达成。\n"
         ),
         "default_topic": "",
         "default_voice": "",
@@ -695,6 +740,48 @@ def _build_syllabus_payload(plan: Dict[str, Any], units: List[Dict[str, Any]]) -
                     "interaction": "提问：你对这个概念熟悉吗？",
                     "action": "指向黑板",
                 })
+        # 易混淆概念对比：透传备课生成的 contrasts（没有则空数组）
+        contrasts: List[Dict[str, str]] = []
+        raw_contrasts = u.get("contrasts")
+        if isinstance(raw_contrasts, list):
+            for c in raw_contrasts:
+                if isinstance(c, dict) and (c.get("a") or c.get("b")):
+                    contrasts.append({
+                        "a": str(c.get("a") or "").strip(),
+                        "b": str(c.get("b") or "").strip(),
+                        "difference": str(c.get("difference") or "").strip(),
+                    })
+        # 升级版备课思考链：透传 prerequisites / core_formulas / gateway_questions / contribution_to_target
+        prerequisites: List[str] = []
+        raw_prereq = u.get("prerequisites")
+        if isinstance(raw_prereq, list):
+            for p in raw_prereq:
+                if p is None:
+                    continue
+                ps = str(p).strip()
+                if ps:
+                    prerequisites.append(ps)
+        core_formulas: List[Dict[str, str]] = []
+        raw_cf = u.get("core_formulas")
+        if isinstance(raw_cf, list):
+            for cf in raw_cf[:3]:
+                if not isinstance(cf, dict):
+                    continue
+                cn = str(cf.get("name") or "").strip()
+                cfo = str(cf.get("formula") or "").strip()
+                cv = str(cf.get("variables") or "").strip()
+                if cn or cfo:
+                    core_formulas.append({"name": cn, "formula": cfo, "variables": cv})
+        gateway_questions: List[str] = []
+        raw_gq = u.get("gateway_questions")
+        if isinstance(raw_gq, list):
+            for q in raw_gq[:3]:
+                if q is None:
+                    continue
+                qs = str(q).strip()
+                if qs:
+                    gateway_questions.append(qs)
+        contribution_to_target = str(u.get("contribution_to_target") or "").strip()
         units_out.append({
             "index": idx,
             "title": title,
@@ -702,10 +789,26 @@ def _build_syllabus_payload(plan: Dict[str, Any], units: List[Dict[str, Any]]) -
             "target": target,
             "key_points": key_points,
             "modules": modules,
+            "contrasts": contrasts,
+            "prerequisites": prerequisites,
+            "core_formulas": core_formulas,
+            "gateway_questions": gateway_questions,
+            "contribution_to_target": contribution_to_target,
         })
+    # 升级版备课思考链：顶层课程级字段
+    course_target = str((plan or {}).get("course_target") or "").strip()
+    acceptance_criteria = str((plan or {}).get("acceptance_criteria") or "").strip()
+    total_lessons_raw = (plan or {}).get("total_lessons")
+    try:
+        total_lessons = int(total_lessons_raw) if total_lessons_raw is not None else None
+    except (TypeError, ValueError):
+        total_lessons = None
     return {
         "topic": str((plan or {}).get("topic") or "").strip(),
-        "target": str((plan or {}).get("target") or "").strip() or f"系统掌握本课程的核心概念",
+        "target": str((plan or {}).get("target") or "").strip() or course_target or f"系统掌握本课程的核心概念",
+        "course_target": course_target,
+        "acceptance_criteria": acceptance_criteria,
+        "total_lessons": total_lessons if total_lessons else len(units_out),
         "units": units_out,
     }
 
@@ -782,6 +885,26 @@ def _ai_emotion_rules() -> List[str]:
     ]
 
 
+def _ai_grounding_rules() -> List[str]:
+    """事实锚定与防幻觉规则：强制基于备课教案与课程资料作答，数值计算必须走工具。
+
+    本地/云端对话链路共用 build_system_prompt，因此此处约束对两条链路同时生效，
+    用于最大程度抑制模型脱离资料编造内容、心算错误或虚构出处。
+    """
+    return [
+        "【事实锚定与防幻觉（最高优先级）】",
+        "- 公式核对规则（必须执行）：凡涉及公式、定理、定律或物理常数（如 v²=u²+2as、F=ma、g≈9.81 m/s²）时，必须先在本课教案的 modules[].concept 与 key_points 中检索出对应公式，逐项核对系数、变量与适用条件后再回答；教案中没有的公式，必须明确说「教案中没有这个公式，我不能确认」，严禁仅凭记忆写出公式、擅自补系数，或直接认可学生给出的公式。",
+        "- 概念辨析规则（必须执行）：当学生提出一个说法让你判断对错时，先核对定义——该说法中的每个术语是否用对（例如「平均速度=总路程/总时间」是把平均速度与平均速率混淆）。发现相似概念被混用时（速度vs速率、位移vs路程、质量vs重量、功率vs动能等），先分别给出两个概念的精确定义，再指出说法错在哪里，最后用一个反例说明二者的区别。绝不能在未核对定义的情况下直接附和学生的说法。",
+        "- 所有讲解内容必须严格依据【本课教案】【本课详细资料】【全课程目录与要点总览】中的概念、公式、数据与示例，不得脱离资料自创或编造。",
+        "- 资料中未包含的内容：若属于公认常识，可简短补充并说明这是常识；若无法确认，请直接说「这部分我手头资料没有，建议查证一下」，严禁编造公式、数据、人名、日期、参考文献或引文。",
+        "- 严禁虚构出处（如「资料里提到」「书上说」「PPT 里写的」）；资料里没有就是没有。",
+        "- 术语定义必须严谨准确（例如：平均速度=位移/时间，平均速率=路程/时间；速度是矢量，速率是标量）。定义不确定时，用口语举例解释代替下定义，绝不给出错误定义。",
+        "- 凡是涉及数值计算（物理量求解、数学运算、成绩统计、比例换算、单位转换等），必须在回复末尾输出 `[TOOL:{\"type\":\"show_terminal\",\"language\":\"python\",\"code\":\"...\"}]` 用真实代码计算出结果后再给出结论，严禁心算或估算；回复中引用的具体数值必须与工具实际运行输出一致，不得修改。",
+        "- 给出例题/数据时优先使用资料中的原始数据；确需自拟数据时，仅用于示意且数值必须合理自洽，并明确标注为示例。",
+        "- 若学生在某个概念上反复出错，允许回看教案对应 module 的 concept/example 重新讲解，但讲解内容本身仍必须锚定教案与资料。",
+    ]
+
+
 def build_system_prompt(lesson_folder: str | None) -> str:
     metadata = load_lesson_metadata(lesson_folder)
     cfg = load_config()
@@ -825,6 +948,7 @@ def build_system_prompt(lesson_folder: str | None) -> str:
         tool_lines.extend(_ai_action_rules())
         tool_lines.extend(_ai_tool_rules())
         tool_lines.extend(_ai_emotion_rules())
+        tool_lines.extend(_ai_grounding_rules())
         try:
             context = load_course_context(lesson_folder)
             if context:
@@ -911,11 +1035,22 @@ def build_system_prompt(lesson_folder: str | None) -> str:
     if current_teach_plan:
         target_line = current_teach_plan.get("target") or unit_summary or "理解本课核心"
         modules = current_teach_plan.get("modules") or []
-        plan_lines = [
-            "【本课教案（来自备课阶段，请按此执行）】",
-            f"学习目标（target）：{target_line}",
-            "讲解模块序列（modules）：",
-        ]
+        # 升级版备课思考链：读取课程级字段（顶层 course_target / acceptance_criteria / total_lessons）
+        course_target = (syllabus or {}).get("course_target") if syllabus else ""
+        acceptance_criteria = (syllabus or {}).get("acceptance_criteria") if syllabus else ""
+        total_lessons = (syllabus or {}).get("total_lessons") if syllabus else None
+        course_header_parts: List[str] = []
+        if course_target:
+            course_header_parts.append(f"课程目标（course_target）：{course_target}")
+        if acceptance_criteria:
+            course_header_parts.append(f"验收标准（acceptance_criteria）：{acceptance_criteria}")
+        if total_lessons:
+            course_header_parts.append(f"总课时（total_lessons）：{total_lessons} 课；当前为第 {current_unit + 1} 课")
+        plan_lines = ["【本课教案（来自备课阶段，请按此执行）】"]
+        if course_header_parts:
+            plan_lines.extend(course_header_parts)
+        plan_lines.append(f"本课学习目标（target）：{target_line}")
+        plan_lines.append("讲解模块序列（modules）：")
         for mi, m in enumerate(modules):
             mid = m.get("id") or f"M{mi + 1}"
             mtitle = m.get("title") or ""
@@ -937,6 +1072,50 @@ def build_system_prompt(lesson_folder: str | None) -> str:
                 plan_lines.append(f"     - 节奏点（交互）：{interaction}")
             if action:
                 plan_lines.append(f"     - 动作提示：{action}")
+        # 易混淆概念辨析（来自备课阶段 contrasts 字段）：学生混用概念时必须先给定义再纠正
+        # 升级版备课思考链：注入本课的核心公式 / 单元通关问题 / 对课程目标的贡献 / 前置依赖
+        core_formulas = current_teach_plan.get("core_formulas") or []
+        valid_formulas = [c for c in core_formulas if isinstance(c, dict) and (c.get("name") or c.get("formula"))]
+        if valid_formulas:
+            plan_lines.append("")
+            plan_lines.append("本课核心公式/概念（讲课时涉及这些公式必须与教案一致；学生给出不同公式时必须先核对教案再决定是否纠正）：")
+            for f in valid_formulas:
+                name = str(f.get("name") or "").strip()
+                formula = str(f.get("formula") or "").strip()
+                variables = str(f.get("variables") or "").strip()
+                line = f"  - {name}" if name else "  -"
+                if formula:
+                    line += f"：{formula}"
+                if variables:
+                    line += f"（{variables}）"
+                plan_lines.append(line)
+        gateway_questions = current_teach_plan.get("gateway_questions") or []
+        valid_questions = [q for q in gateway_questions if isinstance(q, str) and q.strip()]
+        if valid_questions:
+            plan_lines.append("")
+            plan_lines.append("本课通关问题（讲完本课后向学生提问，作为理解验证）：")
+            for q in valid_questions:
+                plan_lines.append(f"  - {q}")
+        contribution_to_target = str(current_teach_plan.get("contribution_to_target") or "").strip()
+        if contribution_to_target:
+            plan_lines.append("")
+            plan_lines.append(f"本课对课程目标的贡献：{contribution_to_target}")
+        prerequisites = current_teach_plan.get("prerequisites") or []
+        valid_prereq = [p for p in prerequisites if isinstance(p, str) and p.strip()]
+        if valid_prereq:
+            plan_lines.append("")
+            plan_lines.append(f"前置依赖（学生应已掌握）：{'; '.join(valid_prereq)}")
+        contrasts = current_teach_plan.get("contrasts") or []
+        valid_contrasts = [c for c in contrasts if isinstance(c, dict) and (c.get("a") or c.get("b"))]
+        if valid_contrasts:
+            plan_lines.append("")
+            plan_lines.append("易混淆概念辨析（当学生混淆下列概念时，必须先分别给出两个概念的精确定义，再指出说法错在哪，最后给反例）：")
+            for c in valid_contrasts:
+                a = str(c.get("a") or "").strip()
+                b = str(c.get("b") or "").strip()
+                diff = str(c.get("difference") or "").strip()
+                pair = f"{a} vs {b}" if a and b else (a or b)
+                plan_lines.append(f"  - {pair}：{diff}" if diff else f"  - {pair}")
         # 阶段二讲课思考链：要求 AI 按教案执行、不另起炉灶
         plan_lines.append("")
         plan_lines.append(
@@ -975,6 +1154,7 @@ def build_system_prompt(lesson_folder: str | None) -> str:
     tool_lines.extend(_ai_tool_rules())
     tool_lines.extend(_ai_emotion_rules())
     parts.append("\n".join(tool_lines))
+    parts.append("\n".join(_ai_grounding_rules()))
 
     # 教学行为指引：开课时先系统讲解知识点
     # 分段标记从配置读取（纯文本分段符，非代码块语言标记）
@@ -1017,6 +1197,41 @@ def build_system_prompt(lesson_folder: str | None) -> str:
     return "\n\n".join(parts)
 
 
+_CONTEXT_HISTORY_BUDGET = 12000   # 对话历史总预算（字符），超出则丢弃更旧消息
+_CONTEXT_MSG_MAX = 2500           # 单条历史消息上限（字符），超出则截断并标注
+_CONTEXT_LAST_N = 10              # 最多保留的对话轮数
+
+
+def _compact_history(history, budget=_CONTEXT_HISTORY_BUDGET, per_msg=_CONTEXT_MSG_MAX, last_n=_CONTEXT_LAST_N):
+    """上下文压缩：避免对话历史撑爆模型上下文窗口。
+
+    - 只保留最近 last_n 轮；
+    - 单条消息超过 per_msg 字符时截断（保留开头，附压缩说明）；
+    - 从最新往旧累积，总长超过 budget 后丢弃更旧消息（至少保留最新一条）。
+    系统提示词（含教案+资料）本身较大，本地小模型（如 qwen3:4b）上下文有限，
+    此预算保证 messages 总量可控，避免超限导致的超时/截断/报错。
+    """
+    if not history:
+        return []
+    selected: List[Dict[str, str]] = []
+    total = 0
+    for entry in reversed(history[-last_n:]):
+        role = entry.get("role")
+        content = entry.get("content")
+        if role not in {"user", "assistant"} or not content:
+            continue
+        content = str(content)
+        orig_len = len(content)
+        if orig_len > per_msg:
+            content = content[:per_msg] + f"\n（本条原文 {orig_len} 字过长，已压缩至 {per_msg} 字）"
+        total += len(content)
+        if total > budget and selected:
+            break
+        selected.append({"role": role, "content": content})
+    selected.reverse()
+    return selected
+
+
 def _build_chat_messages(
     prompt: str, lesson_folder: str | None, history: List[Dict[str, str]] | None
 ) -> List[Dict[str, str]]:
@@ -1024,14 +1239,14 @@ def _build_chat_messages(
 
     提示词链路：
     1. messages[0] 必定是 role=system，内容来自 build_system_prompt（身份+角色+课程资料）
-    2. 附加最近 10 轮 user/assistant 对话历史
+    2. 附加最近 N 轮 user/assistant 对话历史（经 _compact_history 压缩，避免超上下文）
     3. 末尾追加本次用户输入（去除重复，若最后一条 history 就是本次 prompt 则跳过）
     """
     system_prompt = build_system_prompt(lesson_folder)
     messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
     seen_last = False
     if history:
-        for entry in history[-10:]:
+        for entry in _compact_history(history):
             role = entry.get("role")
             content = entry.get("content")
             if role in {"user", "assistant"} and content:
@@ -1092,11 +1307,16 @@ def local_ollama_reply(prompt: str, lesson_folder: str | None = None, history: L
             if available:
                 normalized = {n.lower(): n for n in available}
                 if model.lower() not in normalized:
-                    # 依次尝试：配置名 → qwen2.5 → qwen2.5vl → qwen2.5-coder
-                    for fallback in ["qwen2.5", "qwen2.5vl", "qwen2.5-coder"]:
-                        if fallback in normalized:
-                            print(f"[ollama] 模型 '{model}' 不存在，自动改用 '{normalized[fallback]}'", flush=True)
-                            model = normalized[fallback]
+                    # 依次尝试：配置名 → qwen3 → qwen2.5 → qwen2.5vl → qwen2.5-coder
+                    # 前缀匹配（"qwen2.5" 要能命中 "qwen2.5:7b"），且带 ":" 避免误吞 qwen2.5vl/coder
+                    for fallback in ["qwen3", "qwen2.5", "qwen2.5vl", "qwen2.5-coder"]:
+                        match = next(
+                            (n for key, n in normalized.items() if key.startswith(fallback + ":")),
+                            None,
+                        )
+                        if match:
+                            print(f"[ollama] 模型 '{model}' 不存在，自动改用 '{match}'", flush=True)
+                            model = match
                             break
                 else:
                     model = normalized[model.lower()]  # 统一为实际大小写
@@ -3641,12 +3861,26 @@ def _split_by_sentences(text: str, max_chars: int = 500) -> List[str]:
 
 _CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```")
 _CODE_PH_RE = re.compile(r"\x00BLOCK(\d+)\x00")
+# LaTeX 公式块（$$...$$ / $...$ / \(...\) / \[...\]）：分段时与代码块同样保护，
+# 避免公式里的 \c（如 \cdot / \cancel）被误判为分段标记 \c 拦腰切断。
+_LATEX_BLOCK_RE = re.compile(
+    r"\$\$[\s\S]*?\$\$"          # 块级 $$ ... $$
+    r"|\\\[[\s\S]*?\\\]"         # 块级 \[ ... \]
+    r"|\$[^$\n]*\$"              # 行内 $ ... $（不跨行）
+    r"|\\\([\s\S]*?\\\)"         # 行内 \( ... \)
+)
+# 存档清洗用的 LaTeX 占位（与 _split_by_marker_protecting_code 分开管理，避免并发/复用串扰）
+_CLEAN_HOLD: List[str] = []
+
+def _hold_for_clean(m: "re.Match[str]") -> str:
+    _CLEAN_HOLD.append(m.group(0))
+    return f"\x00BLOCK{len(_CLEAN_HOLD) - 1}\x00"
 
 
 def _split_by_marker_protecting_code(text: str, marker: str) -> List[str]:
-    """按分段标记（\\c 等）切分，但保护代码块：``` 代码块整体保留，不被切碎。
+    """按分段标记（\\c 等）切分，但保护代码块与 LaTeX 公式：两者整体保留，不被切碎。
 
-    实现：先把代码块替换为占位符，切分后再还原（保持 re.split 原始语义）。
+    实现：先把代码块/公式替换为占位符，切分后再还原（保持 re.split 原始语义）。
     """
     if not text:
         return []
@@ -3657,6 +3891,7 @@ def _split_by_marker_protecting_code(text: str, marker: str) -> List[str]:
         return f"\x00BLOCK{len(code_blocks) - 1}\x00"
 
     held = _CODE_BLOCK_RE.sub(_hold, text)
+    held = _LATEX_BLOCK_RE.sub(_hold, held)
     if marker == "\\c":
         raw = [s for s in re.split(r"\\+c", held) if s.strip()]
     else:
@@ -4385,7 +4620,11 @@ def api_chat():
         # 存档时去掉分段标记（默认 \c，配置可改；兼容单/多反斜杠 + c 的旧历史），
         # 并剥离所有情绪标签（内嵌多标签时 extract_emotion_call 只清掉第一个）
         if seg_marker == "\\c":
-            clean_answer_stored = strip_emotion_tags(re.sub(r"\\+c", "", clean_answer)).strip()
+            # 先保护 LaTeX 公式，再清 \c，避免公式里的 \cdot / \cancel 被误删
+            _CLEAN_HOLD.clear()
+            held_answer = _LATEX_BLOCK_RE.sub(_hold_for_clean, clean_answer)
+            held_answer = re.sub(r"\\+c", "", held_answer)
+            clean_answer_stored = strip_emotion_tags(_CODE_PH_RE.sub(lambda m: _CLEAN_HOLD[int(m.group(1))], held_answer)).strip()
         else:
             clean_answer_stored = strip_emotion_tags(clean_answer.replace(seg_marker, "")).strip()
 
