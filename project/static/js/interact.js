@@ -146,6 +146,11 @@
                     const v = this.dataset.view;
                     if (v === 'chat') return;
                     panelHandHide(v);
+                    // 全屏设置模式：关闭即返回首页（showMenu 会同时移除 app-settings-mode）
+                    const appEl = document.getElementById('app');
+                    if (v === 'settings' && appEl && appEl.classList.contains('app-settings-mode')) {
+                        showMenu();
+                    }
                 });
             });
 
@@ -242,6 +247,9 @@
             }
 
             function showMenu() {
+                // 退出全屏设置模式（从首页进入设置时加的 class）
+                const appEl = document.getElementById('app');
+                if (appEl) appEl.classList.remove('app-settings-mode');
                 if (menuScreen) menuScreen.classList.remove('hidden');
                 renderMenuLessons();
             }
@@ -381,7 +389,9 @@
                         history.forEach(msg => {
                             // 终端执行记录只作为 AI 上下文，不显示为聊天气泡
                             if (msg.content && String(msg.content).indexOf('[终端执行记录]') === 0) return;
-                            const bubble = addBubble(msg.content, msg.role === 'user' ? 'user' : 'teacher', { batch: true });
+                            // 历史渲染同样过 cleanSeg：旧存档可能残留 \c 分段符 / 标签 / 孤立围栏
+                            const text = msg.role === 'assistant' ? cleanSeg(msg.content) : msg.content;
+                            const bubble = addBubble(text, msg.role === 'user' ? 'user' : 'teacher', { batch: true });
                             frag.appendChild(bubble);
                             if (msg.role === 'assistant') teacherBubbles.push(bubble);
                         });
@@ -627,13 +637,22 @@
                 if (loadingText) loadingText.textContent = '⏳ 正在备课「' + topic + '」…';
                 if (loadingSub) {
                     loadingSub.innerHTML = files && files.length
-                        ? ('正在解析 ' + files.length + ' 个课程资料文件并由 AI 拆分为单元<br>约需 1-3 分钟，请稍候')
-                        : 'AI 正在生成课程大纲、知识点与随堂测验<br>约需 1-3 分钟，请稍候';
+                        ? ('正在解析 ' + files.length + ' 个课程资料文件并由 AI 拆分为单元<br>云端生成完整教案通常需要 2~5 分钟，请耐心等待')
+                        : 'AI 正在生成课程大纲、知识点与随堂测验<br>云端生成完整教案通常需要 2~5 分钟，请耐心等待';
                 }
                 if (loadingOverlay) loadingOverlay.classList.add('visible');
                 menuCreateBtn.disabled = true;
                 const originalText = menuCreateBtn.textContent;
                 menuCreateBtn.textContent = '备课中…';
+                // 每 60 秒更新一次等待提示，避免用户误以为卡死
+                var waitStart = Date.now();
+                var waitTimer = setInterval(function() {
+                    var subEl = document.getElementById('menu-loading-sub');
+                    var ovl = document.getElementById('menu-loading-overlay');
+                    if (!subEl || !ovl || !ovl.classList.contains('visible')) { clearInterval(waitTimer); return; }
+                    var mins = Math.floor((Date.now() - waitStart) / 60000);
+                    subEl.innerHTML = '仍在生成中，已等待 ' + mins + ' 分钟<br>云端完整教案通常需要 2~5 分钟，请继续等待';
+                }, 60000);
 
                 let fetchOptions;
                 if (files && files.length) {
@@ -652,11 +671,20 @@
                 fetch('/api/prepare_lesson', fetchOptions)
                 .then(r => r.json())
                 .then(data => {
+                    clearInterval(waitTimer);
                     var loadingOverlay = document.getElementById('menu-loading-overlay');
                     if (loadingOverlay) loadingOverlay.classList.remove('visible');
                     menuCreateBtn.disabled = false;
                     menuCreateBtn.textContent = originalText;
                     if (data.lesson_folder) {
+                        var meta = data.prepared_meta || {};
+                        if (meta.fallback) {
+                            // 备课服务不可用，当前展示的是基础模板，必须明确告知用户
+                            alert('⚠️ 备课服务不可用，已生成基础模板：' + (meta.reason || '未知原因') +
+                                  '。\n可先到「设置」中检查 API Key / 本地 Ollama 状态，再重新备课。');
+                        } else if (meta.warning) {
+                            alert('提示：' + meta.warning);
+                        }
                         _previewLessonFolder = data.lesson_folder;
                         _previewTopic = topic;
                         showPreviewOverlay();
@@ -666,6 +694,7 @@
                         renderMenuLessons();
                     }
                 }).catch(err => {
+                    clearInterval(waitTimer);
                     var loadingOverlay = document.getElementById('menu-loading-overlay');
                     if (loadingOverlay) loadingOverlay.classList.remove('visible');
                     menuCreateBtn.disabled = false;
@@ -675,9 +704,15 @@
                 });
             }
 
-            // 首页 → 设置
+            // 首页 → 设置：进入独立设置界面（保留立绘布局，右侧为设置面板，每次进入都刷新配置）
             menuSettingsBtn.addEventListener('click', function() {
                 hideMenu();
+                const appEl = document.getElementById('app');
+                if (appEl) appEl.classList.add('app-settings-mode');
+                // 每次进入都重新拉取最新配置，避免残留上次的编辑/旧课程上下文
+                if (typeof loadTeacherSettings === 'function') {
+                    try { loadTeacherSettings(); } catch (e) { console.warn('刷新设置失败:', e); }
+                }
                 switchView('settings');
             });
 
@@ -706,7 +741,9 @@
                         stack = i;
                     }
                 }
-                const marker = segmentMarker ? (segmentMarker.value || '\\c') : '\\c';
+                const rawMarker = segmentMarker ? (segmentMarker.value || '\\c') : '\\c';
+                // 容错：config/设置面板可能把分段符存成 \\c（两个反斜杠），规约为 \c 再使用
+                const marker = rawMarker.replace(/\\\\/g, '\\');
                 return lines.map((l, i) =>
                     (l.trim().startsWith('```') && !paired.has(i)) ? marker : l
                 ).join('\n');
@@ -797,7 +834,10 @@
                 let out = String(text);
                 // 先修复模型误写的 ```c 孤立围栏（还原为分段标记），再统一清理
                 out = repairCodeFences(out);
-                const marker = segmentMarker ? (segmentMarker.value || '\\c') : '\\c';
+                const rawMarker = segmentMarker ? (segmentMarker.value || '\\c') : '\\c';
+                // 容错：config/设置面板可能把分段符存成 \\c（两个反斜杠），规约为 \c 再判断，
+                // 否则会走 split 分支，对真实 \c 分毫不清
+                const marker = rawMarker.replace(/\\\\/g, '\\');
                 if (marker === '\\c') {
                     // 先保护 LaTeX 公式（$$...$$ / $...$ / \(...\) / \[...\]），
                     // 再清 \c 分段符，避免公式里的 \cdot / \cancel 被误删
@@ -842,19 +882,22 @@
 
             // 兜底扫描：部分小模型会直接在正文中输出 [TOOL:show_terminal{...}] 字面量，
             // 后端可能未提取到（regex 对含特殊字符的 JSON 不稳定）。这里从前端兜底再扫一次。
-            // 仅在 done 帧、且后端 tool_event 缺失时调用。
+            // 仅在 done 帧、且后端 tool_event 缺失时调用；扫描所有标记，避免漏掉终端。
             function _fallbackScanToolCall(content) {
                 if (!content) return;
                 try {
-                    var re = /\[TOOL:\s*(\{[\s\S]*?\})\s*\]/;
-                    var m = re.exec(content);
-                    if (!m) return;
-                    var obj = JSON.parse(m[1]);
+                    var re = /\[TOOL:\s*(\{[\s\S]*?\})\s*\]/g;
+                    var m;
                     var validTypes = ['show_terminal', 'show_image', 'show_board'];
-                    if (validTypes.indexOf(obj.type) === -1) return;
-                    console.log('[fallback] 扫描到工具调用:', obj);
-                    if (typeof window.handleAITool === 'function') {
-                        window.handleAITool(obj);
+                    while ((m = re.exec(content)) !== null) {
+                        try {
+                            var obj = JSON.parse(m[1]);
+                            if (validTypes.indexOf(obj.type) === -1) continue;
+                            console.log('[fallback] 扫描到工具调用:', obj);
+                            if (typeof window.handleAITool === 'function') {
+                                window.handleAITool(obj);
+                            }
+                        } catch (e2) { /* 单个标记解析失败，跳过 */ }
                     }
                 } catch (e) {
                     // 静默失败，不是所有正文都符合 JSON 格式
@@ -939,7 +982,9 @@
                 const extracted = extractLatex(cleaned);
                 const fixed = fixMarkdownPunct(extracted.text);
                 let html = marked.parse(fixed);
-                html = DOMPurify.sanitize(html);
+                // 禁用删除线/水平线标签：模型可能输出 <del>/<s>/<strike> 或 --- 渲染成 <hr>，
+                // 显示为"奇怪的中划线/横线"，一律清除（内容文字本身会保留在 DOM 里）
+                html = DOMPurify.sanitize(html, { FORBID_TAGS: ['del', 's', 'strike', 'hr'] });
                 return restoreLatex(html, extracted.blocks);
             }
 
@@ -960,7 +1005,10 @@
                 // 3) 配平单星号（斜体）：孤立 * 数量为奇数 → 删掉最后一个 *
                 const sg = (s.match(/(?<!\*)\*(?!\*)/g) || []).length;
                 if (sg % 2 === 1) { const i = s.lastIndexOf('*'); if (i !== -1) s = s.slice(0, i) + s.slice(i + 1); }
-                // 恢复代码块
+                // 4) 删除线 ~~x~~：去掉波浪线标记保留文字（4B 模型常把 ~~ 当强调用，
+                //    marked 会渲染成删除线——文字中间横线，非常奇怪）
+                s = s.replace(/~~([^~]+)~~/g, '$1');
+                // 5) 恢复代码块
                 s = s.replace(/\u0000([BI])(\d+)\u0000/g, (m, t, i) => blocks[+i] || m);
                 return s;
             }
@@ -1030,7 +1078,9 @@
                 addBubble(text || '📎 发送附件', 'user');
                 clearPendingAttachments();
 
-                // 重置 Galgame 对话条
+                // 重置 Galgame 对话条（并停止上一轮的语音）
+                if (typeof stopTeacherAudio === 'function') stopTeacherAudio();
+                _pendingWholeAudio = null;
                 dialogueSegments = [];
                 dialogueSegIdx = -1;
                 dialogueStreaming = true;
@@ -1190,8 +1240,15 @@
                                             setEmotion(data.emotion_stream);
                                             console.log('[emotion_stream]', data.emotion_stream);
                                         }
-                                        // AI 工具调用：收到终端/图片/黑板指令 → 执行
-                                        if (data.tool_event && typeof data.tool_event === 'object') {
+                                        // AI 工具调用：支持一次回复多个工具（黑板→终端→图片按序触发）
+                                        if (data.tool_events && Array.isArray(data.tool_events) && data.tool_events.length) {
+                                            data.tool_events.forEach(function(t) {
+                                                if (t && typeof t === 'object') {
+                                                    console.log('AI 工具调用:', t);
+                                                    handleAITool(t);
+                                                }
+                                            });
+                                        } else if (data.tool_event && typeof data.tool_event === 'object') {
                                             console.log('AI 工具调用:', data.tool_event);
                                             handleAITool(data.tool_event);
                                         }
@@ -1214,9 +1271,10 @@
                                                 window.setLive2DParams(data.params, 400, 2500);
                                             }
                                         }
-                                        // AI 联动：收到 TTS 音频 → 播放 + 口型同步
+                                        // AI 联动：收到 TTS 音频（done 帧）→ 暂存，由对话条"逐段朗读"驱动播放；
+                                        // 仅当对话条无有效分段（直接 done）时兜底播放整段
                                         if (data.audio_url && data.done) {
-                                            playTeacherAudio(data.audio_url);
+                                            _pendingWholeAudio = data.audio_url;
                                         }
                                         // 收到 done 帧 → 结束流式
                                         if (data.done) {
@@ -1498,7 +1556,56 @@
                 }
             }
 
-            // ---- Galgame 对话条：逐段打字机播放 ----
+            // ---- Galgame 对话条：逐段打字机播放（语音开启时改由"逐段朗读"驱动切换） ----
+            let _pendingWholeAudio = null;   // done 帧整段音频（无有效分段时兜底播放）
+
+            // 语音总开关（#voice-enabled checkbox；元素缺失时默认开启）
+            function _voiceOn() {
+                const el = document.getElementById('voice-enabled');
+                return !el ? true : el.checked;
+            }
+
+            // 朗读当前段并"随语音同步切换"：音频播完自动进入下一段；
+            // 无可读文本/TTS 未配置时保持现状（打字机 + 按 Enter 继续）
+            function _speakCurrentSegment() {
+                if (!_voiceOn()) return;
+                const seg = dialogueSegments[dialogueSegIdx];
+                if (!seg) return;
+                const reqSeg = dialogueSegIdx;
+                const text = stripToolMarkers(cleanSeg(seg)).slice(0, 500);
+                if (!text) return;
+                fetch('/api/tts/speak', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: text })
+                }).then(function(r) { return r.json(); }).then(function(data) {
+                    // 竞态保护：请求期间用户已切段/关闭对话条 → 丢弃过期音频
+                    if (reqSeg !== dialogueSegIdx || dialogueBar.style.display === 'none') {
+                        if (typeof stopTeacherAudio === 'function') stopTeacherAudio();
+                        return;
+                    }
+                    if (data.ok && data.audio_url) {
+                        playTeacherAudio(data.audio_url, function() {
+                            // 音频播完：对话条随语音同步切换——还有后续段自动进入下一段，最后一段标记已记录
+                            if (dialogueBar.style.display !== 'none') {
+                                if (dialogueSegIdx >= dialogueSegments.length - 1) {
+                                    dialogueIndicator.textContent = '✓ 已记录';
+                                    dialogueIndicator.classList.remove('hidden');
+                                } else {
+                                    advanceDialogue();
+                                }
+                            }
+                        });
+                    } else {
+                        // TTS 不可用（未配置/无可读文本）→ 恢复手动推进指示
+                        if (dialogueSegIdx < dialogueSegments.length - 1) {
+                            dialogueIndicator.textContent = '▼ 按 Enter 继续';
+                        }
+                        dialogueIndicator.classList.remove('hidden');
+                    }
+                }).catch(function() {});
+            }
+
             function startGalgamePlayback() {
                 // 过滤掉空洞（未推送到的段号）
                 const validSegments = dialogueSegments.filter(s => s && s.trim());
@@ -1510,6 +1617,11 @@
                     // 兜底：SSE 结束时没有收到任何分段（极少见）。
                     // 至少在对话条里告知用户，而不是立刻消失。
                     console.warn('[galgame] 无有效分段，保留对话条提示');
+                    // 没有分段可逐段朗读 → 兜底播放整段音频
+                    if (_pendingWholeAudio) {
+                        playTeacherAudio(_pendingWholeAudio);
+                        _pendingWholeAudio = null;
+                    }
                     dialogueContent.textContent = '（老师这一轮没有回复文字）';
                     dialogueContent.classList.remove('type-caret');
                     dialogueIndicator.textContent = '—';
@@ -1523,6 +1635,8 @@
             }
 
             function advanceDialogue() {
+                // 切换段前：停止上一段的语音
+                if (typeof stopTeacherAudio === 'function') stopTeacherAudio();
                 dialogueSegIdx++;
                 if (dialogueSegIdx >= dialogueSegments.length) {
                     // 全部播完：保持显示最后一句（永久保留，不响应关闭），指示器切换为「已记录」
@@ -1543,6 +1657,16 @@
             function typeDialogue(text) {
                 if (dialogueTypeTimer) clearInterval(dialogueTypeTimer);
                 dialogueContent.textContent = '';
+                dialogueContent.classList.remove('type-caret');
+                // 语音开启：直接显示整段（随语音播放同步切换），不逐字打字；由 _speakCurrentSegment 播放
+                if (_voiceOn()) {
+                    dialogueContent.textContent = stripMarkdownSyntax(stripCodeFenceMarks(text));
+                    dialogueContent.scrollTop = 0;
+                    dialogueIndicator.textContent = '🔊 朗读中';
+                    dialogueIndicator.classList.remove('hidden');
+                    _speakCurrentSegment();
+                    return;
+                }
                 dialogueContent.classList.add('type-caret');
                 dialogueIndicator.textContent = '▼';
                 dialogueIndicator.classList.add('hidden');
@@ -1606,6 +1730,8 @@
 
             function closeDialogue() {
                 console.log('[galgame] closeDialogue');
+                if (typeof stopTeacherAudio === 'function') stopTeacherAudio();
+                _pendingWholeAudio = null;
                 dialogueBar.style.display = 'none';
                 dialogueSegments = [];
                 dialogueSegIdx = -1;
@@ -1627,6 +1753,8 @@
             }, true);
 
             function advanceDialogueOrSkip() {
+                // 用户手动推进：先停止当前段语音（对话条随语音切换，跳过剩余朗读）
+                if (typeof stopTeacherAudio === 'function') stopTeacherAudio();
                 if (dialogueTypeTimer) {
                     clearInterval(dialogueTypeTimer);
                     dialogueTypeTimer = null;
@@ -1876,9 +2004,11 @@
                                             history.forEach(msg => {
                                                 // 终端执行记录只作为 AI 上下文，不显示为聊天气泡
                                                 if (msg.content && String(msg.content).indexOf('[终端执行记录]') === 0) return;
-                                                const bubble = addBubble(msg.content, msg.role === 'user' ? 'user' : 'teacher');
+                                                // 历史渲染同样过 cleanSeg：旧存档可能残留 \c 分段符 / 标签 / 孤立围栏
+                                                const text = msg.role === 'assistant' ? cleanSeg(msg.content) : msg.content;
+                                                const bubble = addBubble(text, msg.role === 'user' ? 'user' : 'teacher');
                                                 if (msg.role === 'assistant') {
-                                                    bubble.innerHTML = renderMarkdown(msg.content);
+                                                    bubble.innerHTML = renderMarkdown(text);
                                                 }
                                             });
                                         } else {
@@ -2121,6 +2251,13 @@
             }
 
             function hideBoard() {
+                // 立即终止打字机书写并清空内容层，避免关闭后内容还在后台逐字追加、或下一帧又拉起
+                try {
+                    _boardTypingCancel = true;
+                    _boardTypingActive = false;
+                    const contentLayer = document.getElementById('board-content-layer');
+                    if (contentLayer) contentLayer.innerHTML = '';
+                } catch (e) {}
                 boardOverlay.classList.remove('board-active');
                 boardOverlay.classList.add('board-closing');
                 setTimeout(function() {
@@ -2261,7 +2398,9 @@
                 }
             }
 
-            function modelReachPanel(direction) {
+            function modelReachPanel(direction, opts) {
+                opts = opts || {};
+                const noMove = !!opts.noMove;  // 打开终端等场景：不做蹲下/位移，只原地伸手
                 if (!live2dModel || !live2dApp) {
                     // 模型未就绪时退化为直接播放动作
                     const fallback = direction === 'down' ? 'think' : 'hello';
@@ -2276,22 +2415,26 @@
                 const baseS = live2dModel.scale.x;
                 return (async function() {
                     // 1) 蹲下：大幅下移（不缩放模型，保持自然体态），像探身去够屏幕外的东西
-                    await tweenModelTo(baseX, baseY + h * 0.20, baseS, 320);
+                    if (!noMove) {
+                        await tweenModelTo(baseX, baseY + h * 0.20, baseS, 320);
+                    }
                     // 2) 伸手：优先用参数直接驱动手臂（幅度大、不被动作覆盖）；参数不可用才回退 hello 动作
                     const reached = startArmReach();
                     if (!reached && typeof triggerAction === 'function') {
                         try { triggerAction('hello'); } catch (e) { console.warn('triggerAction 失败:', e); }
                     }
-                    console.log('[MODEL] %s 方向伸手（参数驱动=%s）', direction, reached);
-                    if (direction === 'down') {
+                    console.log('[MODEL] %s 方向伸手（参数驱动=%s noMove=%s）', direction, reached, noMove);
+                    if (direction === 'down' && !noMove) {
                         // 终端在下方：手再往下探，贴近屏幕底部边缘
                         await tweenModelTo(baseX, baseY + h * 0.26, baseS, 200);
                     }
-                    // 3) 伸手动画结束后稍微停顿：保持低位伸手姿态，让"手悬在窗口位置、窗口被拉出"的瞬间被看清
-                    await new Promise(function(r) { setTimeout(r, 700); });
+                    // 3) 伸手动画结束后稍微停顿：保持伸手姿态，让"手悬在窗口位置、窗口被拉出"的瞬间被看清
+                    await new Promise(function(r) { setTimeout(r, noMove ? 300 : 700); });
                     // 4) 收回手，跟随窗口一起站起来：恢复原位（窗口放大到 100% 的后半段同步）
                     stopArmReach();
-                    await tweenModelTo(baseX, baseY, baseS, 520);
+                    if (!noMove) {
+                        await tweenModelTo(baseX, baseY, baseS, 520);
+                    }
                 })();
             }
 
@@ -2555,11 +2698,11 @@
                     appendTerminal('交互式终端已就绪。直接在下方输入命令（Enter 运行），变量和状态会保留。', 'term-info');
                 }
 
-                // 1) 模型"蹲下→向下伸手→站起来"（窗口动画并行）
-                const p = modelReachPanel('down');
-                // 2) 等模型蹲下伸手到位（~400ms），终端从屏幕下方先缩小再升起放大
+                // 1) 模型原地伸手配合终端拉起（不下蹲、不位移，避免"模型沉下去"的观感）
+                const p = modelReachPanel('down', { noMove: true });
+                // 2) 等模型伸手到位（~400ms），终端从屏幕下方先缩小再升起放大
                 setTimeout(function() {
-                    // 窗口中心对准模型手部位置（此时模型已蹲下伸手）
+                    // 窗口中心对准模型手部位置（模型原地伸手，位置即原位手部区域）
                     alignTerminalToHand();
                     terminalOverlay.classList.remove('terminal-active', 'terminal-closing');
                     void terminalOverlay.offsetWidth;

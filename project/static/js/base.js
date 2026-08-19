@@ -20,6 +20,7 @@
 
             // 备课预览状态（提前声明，避免 TDZ；prepareAndEnter 会用到）
             let _previewPlan = null;      // 当前预览的 plan（可能已被编辑）
+            let _previewOriginalPlan = null; // 首次生成的原始 plan（用于对比出用户删除的课时）
             let _previewLessonFolder = null;
             let _previewTopic = null;
 
@@ -1169,6 +1170,15 @@
                 if (typeof core.setParamFloat === 'function') { core.setParamFloat(idx, value); return; }
             }
 
+            // 读取参数最大范围（不同模型 ParamMouthOpenY/JawOpen 范围不同；拿不到时默认 1）
+            function _paramMax(core, idx) {
+                if (!core || idx < 0) return 1;
+                if (typeof core.getParameterMaximumValue === 'function') {
+                    try { return core.getParameterMaximumValue(idx); } catch (e) { return 1; }
+                }
+                return 1;
+            }
+
             function _initParamIdxCache() {
                 if (_paramIdxCache.ok) return _paramIdxCache;
                 try {
@@ -1207,10 +1217,11 @@
                             let sum = 0;
                             for (let i = 0; i < data.length; i++) sum += data[i];
                             const avg = sum / data.length;
-                            // 音量 0-255 → 嘴巴开合 0-10
-                            const mouth = Math.min(10, (avg / 255) * 14);
-                            _setParamSafe(core, idx.jaw, mouth);
-                            _setParamSafe(core, idx.mouth, mouth);
+                            // 音量 0-255 → 归一化开度 0-1（×1.6 让中等音量即可明显张嘴）
+                            const open = Math.min(1, (avg / 255) * 1.6);
+                            // 按参数实际最大范围映射（不同模型 ParamMouthOpenY/JawOpen 范围不同，避免 clamp 跳变）
+                            _setParamSafe(core, idx.jaw, open * _paramMax(core, idx.jaw));
+                            _setParamSafe(core, idx.mouth, open * _paramMax(core, idx.mouth));
                         } catch (e) {
                             // 单帧出错不影响下一帧
                         }
@@ -1236,8 +1247,8 @@
                 }
             }
 
-            // 播放教师 TTS 音频（支持口型同步）
-            function playTeacherAudio(url) {
+            // 播放教师 TTS 音频（支持口型同步；onEnded 在自然播完或出错时触发一次）
+            function playTeacherAudio(url, onEnded) {
                 if (!url) return;
                 if (_currentAudio) {
                     _currentAudio.pause();
@@ -1248,15 +1259,32 @@
                 audio.play().catch(function(e) {
                     console.warn('TTS 播放失败:', e);
                 });
+                let endedFired = false;
+                const fireEnded = function() {
+                    if (endedFired) return;
+                    endedFired = true;
+                    if (typeof onEnded === 'function') onEnded();
+                };
                 audio.addEventListener('ended', function() {
                     stopLipSync();
                     _currentAudio = null;
+                    fireEnded();
                 });
                 audio.addEventListener('error', function() {
                     stopLipSync();
                     _currentAudio = null;
+                    fireEnded();
                 });
                 startLipSync(audio);
+            }
+
+            // 停止当前 TTS 音频（供对话条"跳过当前段语音"使用）
+            function stopTeacherAudio() {
+                if (_currentAudio) {
+                    _currentAudio.pause();
+                    _currentAudio = null;
+                }
+                stopLipSync();
             }
 
             // 应用 Live2D 位置/缩放设置到模型

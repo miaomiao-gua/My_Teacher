@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import zipfile
@@ -71,7 +72,17 @@ _SENSITIVE_KEYS = (
     "password", "passwd",
     "private_key",
 )
-_TOKEN_VALUE_RE = re.compile(r'(?i)\b(?:sk-|pk-|gho_|ghp_|github_pat_|xox[abp]-|AIza[0-9A-Za-z_\-]{20,})[A-Za-z0-9_\-]+')
+# 密钥/令牌值脱敏正则：
+# ① 常见前缀（sk-/pk-/gho_/github_pat_/xox*/AIza…）+ 后续任意字符（含 . / _ / -）
+# ② JWT（eyJ... 三段式）
+# ③ 通用长随机 token：≥40 位且同时含字母和数字（无前缀的 key / 哈希；不误伤纯英文单词）
+# 注意：脱敏宁多勿少——即使误伤普通长字符串，也只是日志显示，不泄露信息。
+_TOKEN_VALUE_RE = re.compile(
+    r'(?i)'
+    r'(?:\b(?:sk-|pk-|gho_|ghp_|github_pat_|xox[abp]-|AIza[0-9A-Za-z_\-]{20,})[A-Za-z0-9_\-\.]+)'
+    r'|(?:\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,})'
+    r'|(?:\b(?=[A-Za-z0-9_\-]*\d)(?=[A-Za-z0-9_\-]*[A-Za-z])[A-Za-z0-9_\-]{40,}\b)'
+)
 
 def _redact_body(raw: str) -> str:
     """对请求 body 字符串做敏感字段脱敏。原始 body 可能不是合法 JSON，做 best-effort。"""
@@ -241,6 +252,16 @@ def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def _now_display() -> str:
+    """人类可读的当前时间，注入系统提示词让模型感知"此刻"。
+
+    用「星期X」中文写法而非「周3」，避免 4B 小模型把数字序号误读成错误的星期。
+    """
+    weekday_names = "一二三四五六日"
+    wd = weekday_names[datetime.now().weekday()]
+    return datetime.now().strftime(f"%Y年%m月%d日 %H:%M（星期{wd}）")
+
+
 def default_progress() -> Dict[str, Any]:
     return {
         "last_access": "",
@@ -326,8 +347,8 @@ def default_config() -> Dict[str, Any]:
             "维度 ① 核心公式 / 核心知识点（≤ 3 个）：\n"
             "  units[].core_formulas[]，每个元素：\n"
             "    { \"name\": \"公式/概念名\",\n"
-            "      \"formula\": \"标准公式（如 s = vt；若为概念则写定义表达式）\",\n"
-            "      \"variables\": \"变量说明（如 s: 位移, v: 速度, t: 时间）\" }\n"
+            "      \"formula\": \"标准公式（如 S = a × b；若为概念则写定义表达式）\",\n"
+            "      \"variables\": \"变量说明（如 a: 长, b: 宽, S: 面积）\" }\n"
             "  没有公式的概念课可用概念定义代替 \"formula\" 字段。\n"
             "维度 ② 单元通关问题（2~3 个，覆盖概念辨析/公式应用/简单计算）：\n"
             "  units[].gateway_questions[]：字符串数组，将作为单元测验/课堂提问素材库。\n"
@@ -389,7 +410,7 @@ def default_config() -> Dict[str, Any]:
             "8. key_points（全局）至少 5 个核心概念；resources（全局）至少 3 个高质量学习资源链接。\n"
             "9. 若用户随主题提供了课程资料文档（Markdown），你必须基于该文档内容拆分单元、提炼 modules 的 concept/example，不要脱离文档凭空编造课程内容。\n"
             "10. 严禁在 JSON 中输出「思考过程」「分析」等元文本；只输出最终结构化教案。\n"
-            "11. 本课若有常见的易混淆概念对（如速度vs速率、位移vs路程、质量vs重量、功率vs动能等），必须填入 unit 的 contrasts 字段；本课没有易混淆概念时，contrasts 填空数组 []。\n"
+            "11. 本课若有常见的易混淆概念对（如变量vs常量、赋值vs比较、整除vs除法等），必须填入 unit 的 contrasts 字段；本课没有易混淆概念时，contrasts 填空数组 []。\n"
             "12. course_target 必须与各 unit 的 contribution_to_target 语义连贯：每个 unit 的贡献相加，应能支撑 course_target 的达成。\n"
         ),
         "default_topic": "",
@@ -430,6 +451,8 @@ def default_config() -> Dict[str, Any]:
 
 
 def load_config() -> Dict[str, Any]:
+    # 记录磁盘上实际存在的字段名（用于旧字段名迁移判断，见 _env_override）
+    disk_keys: set = set()
     if not CONFIG_PATH.exists():
         cfg = default_config()
     else:
@@ -440,9 +463,10 @@ def load_config() -> Dict[str, Any]:
         cfg = default_config()
         if isinstance(data, dict):
             cfg.update(data)
+            disk_keys = set(data.keys())
 
     # 环境变量覆盖（优先级高于 config.json）
-    _env_override(cfg)
+    _env_override(cfg, disk_keys)
     return cfg
 
 
@@ -465,7 +489,7 @@ _ENV_MAP: Dict[str, str] = {
 }
 
 
-def _env_override(cfg: Dict[str, Any]) -> None:
+def _env_override(cfg: Dict[str, Any], disk_keys: Optional[set] = None) -> None:
     """用环境变量覆盖配置字典中的对应字段（仅当环境变量非空时）。"""
     for env_key, cfg_key in _ENV_MAP.items():
         val = os.getenv(env_key, "").strip()
@@ -476,18 +500,23 @@ def _env_override(cfg: Dict[str, Any]) -> None:
             cfg[cfg_key] = val.lower() in ("true", "1", "yes")
         else:
             cfg[cfg_key] = val
-    # siliconflow_api_key 别名兼容旧配置
-    if not cfg.get("siliconflow_api_key"):
-        cfg["siliconflow_api_key"] = cfg.get("cloud_api_key", "")
-    if not cfg.get("cloud_api_key"):
-        cfg["cloud_api_key"] = cfg.get("siliconflow_api_key", "")
+    # siliconflow_api_key 别名兼容旧配置：
+    # 仅当磁盘上根本没有 cloud_api_key 字段（旧版 config.json 只有 siliconflow_api_key）时，
+    # 才从 siliconflow_api_key 迁移到 cloud_api_key（反之亦然）。
+    # 注意：不能用 "cfg.get(x) 为空" 判断 —— 用户显式把 key 清空成 "" 时，
+    # 该字段在磁盘上已存在，不应再从旧字段回填，否则用户永远无法真正清除 key。
+    if disk_keys is not None:
+        if "cloud_api_key" not in disk_keys and cfg.get("siliconflow_api_key"):
+            cfg["cloud_api_key"] = cfg["siliconflow_api_key"]
+        if "siliconflow_api_key" not in disk_keys and cfg.get("cloud_api_key"):
+            cfg["siliconflow_api_key"] = cfg["cloud_api_key"]
 
 
 def save_config(data: Dict[str, Any]) -> Dict[str, Any]:
     """合并保存配置：在现有配置基础上覆盖传入字段，不丢失已有配置。"""
     current = load_config()
     current.update(data or {})
-    CONFIG_PATH.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_json(CONFIG_PATH, current)
     return current
 
 
@@ -618,8 +647,7 @@ def save_conversation(lesson_folder: str, conversation: List[Dict[str, str]]) ->
     if not lesson_folder:
         return
     ensure_lesson_files(lesson_folder)
-    path = lesson_path(lesson_folder, "conversation.json")
-    path.write_text(json.dumps(conversation, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_json(lesson_path(lesson_folder, "conversation.json"), conversation)
 
 
 def load_progress(lesson_folder: str | None) -> Dict[str, Any]:
@@ -642,12 +670,28 @@ def load_progress(lesson_folder: str | None) -> Dict[str, Any]:
 def save_progress(lesson_folder: str, progress_data: Dict[str, Any]) -> Dict[str, Any]:
     if not lesson_folder:
         return default_progress()
-    ensure_lesson_files(lesson_folder)
-    merged = {**default_progress(), **load_progress(lesson_folder), **progress_data}
-    merged["last_access"] = now_iso()
-    path = lesson_path(lesson_folder, "progress.json")
-    path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    with _META_IO_LOCK:
+        ensure_lesson_files(lesson_folder)
+        merged = {**default_progress(), **load_progress(lesson_folder), **progress_data}
+        merged["last_access"] = now_iso()
+        _atomic_write_json(lesson_path(lesson_folder, "progress.json"), merged)
     return merged
+
+
+# ============================
+# 数据迁移 / 元数据读写的并发保护
+# ============================
+# Flask 默认多线程处理请求，load_lesson_metadata 会在读取时"读-改-写"迁移旧数据
+# （剥 unit 标题前缀 / 派生 syllabus.json），并发请求同时读写同一文件会互相覆盖。
+# 用进程级锁串行化"读-改-写"临界区，并用临时文件 + os.replace 原子落盘。
+_META_IO_LOCK = threading.Lock()
+
+
+def _atomic_write_json(path: Path, data: Any) -> None:
+    """原子写 JSON：先写临时文件再 os.replace，避免并发半写/覆盖。"""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def load_lesson_metadata(lesson_folder: str | None) -> Dict[str, Any]:
@@ -660,38 +704,42 @@ def load_lesson_metadata(lesson_folder: str | None) -> Dict[str, Any]:
     target = config_path if config_path.exists() else meta_path
     if not target.exists():
         return {}
-    try:
-        data = json.loads(target.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    # 读-改-写 全程加锁 + 原子落盘，防止并发请求互相覆盖。
+    with _META_IO_LOCK:
+        try:
+            data = json.loads(target.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        if not isinstance(data, dict):
+            return {}
 
-    # 数据迁移：剥掉 unit.title 里硬编码的「第N课：xxx」等序号前缀（AI / 用户手动留下），
-    # 否则 AI 会把「第 N 课」当作当前课序号，导致开场白与单元名错位。迁移完成后写回磁盘。
-    try:
-        units = data.get("units")
-        if isinstance(units, list):
-            changed = False
-            for u in units:
-                if isinstance(u, dict) and isinstance(u.get("title"), str):
-                    new_title = _strip_unit_prefix_for_metadata(u["title"])
-                    if new_title != u["title"]:
-                        u["title"] = new_title
-                        changed = True
-            if changed:
-                target.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as exc:
-        print(f"[lesson_meta] 迁移 units 标题前缀失败: {exc}", flush=True)
+        # 数据迁移：剥掉 unit.title 里硬编码的「第N课：xxx」等序号前缀（AI / 用户手动留下），
+        # 否则 AI 会把「第 N 课」当作当前课序号，导致开场白与单元名错位。迁移完成后写回磁盘。
+        try:
+            units = data.get("units")
+            if isinstance(units, list):
+                changed = False
+                for u in units:
+                    if isinstance(u, dict) and isinstance(u.get("title"), str):
+                        new_title = _strip_unit_prefix_for_metadata(u["title"])
+                        if new_title != u["title"]:
+                            u["title"] = new_title
+                            changed = True
+                if changed:
+                    _atomic_write_json(target, data)
+        except Exception as exc:
+            print(f"[lesson_meta] 迁移 units 标题前缀失败: {exc}", flush=True)
 
-    # 数据迁移：缺 syllabus.json 时，根据 units[].target/modules 自动派生一份。
-    # 旧课程只有 key_points 也能落出可用的"教案骨架"，保证阶段二讲课有材料可循。
-    try:
-        lesson_dir = LESSONS_DIR / lesson_folder
-        syllabus_path = lesson_dir / "syllabus.json"
-        if not syllabus_path.exists():
-            payload = _build_syllabus_payload(data, data.get("units") or [])
-            syllabus_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as exc:
-        print(f"[lesson_meta] 派生 syllabus.json 失败: {exc}", flush=True)
+        # 数据迁移：缺 syllabus.json 时，根据 units[].target/modules 自动派生一份。
+        # 旧课程只有 key_points 也能落出可用的"教案骨架"，保证阶段二讲课有材料可循。
+        try:
+            lesson_dir = LESSONS_DIR / lesson_folder
+            syllabus_path = lesson_dir / "syllabus.json"
+            if not syllabus_path.exists():
+                payload = _build_syllabus_payload(data, data.get("units") or [])
+                _atomic_write_json(syllabus_path, payload)
+        except Exception as exc:
+            print(f"[lesson_meta] 派生 syllabus.json 失败: {exc}", flush=True)
     return data if isinstance(data, dict) else {}
 
 
@@ -843,10 +891,17 @@ def _load_syllabus(lesson_folder: str | None) -> Dict[str, Any]:
 def _ai_tool_rules() -> List[str]:
     """AI 参数化工具（终端/图片/黑板）调用规则，注入系统提示词。"""
     return [
-        "- 需要展示代码/演示运行结果时，可在回复末尾输出工具标记 `[TOOL:{\"type\":\"show_terminal\",\"language\":\"python\",\"code\":\"print('Hello')\"}]` 弹出终端弹窗并自动执行该代码。支持语言：python / javascript / shell / powershell。执行结果（源代码+运行输出）会记录进对话，之后你可以基于实际输出继续讲解或纠错。若只想展示不执行，加 `\"noRun\":true`。",
+        "- 【数值计算必须用终端（强制）】凡是涉及数值计算/运算（公式代入求解、加减乘除、百分比、单位换算、成绩统计等），你必须在回复中输出 `[TOOL:{\"type\":\"show_terminal\",\"language\":\"python\",\"code\":\"<一行可运行的 python 代码，用 print 输出结果>\"}]` 来实际运行计算，严禁心算或估算。正文引用的每个数值必须与终端运行输出完全一致；若正文先写了数值而终端结果不同，以终端结果为准并修正正文。",
+        "- 【用户明确要求终端时必须用工具标记】当用户说「打开终端 / 把终端拉起来 / 开一下终端」等要求时，你【必须】在回复中输出 `[TOOL:{\"type\":\"show_terminal\",\"language\":\"python\",\"code\":\"<要演示或执行的 python 代码>\"}]` 来弹出终端；严禁只把代码写在 markdown 代码块（```python）里冒充「打开终端」——代码块只是排版，不会弹出终端窗口。若只是想让终端窗口出现、暂不运行代码，可输出 code 为空字符串的 show_terminal 工具。",
+        "- 终端代码示例：`[TOOL:{\"type\":\"show_terminal\",\"language\":\"python\",\"code\":\"a=8; b=3; print('a*b =', a*b)\"}]`；若只想展示不执行加 `\"noRun\":true`。支持语言：python / javascript / shell / powershell。执行结果会记录进对话，之后你可以基于实际输出继续讲解或纠错。",
+        "- 需要展示代码/演示运行结果（不一定是数值计算）时，同样用 `[TOOL:show_terminal]` 弹出终端并自动执行。",
+        "- 黑板与终端可以同时使用：先输出 `[TOOL:{\"type\":\"show_board\",\"content\":\"...\"}]` 写公式，再输出 `[TOOL:{\"type\":\"show_terminal\",\"language\":\"python\",\"code\":\"...\"}]` 运行计算；一个回复最多 2 个工具标记，每个标记各自独占一行。",
         "- 需要展示图片时，可在回复末尾输出 `[TOOL:{\"type\":\"show_image\",\"index\":1}]` 或 `[TOOL:{\"type\":\"show_image\",\"filename\":\"xxx.png\"}]` 弹出图片面板。index 为当前单元图片库序号（从 0 开始，省略则显示第一张）；filename 为图片文件名，会从当前单元图片中按文件名匹配（匹配不到则显示第一张）。",
-        "- 需要板书推导或画图时，可在回复末尾输出 `[TOOL:{\"type\":\"show_board\",\"content\":\"推导：\\\\n$$E=mc^2$$\\\\n{graph:y=x^2,x:-2..2}\"}]` 弹出黑板。content 支持：普通文本（打字机逐字显示）；`$$...$$` 数学公式（LaTeX）；`{graph:y=表达式,x:最小值..最大值}` 函数曲线；`{line:x1,y1-x2,y2}` 线段（坐标 0-100）。",
-        "- 工具标记必须整体独占一行且仅出现一次；`[TOOL:{...}]` 内部不要换行（换行用 \\n 表示）。",
+        "- 需要板书推导或画图时，可在回复末尾输出 `[TOOL:{\"type\":\"show_board\",\"content\":\"推导：\\\\n$$E=mc^2$$\\\\n{graph:y=x^2,x:-2..2}\"}]` 弹出黑板。content 支持：普通文本（打字机逐字显示）；`$$...$$` 数学公式（LaTeX，displayMode 自动居中）；`{graph:y=表达式,x:最小值..最大值}` 函数曲线；`{line:x1,y1-x2,y2}` 线段（坐标 0-100）。",
+        "- 【重要】板书中的所有数学公式、带下标/上标的变量、化学式或数学符号（如 `x_1`、`y_0`、`a_n`），**必须整体写在 `$$...$$` 之内**（如 `$$x = 3 \\times 2 = 6$$`），严禁拆成单字符一行一个（`x\\n =\\n 3`）！这是板书输出最常见的错误，会让公式无法渲染。普通中文/英文文本段落（标题、步骤说明、结论句）放在 `$$` 之外。",
+        "- 公式里需要换行/对齐时，用 `\\\\\\\\` 换行 + `&` 对齐，例如：$$ \\\\begin{aligned} a &= 3 + 2 \\\\\\\\ b &= a \\times 4 \\end{aligned} $$",
+        "- 【触发时机（从紧，禁止乱弹黑板）】只有在内容确实需要「板书书写」时才通过一次 `[TOOL:{\"type\":\"show_board\",\"content\":\"...\"}]` 弹出黑板——如公式推导、函数图像、几何示意图、需要画图演示的解题过程。纯文字讲解、知识点罗列、概念解释、口头总结、日常对话等【严禁】弹出黑板（学生会觉得莫名其妙）；一条回复最多输出 1 个 show_board 标记。",
+        "- 每个工具标记必须整体独占一行；`[TOOL:{...}]` 内部不要换行（换行用 \\n 表示），工具标记之间用空行或正文隔开。",
     ]
 
 
@@ -862,6 +917,7 @@ def _ai_action_rules() -> List[str]:
         "- 语义动作（按语境使用）：`[ACTION:nod]`（点头，同意/肯定学生）、`[ACTION:agree]`（赞许点头，表扬学生答对）、`[ACTION:shake]`（摇头，否定/纠正）、`[ACTION:tilt]`（歪头，疑惑/好奇）、`[ACTION:gasp]`（惊讶）、`[ACTION:cheer]`（雀跃，学生答对或值得庆祝时）、`[ACTION:sigh]`（叹气，遗憾/无奈）、`[ACTION:bow]`（鞠躬，开场问好/下课道别）。",
         "- 高级精确控制（仅在语义动作不够用时）：可输出 `[PARAM:ParamAngleX=-15 ParamAngleY=5]`（参数名=数值，空格分隔）直接调整头部/身体角度或五官（如 ParamAngleX/Y/Z 头部、ParamBodyAngleX/Y/Z 身体、ParamEyeLOpen 睁眼、ParamJawOpen 张嘴、ParamMouthSmile 微笑），数值会被安全钳制，且会自动恢复。优先使用上面列出的语义动作标记，避免滥用参数直调。",
         "- 动作标记不显示给学生，仅触发教师角色的动画。严禁在正文中用文字描述动作过程（如“我拿出黑板”“老师指向”“转过身”等），动作只能通过标记触发，正文只讲课程内容。",
+        "- 工具标记（终端/图片/黑板）触发后的内容**不要在正文中复述**：不要写“黑板上出现分步推导公式”“终端会执行以下代码”“图片显示了…”这类元描述。学生看到的只是工具标记→弹窗。",
     ]
 
 
@@ -893,19 +949,75 @@ def _ai_grounding_rules() -> List[str]:
     """
     return [
         "【事实锚定与防幻觉（最高优先级）】",
-        "- 公式核对规则（必须执行）：凡涉及公式、定理、定律或物理常数（如 v²=u²+2as、F=ma、g≈9.81 m/s²）时，必须先在本课教案的 modules[].concept 与 key_points 中检索出对应公式，逐项核对系数、变量与适用条件后再回答；教案中没有的公式，必须明确说「教案中没有这个公式，我不能确认」，严禁仅凭记忆写出公式、擅自补系数，或直接认可学生给出的公式。",
-        "- 概念辨析规则（必须执行）：当学生提出一个说法让你判断对错时，先核对定义——该说法中的每个术语是否用对（例如「平均速度=总路程/总时间」是把平均速度与平均速率混淆）。发现相似概念被混用时（速度vs速率、位移vs路程、质量vs重量、功率vs动能等），先分别给出两个概念的精确定义，再指出说法错在哪里，最后用一个反例说明二者的区别。绝不能在未核对定义的情况下直接附和学生的说法。",
+        "- 公式核对规则（必须执行）：凡涉及公式、定理、定律或常量（如勾股定理 a²+b²=c²、π≈3.14159、e≈2.71828）时，必须先在本课教案的 modules[].concept 与 key_points 中检索出对应公式，逐项核对系数、变量与适用条件后再回答；教案中没有的公式，必须明确说「教案中没有这个公式，我不能确认」，严禁仅凭记忆写出公式、擅自补系数，或直接认可学生给出的公式。",
+        "- 概念辨析规则（必须执行）：当学生提出一个说法让你判断对错时，先核对定义——该说法中的每个术语是否用对（例如把「质数」说成「所有奇数」，就是把质数与奇数混淆）。发现相似概念被混用时（变量vs常量、赋值vs比较、整数vs字符串、整除vs除法等），先分别给出两个概念的精确定义，再指出说法错在哪里，最后用一个反例说明二者的区别。绝不能在未核对定义的情况下直接附和学生的说法。",
         "- 所有讲解内容必须严格依据【本课教案】【本课详细资料】【全课程目录与要点总览】中的概念、公式、数据与示例，不得脱离资料自创或编造。",
         "- 资料中未包含的内容：若属于公认常识，可简短补充并说明这是常识；若无法确认，请直接说「这部分我手头资料没有，建议查证一下」，严禁编造公式、数据、人名、日期、参考文献或引文。",
         "- 严禁虚构出处（如「资料里提到」「书上说」「PPT 里写的」）；资料里没有就是没有。",
-        "- 术语定义必须严谨准确（例如：平均速度=位移/时间，平均速率=路程/时间；速度是矢量，速率是标量）。定义不确定时，用口语举例解释代替下定义，绝不给出错误定义。",
-        "- 凡是涉及数值计算（物理量求解、数学运算、成绩统计、比例换算、单位转换等），必须在回复末尾输出 `[TOOL:{\"type\":\"show_terminal\",\"language\":\"python\",\"code\":\"...\"}]` 用真实代码计算出结果后再给出结论，严禁心算或估算；回复中引用的具体数值必须与工具实际运行输出一致，不得修改。",
+        "- 术语定义必须严谨准确（例如：整除用 // 运算符、`10 / 4` 是除法得 2.5、`10 // 4` 是整除得 2）。定义不确定时，用口语举例解释代替下定义，绝不给出错误定义。",
+        "- 凡是涉及数值计算（公式代入求解、数学运算、成绩统计、比例换算、单位转换等），必须在回复末尾输出 `[TOOL:{\"type\":\"show_terminal\",\"language\":\"python\",\"code\":\"...\"}]` 用真实代码计算出结果后再给出结论，严禁心算或估算；回复中引用的具体数值必须与工具实际运行输出一致，不得修改。",
         "- 给出例题/数据时优先使用资料中的原始数据；确需自拟数据时，仅用于示意且数值必须合理自洽，并明确标注为示例。",
+        "- 演示代码必须可运行（必须执行）：给学生的示例代码（终端演示、代码块、show_terminal 的 code）必须先在心里完整跑通，确保语法正确、变量已定义、类型匹配、不会报错（如 `\"10\" + 5` 这类 str+int 会报 TypeError，必须写 `int(\"10\") + 5`）；除非教学意图就是「故意演示某类报错并让学生观察」，否则严禁给出会报错的示例代码。写完代码后自己逐行检查一遍变量名、引号、缩进是否一致。",
         "- 若学生在某个概念上反复出错，允许回看教案对应 module 的 concept/example 重新讲解，但讲解内容本身仍必须锚定教案与资料。",
     ]
 
 
-def build_system_prompt(lesson_folder: str | None) -> str:
+def _build_student_profile(lesson_folder: str, units: List[Dict[str, Any]], current_unit: int) -> str:
+    """跨章"蒸馏"：从本课程已完成的对话历史中提炼学生画像，注入系统提示词。
+
+    目的：进入下一章时模型不再"失忆"——延续一致的称呼、语气、节奏与教学默契，
+    让人格/教学风格跨单元不突变。提炼内容：
+    - 已学单元 → 当前单元；
+    - 对话轮数与答对/需重讲迹象统计；
+    - 最近几条有效互动摘录。
+    """
+    try:
+        conv = load_conversation(lesson_folder)
+    except Exception:
+        return ""
+    if not conv:
+        return ""
+    meaningful: List[str] = []
+    for m in conv:
+        if m.get("role") != "user":
+            continue
+        s = str(m.get("content") or "").strip()
+        # 过滤系统注入与终端执行记录等非真实学生发言
+        if not s or s.startswith("（") or s.startswith("[终端执行记录]") or s.startswith("["):
+            continue
+        meaningful.append(s)
+    if not meaningful:
+        return ""
+    total_turns = len(meaningful)
+    praises = mistakes = 0
+    for m in conv:
+        if m.get("role") != "assistant":
+            continue
+        c = str(m.get("content") or "")
+        if any(k in c for k in ("答对", "没错", "完全正确", "对的", "很好", "很棒", "掌握", "答得对")):
+            praises += 1
+        if any(k in c for k in ("不太对", "有点不太对", "不对哦", "错了", "再讲一遍", "重新讲", "纠正", "没太对")):
+            mistakes += 1
+    lines = ["【学生画像（跨章蒸馏记忆，用于保持教学连贯）】"]
+    if units and 0 <= current_unit < len(units):
+        learned = [str(u.get("title") or f"第{i + 1}课") for i, u in enumerate(units) if i < current_unit]
+        cur_title = str(units[current_unit].get("title") or f"第{current_unit + 1}课")
+        if learned:
+            lines.append(f"- 已学内容：{' → '.join(learned)}；现在进入「{cur_title}」。")
+        else:
+            lines.append(f"- 当前是本章第一课「{cur_title}」。")
+    lines.append(f"- 对话概况：本课程累计 {total_turns} 轮师生互动。")
+    if praises or mistakes:
+        lines.append(f"- 从历史看：学生答对/掌握迹象约 {praises} 次，理解偏差/需重讲迹象约 {mistakes} 次。")
+    recent = meaningful[-3:]
+    if recent:
+        lines.append("- 最近互动摘录：")
+        lines.extend(f"  - {u[:50]}" for u in recent)
+    lines.append("- 要求：延续之前一致的称呼、语气、节奏与教学默契；不要像第一次见面一样重新自我介绍或突然更换风格。")
+    return "\n".join(lines)
+
+
+def build_system_prompt(lesson_folder: str | None = None) -> str:
     metadata = load_lesson_metadata(lesson_folder)
     cfg = load_config()
     assistant_name = (
@@ -923,11 +1035,18 @@ def build_system_prompt(lesson_folder: str | None) -> str:
         f"【基本身份】\n"
         f"你的名字是：{assistant_name}。请你在对话中始终以「{assistant_name}」自居，"
         f"不要声称自己是其他品牌的 AI 助手或来自其他公司。\n\n"
+        f"【当前时间（内部参考，禁止主动提及）】\n"
+        f"当前真实时间是 {_now_display()}。\n"
+        f"规则：只有当学生主动询问时间、日期或星期时，你才照搬以上数字回答；"
+        f"其他任何情况下严禁主动提及时间或日期（尤其不要在开场白、欢迎语、讲解开头报时间）。\n\n"
         f"【角色设定】\n{personality}\n\n"
         f"【输出规范】\n"
         f"- 直接回答用户问题，不要输出思考过程、内心独白或复述用户需求"
         f"（禁止出现「首先，用户请求…」「我需要…」这类开场白）。\n"
         f"- 口语化、简洁、像真人老师面对面授课。\n"
+        f"- 【绝对禁止报时间】除非学生直接问「现在几点/今天几号/星期几」，否则你的任何回复（尤其开场白、欢迎语、讲解开头）都不得出现时间、日期、星期等字样，一次都不行。\n"
+        f"- 【Markdown 规范】只允许使用：标题(#)、列表(-/1.)、粗体(**x**)、代码块(```)和表格；"
+        f"严禁使用 ~~删除线~~ 语法和独立成行的 --- 水平线（会被渲染成奇怪的划线/横线）。\n"
     )
 
     if not lesson_folder:
@@ -1014,6 +1133,13 @@ def build_system_prompt(lesson_folder: str | None) -> str:
     course_overview = "\n".join(course_overview_lines)
 
     parts = [header, f"【课程背景】\n你正在教授课程「{topic}」，整体共 {total_units} 课。"]
+    # 跨章蒸馏记忆：从已完成对话提炼学生画像，保持人格/教学风格连贯（仅新课程结构注入）
+    try:
+        _profile = _build_student_profile(lesson_folder, units, current_unit)
+        if _profile:
+            parts.append(_profile)
+    except Exception:
+        pass
     parts.append(f"【全课程目录与要点总览】\n以下是本课程所有单元的结构与核心要点，请据此把握课程的整体脉络：\n{course_overview}")
     parts.append(
         f"【当前进度】\n现在上到第 {current_unit + 1} 课 / 共 {total_units} 课：{unit_title}。"
@@ -1122,6 +1248,10 @@ def build_system_prompt(lesson_folder: str | None) -> str:
             "【阶段二：讲课思考链（必须遵守）】\n"
             "  1)【对照教案】— 当前应推进到哪个 module？以本课教案为准，不要临时换内容主题。\n"
             "  2)【判断学生状态】— 学生在不在听？有没有说『懂』/『不懂』？沉默则主动问『刚才这个点，需要换种说法吗？』；答对则推进下一 module；答错则原地换一种方式再讲一遍同一个 module，不要跳。\n"
+            "  2.5)【学生消息意图判断（必须执行）】— 先判断学生这条消息是『回答你上一轮提出的问题』还是『向你提问』：\n"
+            "     - 是回答：立即判断对错。答对 → 明确表扬并继续推进；答错 → 必须先用一句话明确指出正确答案（如『带引号的\"2025-06\"是字符串，不是整数哦』），再只围绕学生答错的那一个点重讲，严禁跑去讲与错误点无关的其他概念。\n"
+            "     - 是提问：按正常提问流程回答。\n"
+            "     - 学生说『懂了/我会了/明白了/知道了』：不要使用『好像有点不太对哦，我换一种说法』这类犯错重讲句式，直接肯定并推进到下一模块。\n"
             "  3)【按模块执行】— 每个 module 内按 concept → example → anchor 顺序讲；讲完输出 modules[].interaction 给出的交互（『提问：…』『小测验：…』等）。\n"
             "  4)【动作执行】— 讲 module 时输出 modules[].action 对应的 Live2D 动作标记（如 [ACTION:bow] / [ACTION:point]），用动作辅助表达。\n"
             "  5)【决定下一步】— 当前 module 全部交互完成 → 进入下一个 module；所有 module 完成 → 总结 → 在回复末尾输出 `[TOOL:start_exam]` 触发测验。\n"
@@ -1202,12 +1332,24 @@ _CONTEXT_MSG_MAX = 2500           # 单条历史消息上限（字符），超�
 _CONTEXT_LAST_N = 10              # 最多保留的对话轮数
 
 
+def _timestamp_label(entry: Dict[str, Any]) -> str:
+    """从会话条目提取时间戳（2026-08-19T22:35:20+08:00 → 22:35）。
+
+    给喂给模型的历史消息补上时间线信息，让模型感知每轮对话发生在什么时候，
+    修复模型"读取时间"错误（不知道此刻/上一轮是几点）。
+    """
+    ts = entry.get("timestamp") or ""
+    m = re.search(r"\d{4}-\d{2}-\d{2}[T ](\d{2}:\d{2})", str(ts))
+    return m.group(1) if m else ""
+
+
 def _compact_history(history, budget=_CONTEXT_HISTORY_BUDGET, per_msg=_CONTEXT_MSG_MAX, last_n=_CONTEXT_LAST_N):
     """上下文压缩：避免对话历史撑爆模型上下文窗口。
 
     - 只保留最近 last_n 轮；
     - 单条消息超过 per_msg 字符时截断（保留开头，附压缩说明）；
     - 从最新往旧累积，总长超过 budget 后丢弃更旧消息（至少保留最新一条）。
+    - 每条消息前置补时间戳（如 [时间 22:35]），模型可感知对话时间线。
     系统提示词（含教案+资料）本身较大，本地小模型（如 qwen3:4b）上下文有限，
     此预算保证 messages 总量可控，避免超限导致的超时/截断/报错。
     """
@@ -1221,6 +1363,9 @@ def _compact_history(history, budget=_CONTEXT_HISTORY_BUDGET, per_msg=_CONTEXT_M
         if role not in {"user", "assistant"} or not content:
             continue
         content = str(content)
+        stamp = _timestamp_label(entry)
+        if stamp:
+            content = f"[时间 {stamp}] {content}"
         orig_len = len(content)
         if orig_len > per_msg:
             content = content[:per_msg] + f"\n（本条原文 {orig_len} 字过长，已压缩至 {per_msg} 字）"
@@ -1239,22 +1384,17 @@ def _build_chat_messages(
 
     提示词链路：
     1. messages[0] 必定是 role=system，内容来自 build_system_prompt（身份+角色+课程资料）
-    2. 附加最近 N 轮 user/assistant 对话历史（经 _compact_history 压缩，避免超上下文）
-    3. 末尾追加本次用户输入（去除重复，若最后一条 history 就是本次 prompt 则跳过）
+    2. 附加最近 N 轮 user/assistant 对话历史（经 _compact_history 压缩 + 补时间戳，避免超上下文）
+    3. 末尾追加本次用户输入（去除重复：若 history 最后一条就是本次 prompt 则跳过）
     """
     system_prompt = build_system_prompt(lesson_folder)
     messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
-    seen_last = False
-    if history:
-        for entry in _compact_history(history):
-            role = entry.get("role")
-            content = entry.get("content")
-            if role in {"user", "assistant"} and content:
-                messages.append({"role": role, "content": content})
-                if role == "user" and content == prompt:
-                    seen_last = True
-    if not seen_last:
-        messages.append({"role": "user", "content": prompt})
+    # 去重判断用原始 history（未加时间戳前缀），避免时间戳破坏 content 相等比较
+    if history and str(history[-1].get("content", "")).strip() == prompt:
+        history = history[:-1]
+    for entry in _compact_history(history):
+        messages.append({"role": entry.get("role"), "content": entry.get("content")})
+    messages.append({"role": "user", "content": prompt})
     return messages
 
 
@@ -1428,7 +1568,9 @@ def cloud_llm_reply(prompt: str, lesson_folder: str | None = None, history: List
             return ""
         model = (cfg.get("cloud_model") or cfg.get("siliconflow_model") or "deepseek-ai/DeepSeek-V3").strip()
         base_url = (cfg.get("cloud_base_url") or "https://api.siliconflow.cn/v1").rstrip("/")
-        enable_search = bool(cfg.get("enable_search", True))
+        # 对话链路用独立的 chat_enable_search（默认关），不复用备课的 enable_search——
+        # 联网搜索会显著拖慢对话响应（备课实测 240s+，对话 120s 超时导致"老师不回复"）
+        enable_search = bool(cfg.get("chat_enable_search", False))
 
     url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
     messages = _build_chat_messages(prompt, lesson_folder, history)
@@ -1875,9 +2017,84 @@ def api_config_get():
     return jsonify(load_config())
 
 
+# ============================
+# 配置校验：类型/范围/必填联动，返回中文错误提示
+# ============================
+# 数值字段范围约束（字段名 -> (最小值, 最大值, 中文名)）
+_NUMERIC_BOUNDS = {
+    "font_size": (12, 20, "全局正文字号"),
+    "sidebar_width": (25, 60, "聊天侧栏宽度"),
+    "portrait_pos_x": (0, 100, "立绘水平位置"),
+    "portrait_pos_y": (0, 100, "立绘垂直位置"),
+    "portrait_scale": (0.1, 0.8, "立绘缩放"),
+    "portrait_float_amplitude": (0, 40, "立绘浮动幅度"),
+    "ollama_num_ctx": (512, 131072, "上下文窗口"),
+    "ollama_temperature": (0, 2.0, "温度"),
+    "ollama_num_predict": (1, 100000, "最大生成长度"),
+    "segment_max_lines": (1, 30, "分段最大行数"),
+}
+# 布尔字段（前端可能传字符串，统一兜底）
+_BOOL_FIELDS = {
+    "enable_local_ollama", "auto_play_tts", "voice_enabled",
+    "tts_enabled", "tts_cloud_enabled", "vision_enabled",
+    "enable_search", "chat_enable_search", "segment_enabled",
+    "portrait_float_enabled",
+}
+
+
+def _validate_config_payload(payload: Dict[str, Any]) -> List[str]:
+    """校验配置提交，返回错误列表（空 = 校验通过）。不修改 payload。"""
+    errors: List[str] = []
+    if not isinstance(payload, dict):
+        return ["配置数据格式错误：应为 JSON 对象"]
+    p = payload
+
+    # 1) 数值字段：类型 + 范围
+    for key, (lo, hi, label) in _NUMERIC_BOUNDS.items():
+        if key not in p or p[key] is None or p[key] == "":
+            continue
+        try:
+            val = float(p[key])
+        except (TypeError, ValueError):
+            errors.append(f"{label}（{key}）必须是数字，当前为：{p[key]!r}")
+            continue
+        if val < lo or val > hi:
+            errors.append(f"{label}（{key}）超出范围 {lo} ~ {hi}，当前为：{p[key]!r}")
+
+    # 2) 布尔字段：宽容接受 true/false/1/0/字符串
+    for key in _BOOL_FIELDS:
+        if key not in p or p[key] is None:
+            continue
+        v = p[key]
+        if isinstance(v, str):
+            if v.strip().lower() in ("true", "1", "yes", "on"):
+                p[key] = True
+            elif v.strip().lower() in ("false", "0", "no", "off"):
+                p[key] = False
+            else:
+                errors.append(f"字段 {key} 应为 true/false，当前为：{v!r}")
+
+    # 3) 必填联动：只拦截"真的无法工作"的组合。
+    #    云端/对话/识图的 model 后端都有默认回退（如 deepseek-ai/DeepSeek-V3），
+    #    填了 Key 缺 Model 仍可正常使用，因此不阻断保存，避免误报。
+    if p.get("enable_local_ollama") and not str(p.get("ollama_model") or "").strip():
+        errors.append("已开启本地 Ollama，请填写本地模型名")
+    if p.get("tts_cloud_enabled") and not str(p.get("tts_cloud_base_url") or "").strip():
+        errors.append("已开启云端 TTS，请填写云端 TTS 接口地址")
+    if p.get("tts_provider") == "cloud" and not str(p.get("tts_cloud_base_url") or "").strip():
+        errors.append("TTS 提供方为云端，但未填写云端 TTS 接口地址")
+    return errors
+
+
 @app.route("/api/config", methods=["POST"])
 def api_config_set():
     payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"status": "error", "errors": ["配置数据格式错误：应为 JSON 对象"]}), 400
+    errors = _validate_config_payload(payload)
+    if errors:
+        # 校验失败不落盘，返回中文错误（前端自动保存时展示到状态条）
+        return jsonify({"status": "error", "errors": errors}), 400
     config = save_config(payload)
     return jsonify({"status": "ok", "config": config})
 
@@ -2452,6 +2669,45 @@ def api_reset_background():
 
 # ============== 自定义 Live2D 模型上传 ==============
 
+# 浏览器 WebGL 通用最大纹理尺寸（移动端 4096，桌面 8192）；
+# 取较小端做安全阈值，避免某些低端显卡加载失败。
+_LIVE2D_TEX_MAX_DIM = 4096
+
+def _downscale_oversized_textures(folder: Path) -> None:
+    """递归扫描模型目录，把 >4096px 的 PNG/JPG 缩放到 4096 边长，防止浏览器加载失败导致模型发黑。"""
+    try:
+        from PIL import Image
+        Image.MAX_IMAGE_PIXELS = None
+    except ImportError:
+        return  # 未安装 Pillow 跳过（不阻塞上传）
+    target = _LIVE2D_TEX_MAX_DIM
+    n_done = 0
+    for f in folder.rglob("*"):
+        if not f.is_file():
+            continue
+        ext = f.suffix.lower()
+        if ext not in (".png", ".jpg", ".jpeg"):
+            continue
+        try:
+            with Image.open(f) as img:
+                w, h = img.size
+            if max(w, h) <= target:
+                continue
+            with Image.open(f) as img:
+                mode = img.mode if img.mode in ("RGB", "RGBA") else ("RGBA" if ext == ".png" else "RGB")
+                if img.mode != mode:
+                    img = img.convert(mode)
+                img = img.resize((target, target), Image.LANCZOS)
+                save_kwargs = {"optimize": True}
+                if ext in (".jpg", ".jpeg"):
+                    save_kwargs["quality"] = 88
+                img.save(f, **save_kwargs)
+                n_done += 1
+        except Exception as e:
+            print(f"[upload_model] 纹理缩放跳过 {f.name}: {e}")
+    if n_done:
+        print(f"[upload_model] 已缩放 {n_done} 张超大纹理到 {target}px")
+
 @app.route("/api/upload_model", methods=["POST"])
 def api_upload_model():
     """上传自定义 Live2D 模型。
@@ -2512,6 +2768,8 @@ def api_upload_model():
                     with zf.open(m) as src, open(dest, "wb") as out:
                         out.write(src.read())
             zip_path.unlink(missing_ok=True)
+            # 大纹理（>4096）自动缩放到 4096：避免浏览器 WebGL max texture size 限制导致贴图加载失败 → 模型发黑
+            _downscale_oversized_textures(folder)
             rel_path = (model3_candidates or model2_candidates)[0].replace("\\", "/")
             model_url = f"/static/models/uploads/{folder.name}/{rel_path}"
         else:
@@ -2651,6 +2909,14 @@ def api_terminal_record():
         return jsonify(ok=False, error=str(exc))
 
 
+# REPL 垃圾/试探性输入：? 、\\n / \\c 字面量、>>> / ... REPL 提示符、help/exit/quit 等。
+# 用户终端卡死时常输入这类内容试探，不能让其继续污染 buffer。
+_TERM_JUNK_RE = re.compile(
+    r"^\s*(?:\?+|\\[a-z]+|>>>+|\.{3,}|help|h\?|quit|exit|q|cls|clear|reset)\s*$",
+    re.IGNORECASE,
+)
+
+
 class _PySessionRepl:
     """进程内 Python REPL 模拟：累积源码 → compile → exec，捕获 stdout/stderr。
 
@@ -2714,7 +2980,33 @@ class _PySessionRepl:
         return False
 
     def run(self, code: str):
-        """执行一条命令。返回 (output, continuation)。"""
+        """执行一条命令。返回 (output, continuation)。
+
+        内置三类防御，避免 REPL 因历史残留未闭合内容而"卡死"（后续命令全部被吞无输出）：
+        1) 空行：正在等续行时视为"结束未完成块"，清空缓冲并提示；
+        2) 垃圾输入（? / \\n / \\c 字面量 / REPL 提示符等）：正在等续行时先重置缓冲，恢复 REPL；
+        3) 卡死恢复：正在等续行、但新命令本身可独立编译通过 → 判定旧缓冲为卡死残留，丢弃后执行新命令。
+        """
+        stripped = code.strip()
+        # 1) 空行：结束未完成块（模拟 CPython 空 Enter 行为），避免块永远挂起
+        if not stripped:
+            if self.buffer.strip():
+                self.buffer = ""
+                return "（已结束上次未完成的输入）\n", False
+            return "", False
+        # 2) 垃圾/试探性输入：不污染缓冲；等续行时顺便恢复 REPL
+        if _TERM_JUNK_RE.match(stripped):
+            if self.buffer.strip():
+                self.buffer = ""
+                return "（已重置上次未完成的输入）\n", False
+            return "", False
+        # 3) 卡死恢复：等续行时若新命令是完整的独立语句，丢弃旧残留直接执行
+        if self.buffer.strip():
+            try:
+                compile(code, "<stdin>", "exec")
+                self.buffer = ""  # 旧残留作废
+            except SyntaxError:
+                pass  # 新命令本身也不完整 → 视为续行，继续累积
         self.buffer += code + "\n"
         if len(self.buffer) > 2000:
             # 防御：续行无限制累积（如字符串/括号一直不闭合）时自动恢复
@@ -2800,9 +3092,15 @@ class TerminalSession:
 
     def _read_node_prompt(self, timeout: int = 15):
         out, buf = "", ""
+        # 防御：node_proc 进程已退出（poll() != None）或 stdout 已被关闭 → 返回空
+        if self.node_proc is None or self.node_proc.poll() is not None or self.node_proc.stdout is None:
+            return out, ""
         start = time.time()
         while time.time() - start < timeout:
-            ch = self.node_proc.stdout.read(1)
+            try:
+                ch = self.node_proc.stdout.read(1)
+            except (ValueError, OSError):
+                break
             if not ch:
                 break
             out += ch
@@ -2825,9 +3123,18 @@ class TerminalSession:
             text=True, encoding="utf-8", errors="replace",
             bufsize=1, cwd=str(self.cwd), env=env,
         )
-        self._read_node_prompt()
+        # 先把 proc 挂到 self.node_proc，再读 prompt —— 否则上一轮已退出进程会留下 None stdout
         self.node_proc = proc
         self.node_in_cont = False
+        # Node REPL 启动后会先打印欢迎语 "Welcome to Node.js v..."，稍后会再打印提示符 "> "
+        self._read_node_prompt()
+        # 启动后等一拍，丢弃首批（欢迎语 + 首行提示符），让交互状态干净
+        try:
+            proc.stdin.write("\n")
+            proc.stdin.flush()
+            self._read_node_prompt()
+        except Exception:
+            pass
 
     def _run_node(self, cmd: str) -> str:
         if self.node_proc is None or self.node_proc.poll() is not None:
@@ -3244,6 +3551,10 @@ def api_prepare_lesson():
         cfg["tts_cloud_voice"] = payload["tts_cloud_voice"]
 
     lesson_plan = prepare_lesson(topic, config=cfg, document_markdown=doc_markdown)
+    # 备课来源元信息（是否兜底模板 / 降级说明），从教案中摘出单独返回
+    prep_meta = {}
+    if isinstance(lesson_plan, dict):
+        prep_meta = lesson_plan.pop("_meta", {}) or {}
     lesson_folder = build_lesson_folder_name(topic)
 
     # 预览模式：存入 ACTIVE_LESSON，用户确认后再写入磁盘
@@ -3263,7 +3574,7 @@ def api_prepare_lesson():
         payload.get("tts_cloud_voice") or cfg.get("tts_cloud_voice") or ""
     ).strip()
 
-    return jsonify({"lesson_folder": lesson_folder, "plan": lesson_plan})
+    return jsonify({"lesson_folder": lesson_folder, "plan": lesson_plan, "prepared_meta": prep_meta})
 
 
 @app.route("/api/apply_lesson", methods=["POST"])
@@ -3273,7 +3584,16 @@ def api_apply_lesson():
     edited_plan = payload.get("plan")   # 前端可能已编辑过 units/key_points 等
 
     preview_plan = ACTIVE_LESSON.get("preview_plan")
-    topic = ACTIVE_LESSON.get("preview_topic")
+    preview_topic = ACTIVE_LESSON.get("preview_topic")
+    # topic 多级回退：前端显式传值 > 预览主题 > 教案内 topic；
+    # 并防御"主题被写成了目录名"（YYYYMMDD_HHMMSS_xxx_xxxx 形态）的脏数据
+    plan_topic = ""
+    if isinstance(preview_plan, dict):
+        plan_topic = str(preview_plan.get("topic") or "").strip()
+    topic = str(payload.get("topic") or preview_topic or plan_topic or "").strip()
+    if not topic or re.match(r"^\d{8}_\d{6}_\S+_\w{4}$", topic):
+        topic = plan_topic or preview_topic or ""
+        topic = str(topic or "").strip()
 
     if not preview_plan or not topic:
         return jsonify({"error": "没有可应用的课程预览，请重新备课"}), 400
@@ -3406,6 +3726,46 @@ def _regen_doc_suffix() -> str:
     return "\n\n【用户上传的课程资料（摘要，前 3000 字）】\n" + doc[:3000]
 
 
+def _merge_regen_plan(edited_plan: dict, ai_plan: dict) -> dict:
+    """把 AI 修订结果合并回用户编辑后的 plan。
+
+    以用户编辑后的 plan 为骨架（课时数量、标题、摘要、要点绝对以用户为准），
+    只采纳 AI 补充的缺失字段（modules / core_formulas / contrasts 等），
+    确保即使 AI 不遵守"数量一致"要求，用户编辑也绝不丢失。
+    """
+    merged = json.loads(json.dumps(edited_plan, ensure_ascii=False))
+    if not isinstance(ai_plan, dict):
+        return merged
+    if ai_plan.get("topic"):
+        merged["topic"] = ai_plan["topic"]
+    if ai_plan.get("target"):
+        merged["target"] = ai_plan["target"]
+    if ai_plan.get("syllabus"):
+        merged["syllabus"] = ai_plan["syllabus"]
+    # 全局 key_points：保留用户的，追加 AI 新增的（去重）
+    user_kp = list(merged.get("key_points") or [])
+    ai_kp = list(ai_plan.get("key_points") or []) if isinstance(ai_plan.get("key_points"), list) else []
+    merged["key_points"] = user_kp + [kp for kp in ai_kp if kp not in user_kp]
+    if ai_plan.get("resources") and not merged.get("resources"):
+        merged["resources"] = ai_plan["resources"]
+    # 按标题匹配，用 AI 补齐用户 unit 缺失的字段；标题对不上时按索引位置回退
+    ai_units = [u for u in (ai_plan.get("units") or []) if isinstance(u, dict)]
+    ai_units_by_title = {str(u.get("title", "")).strip(): u for u in ai_units}
+    for i, u in enumerate(merged.get("units") or []):
+        if not isinstance(u, dict):
+            continue
+        au = ai_units_by_title.get(str(u.get("title", "")).strip())
+        if au is None and i < len(ai_units):
+            au = ai_units[i]  # 标题对不上时按位置回退（AI 应保持课时顺序）
+        if not au:
+            continue
+        for f in ("modules", "core_formulas", "contrasts", "gateway_questions",
+                  "contribution_to_target", "source_files"):
+            if au.get(f) and not u.get(f):
+                u[f] = au[f]
+    return merged
+
+
 @app.route("/api/regenerate_lesson", methods=["POST"])
 def api_regenerate_lesson():
     """重新备课：把用户编辑后的 plan 发给云端模型重新生成（保留编辑意图）。"""
@@ -3426,51 +3786,88 @@ def api_regenerate_lesson():
     model = (cfg.get("cloud_model") or cfg.get("siliconflow_model") or "deepseek-ai/DeepSeek-V3").strip()
     enable_search = bool(cfg.get("enable_search", True))
 
-    # 从前端传来的编辑后 plan 提取用户意图
+    # 从前端传来的编辑后 plan 提取用户编辑结果（完整保留用户的删除/标题/摘要/要点）
     edited_units = edited_plan.get("units", []) if isinstance(edited_plan, dict) else []
     edited_kp = (edited_plan.get("key_points") or []) if isinstance(edited_plan, dict) else []
 
-    # 构建参考摘要（帮助模型理解用户保留了哪些内容）
-    ref_parts = []
-    if edited_units:
-        ref_parts.append("【用户已编辑的课时标题】\n" + "\n".join(
-            f"- {u.get('title', '')}: {u.get('summary', '')[:60]}" for u in edited_units[:5]
-        ))
-    if edited_kp:
-        ref_parts.append("【用户已编辑的核心概念】\n" + ", ".join(edited_kp[:8]))
+    # 对比原始 plan，找出用户删除的课时（原始有、当前没有），明确告知 AI 不要重新生成
+    deleted_titles = []
+    original_plan = payload.get("original_plan")
+    if isinstance(original_plan, dict):
+        orig_units = original_plan.get("units") or []
+        current_titles = {str(u.get("title", "")).strip() for u in edited_units}
+        deleted_titles = [
+            str(u.get("title", "")).strip()
+            for u in orig_units
+            if str(u.get("title", "")).strip() and str(u.get("title", "")).strip() not in current_titles
+        ]
 
-    ref_text = "\n\n".join(ref_parts)
+    # 把用户已确认的教案精简为传给 AI 的骨架（保留用户可编辑字段 + 已有结构）
+    def _compact_plan_for_regen(plan: dict) -> dict:
+        compact = {
+            "topic": plan.get("topic", ""),
+            "target": plan.get("target", ""),
+            "key_points": plan.get("key_points") or [],
+            "units": [],
+        }
+        for u in plan.get("units") or []:
+            compact["units"].append({
+                "title": u.get("title", ""),
+                "target": u.get("target", ""),
+                "summary": u.get("summary", ""),
+                "key_points": u.get("key_points") or [],
+                "core_formulas": u.get("core_formulas") or [],
+                "contrasts": u.get("contrasts") or [],
+                "source_files": u.get("source_files") or [],
+            })
+        return compact
 
-    # 让云端模型基于用户编辑重新生成
+    compact_plan = _compact_plan_for_regen(edited_plan) if isinstance(edited_plan, dict) else {}
+    plan_json = json.dumps(compact_plan, ensure_ascii=False, indent=1)
+
+    # 让云端模型以用户教案为骨架完成修订（保留编辑意图，补齐缺失字段）
     regen_payload = {
         "model": model,
         "messages": [
             {
                 "role": "system",
                 "content": (
-                    "你是一位顶级学科专家与课程设计师。用户已对课程大纲做了修改，请根据他们的意图，"
-                    "重新生成完整教案。请严格以 JSON 格式返回：\n"
+                    "你是一位顶级学科专家与课程设计师。用户已对课程教案做了修改（删除/新增课时、"
+                    "改写标题、摘要、核心概念等），你的任务是【在用户已确认的教案基础上完成修订】，"
+                    "而不是推倒重来。请严格以 JSON 格式返回完整教案：\n"
                     "{\n"
                     '  "topic": "主题",\n'
-                    '  "syllabus": "整体章节大纲（Markdown）",\n'
+                    '  "target": "整体课程目标",\n'
+                    '  "syllabus": "整体章节大纲（Markdown，### 标记每课）",\n'
                     '  "key_points": ["全局核心概念1", ...],\n'
-                    '  "units": [{"title":"第1课标题","summary":"...","key_points":[...],"source_files":[...]}],\n'
+                    '  "units": [{"title":"第1课标题","target":"本课目标","summary":"...",'
+                    '"modules":[{"id":"m1","title":"...","concept":"...","example":"...","anchor":"...",'
+                    '"interaction":"...","action":"..."}],"key_points":[...],'
+                    '"core_formulas":[{"name":"...","formula":"...","note":"..."}],'
+                    '"contrasts":[{"a":"...","b":"...","difference":"..."}],'
+                    '"gateway_questions":["...","..."],"contribution_to_target":"...",'
+                    '"source_files":[{"title":"...","url":"...","type":"...","platform":"..."}]}],\n'
                     '  "resources": []\n'
                     "}\n"
-                    "要求：\n"
-                    "1. units 至少 12 课，最多 20 课，由浅入深。\n"
-                    "2. 每个 unit 的 key_points 至少 4 个，source_files 至少 1 个真实链接。\n"
-                    "3. syllabus 需包含全部课时的标题列表，使用 ### 标记。\n"
-                    "4. key_points（全局）至少 5 个，resources 至少 3 个高质量链接。"
+                    "硬性要求：\n"
+                    "1. 课时数量必须等于用户教案中的课时数量，不得凭空增删。\n"
+                    "2. 用户已填写的 title / summary / key_points / target 必须原样保留，"
+                    "只在此基础上扩充缺失字段（modules / core_formulas / contrasts / gateway_questions 等）。\n"
+                    "3. 用户明确删除的课时（见用户消息中的清单）绝对不要重新生成。\n"
+                    "4. 每个 unit 的 modules 3-6 个，每个含 concept/example/anchor/interaction/action；"
+                    "key_points 至少 3 个；source_files 尽量给真实链接（找不到真实链接不要编造）。\n"
+                    "5. 全局 key_points 至少 4 个；resources 至少 3 个高质量链接。"
                 ),
             },
             {
                 "role": "user",
                 "content": (
-                    f"请为【{topic}】重新设计教案。用户之前的编辑意图如下：\n"
-                    + (ref_text if ref_text else "(无额外编辑，按默认方式生成)")
+                    f"请为【{topic}】修订教案。这是用户当前已确认的教案"
+                    "（包含用户的删除、标题/摘要/核心概念修改）：\n"
+                    f"{plan_json}\n"
+                    + (("用户删除了以下课时，请勿重新生成：" + "、".join(deleted_titles) + "\n") if deleted_titles else "")
+                    + "请在保留上述全部内容的基础上补齐缺失字段，输出完整教案 JSON。"
                     + _regen_doc_suffix()
-                    + "\n\n请生成完整教案 JSON。"
                 ),
             },
         ],
@@ -3481,7 +3878,7 @@ def api_regenerate_lesson():
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     try:
-        resp = requests.post(url, headers=headers, json=regen_payload, timeout=180)
+        resp = requests.post(url, headers=headers, json=regen_payload, timeout=300)
         resp.raise_for_status()
         result = resp.json()
         content = result["choices"][0]["message"]["content"]
@@ -3489,13 +3886,13 @@ def api_regenerate_lesson():
         if text.startswith("```"):
             text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
             text = re.sub(r"\s*```$", "", text)
-        new_plan = json.loads(text.strip())
-        # 规范化 units
+        raw_plan = json.loads(text.strip())
+        # 合并兜底：以用户编辑后的 plan 为骨架，只采纳 AI 补充的缺失字段，保证用户编辑不丢失
+        new_plan = _merge_regen_plan(edited_plan, raw_plan) if isinstance(raw_plan, dict) else edited_plan
+        # 规范化 units（补齐模块骨架等字段）
         if isinstance(new_plan, dict):
-            raw_units = new_plan.get("units", [])
-            if isinstance(raw_units, list) and raw_units:
-                units = [_normalize_unit(u, i) for i, u in enumerate(raw_units)]
-                new_plan["units"] = units
+            units = [_normalize_unit(u, i) for i, u in enumerate(new_plan.get("units") or [])]
+            new_plan["units"] = units
     except Exception as e:
         print(f"[REGEN-ERROR] {e}", flush=True)
         return jsonify({"error": f"重新备课失败: {e}"}), 500
@@ -4138,8 +4535,13 @@ def _strip_tool_markers(text: str) -> str:
 
 
 def _tts_safe_text(text: str) -> str:
-    """朗读文本净化：剥离 [TOOL:...] / [ACTION:...] / [EMOTION:...] / [PARAM:...]
-    及中文括号变体，避免 TTS 把工具调用等内部标记读出来。"""
+    """朗读文本净化：TTS 只读自然语言（可见文本），过滤一切内部标记与 Markdown 语法。
+
+    - 剥离 [TOOL:...] / [ACTION:...] / [EMOTION:...] / [PARAM:...] 及中文括号变体
+    - 代码块整体不朗读（三个反引号 / 三个波浪线 / 三个双引号开头的围栏及其内容）
+    - 图片 / 链接标记：图片删除；链接保留文字删除 URL
+    - 加粗 / 斜体 / 删除线 / 行内反引号 / 标题 / 列表符号等标记删除，保留文字
+    """
     if not text:
         return text
     cleaned = _strip_tool_markers(text)
@@ -4147,8 +4549,336 @@ def _tts_safe_text(text: str) -> str:
     cleaned = _EMOTION_RE.sub("", cleaned)
     cleaned = _PARAM_RE.sub("", cleaned)
     cleaned = re.sub(r"【(ACTION|EMOTION|TOOL|PARAM):[^】]*】", "", cleaned)
+    # ── 分段标记（\c 等）清理：先保护 LaTeX 公式块，避免公式内 \cdot / \cancel 被误删 ──
+    _CLEAN_HOLD.clear()
+    held = _LATEX_BLOCK_RE.sub(_hold_for_clean, cleaned)
+    held = re.sub(r"\\+c", " ", held)
+    cleaned = _CODE_PH_RE.sub(lambda m: _CLEAN_HOLD[int(m.group(1))], held)
+    # ── Markdown 可见文本净化 ──
+    # 1) 代码块整体不朗读：成对围栏（```lang ... ``` / ~~~ ... ~~~ / """lang ... """）
+    cleaned = re.sub(r"```[a-zA-Z0-9_\-+]*\s*\n[\s\S]*?```", " ", cleaned)
+    cleaned = re.sub(r"~~~[a-zA-Z0-9_\-+]*\s*\n[\s\S]*?~~~", " ", cleaned)
+    cleaned = re.sub(r'"""[^\n]*\n[\s\S]*?"""', " ", cleaned)
+    # 2) 残留的单边围栏标记（模型常输出不配对围栏）
+    cleaned = re.sub(r"```[^\n]*", " ", cleaned)
+    cleaned = re.sub(r"~~~[^\n]*", " ", cleaned)
+    cleaned = re.sub(r'"""[^\n]*', " ", cleaned)
+    # 3) 图片整个删除；链接 [文字](url) 保留文字删 URL
+    cleaned = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", cleaned)
+    cleaned = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", cleaned)
+    # 4) 加粗 / 斜体 / 删除线标记删除，保留文字
+    cleaned = re.sub(r"\*\*([^*]+)\*\*", r"\1", cleaned)
+    cleaned = re.sub(r"__([^_]+)__", r"\1", cleaned)
+    cleaned = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", cleaned)
+    cleaned = re.sub(r"~~([^~]+)~~", r"\1", cleaned)
+    # 5) 行内反引号删除（保留内容）；残留散反引号清掉
+    cleaned = re.sub(r"`([^`\n]+)`", r"\1", cleaned)
+    cleaned = re.sub(r"`+", "", cleaned)
+    # 6) 标题标记 / 行首无序列表符号
+    cleaned = re.sub(r"(?m)^\s*#{1,6}\s*", "", cleaned)
+    cleaned = re.sub(r"(?m)^\s*[-*+]\s+", "", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
+
+
+# 板书意图兜底：模型正文写公式并说"黑板/板书"但没输出 [TOOL:show_board] 时，
+# 自动提取公式/推导行作为黑板内容（黑板上板书），正文保留叙述句。
+_BOARD_WORD_RE = re.compile(r"黑板|板书")
+
+
+def _clean_board_line(s: str) -> str:
+    """黑板行规范化：剥 markdown 粗体 `**`，混合行只保留公式，行内公式提升为块公式。
+
+    黑板渲染端只认 `$$...$$` 块公式，行内 `$...$` 与 `**` 会被逐字打出（如
+    `**$F_{avg} ...$**` 字面量）。此函数把行内公式提升为块、丢弃非公式叙述。
+    """
+    s = re.sub(r"\*\*", "", s)                      # 剥 ** 粗体标记
+    parts = re.findall(r"\$\$[\s\S]*?\$\$|\$[^$\n]+\$", s)  # 按序提取所有公式
+    if not parts:
+        return s
+    seen_p, out = set(), []
+    for p in parts:
+        if p.startswith("$$"):
+            b = p
+        else:
+            b = "$$ " + p[1:-1].strip() + " $$"      # 行内公式提升为块公式
+        if b not in seen_p:
+            seen_p.add(b)
+            out.append(b)
+    return "\n".join(out)
+
+
+def _auto_board_from_answer(text: str) -> tuple[str | None, str]:
+    """检测模型回复是否包含"想板书却没走工具"的意图。
+
+    Returns:
+        (board_content, cleaned_text)：检测到强板书意图时返回黑板内容与清洗后的正文；
+        否则返回 (None, 原文)。
+    """
+    if not text or not _BOARD_WORD_RE.search(text):
+        return None, text
+    formula_blocks = re.findall(r"\$\$[\s\S]*?\$\$", text)
+    formula_inlines = re.findall(r"\$[^$\n]+\$", text)
+    if len(formula_blocks) + len(formula_inlines) < 4:
+        return None, text
+    # 黑板内容 = 公式块行 + 纯公式独占行 + 等号推导行（去重保序）。
+    # 只取"整行都是公式/推导"的行，叙述句（含行内公式）不进黑板。
+    seen, board_lines = set(), []
+    for ln in text.split("\n"):
+        s = ln.strip()
+        if not s or s in seen:
+            continue
+        is_block = bool(re.search(r"\$\$[\s\S]*?\$\$", s))          # 含 $$ 块公式
+        is_pure_math = bool(re.match(r"^\$[^$].*\$$", s))           # 行首即以 $ 开头（行内公式独占行）
+        is_derivation = bool(re.match(r"^[A-Za-z_\\$Δαβγδθλ][\w\\.,\s$^{}()\[\]\-\+*/=]*=", s))  # 公式符号开头 + 等号推导
+        if is_block or is_pure_math or is_derivation:
+            seen.add(s)
+            board_lines.append(_clean_board_line(s))
+    board_lines = [l for l in board_lines if l]       # 规范化为空的行丢弃
+    if not board_lines:
+        return None, text
+    content = "\n".join(board_lines)
+    # 正文清洗：仅删除被提取的黑板行，保留叙述句（含行内公式）；全被提取时回退原文本
+    cleaned = "\n".join(l for l in text.split("\n") if l.strip() not in seen).strip()
+    if not cleaned:
+        cleaned = text.strip()
+    return content, cleaned
+
+
+# 终端意图兜底：本地小模型（如 qwen3.5:4b）经常不输出 [TOOL:show_terminal]，
+# 即使正文里已经写了数值计算。这里从正文保守提取纯数值表达式，
+# 自动合成 show_terminal 工具（黑板上写公式、终端算结果的链路）。
+# 提取不到安全表达式时返回 None，不打扰正常教学流程。
+_CALC_TRIGGER_RE = re.compile(r"计算|算出|结果|等于|是多少|得多少|换算|求一求|算一算|算出来")
+
+_TERM_EXTRACT_SYS = (
+    "你是数值表达式提取器。给定一段教学回复，如果其中包含数值计算，"
+    "把具体计算式用数字写成 Python 算术表达式（只支持数字 + - * / ** 和括号，负数加括号），"
+    "只输出这一个表达式本身，不要 print、不要解释、不要代码块、不要单位、不要变量名。"
+    "如果不包含任何数值计算，只输出 NONE。\n"
+    "示例：\n"
+    "回复：动量变化量 = 0.15 × (-30 - 40) = -10.5 kg·m/s\n"
+    "输出：0.15*(-30-40)\n"
+    "回复：用动量定理 FΔt = m(v_f - v_i) = 0.15 × (40-(-30)) 计算\n"
+    "输出：0.15*(40-(-30))\n"
+    "回复：这个公式推导先讲到这，我们下节课继续\n"
+    "输出：NONE"
+)
+
+
+def _llm_extract_calc_expr(text: str) -> str | None:
+    """二次小模型调用：正则提取不到数值表达式时，让模型吐出纯数值表达式。
+
+    结果仍需过 _safe_expr_eval 白名单校验，防止模型输出变量/函数/注入内容。
+    """
+    cfg = load_config()
+    base_url = (cfg.get("ollama_base_url") or "http://127.0.0.1:11434").rstrip("/")
+    model = (cfg.get("ollama_model") or "qwen2.5:7b").strip()
+    if not cfg.get("enable_local_ollama", True):
+        return None
+    try:
+        resp = requests.post(
+            f"{base_url}/api/chat",
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": _TERM_EXTRACT_SYS},
+                    {"role": "user", "content": "待提取回复：\n" + text[-1500:]},
+                ],
+                "stream": False,
+                "think": False,
+                "options": {"temperature": 0.1, "num_ctx": 4096, "num_predict": 60},
+            },
+            timeout=40,
+        )
+        if not resp.ok:
+            return None
+        content = (resp.json().get("message", {}).get("content") or "").strip()
+        content = content.strip("`").strip()
+        if not content or content.upper() == "NONE":
+            return None
+        return content
+    except Exception as exc:
+        print(f"[TERMINAL-AUTO] 二次提取失败: {exc}", flush=True)
+        return None
+
+
+def _has_binop(expr: str) -> bool:
+    """表达式是否含真正的算术运算符（防止二次提取返回孤立常数 -10.5）。"""
+    try:
+        tree = ast.parse(expr.replace("^", "**"), mode="eval")
+    except SyntaxError:
+        return False
+    return any(isinstance(n, ast.BinOp) for n in ast.walk(tree))
+
+
+def _safe_expr_eval(expr: str):
+    """仅允许纯数值四则/幂运算表达式；任何非法/危险内容返回 None。
+
+    通过 1) 字符白名单 2) AST 节点白名单（无变量/函数/属性）双重校验后再 eval，
+    杜绝表达式注入（模型/文本里混入 __import__ 之类）；
+    并限制长度与结果量级，防止 999999**999999 这类表达式拖垮终端。
+    """
+    expr = expr.strip()
+    if not expr or len(expr) > 80 or not re.fullmatch(r"[\d+\-*/^(). ]+", expr):
+        return None
+    py = expr.replace("^", "**")
+    try:
+        tree = ast.parse(py, mode="eval")
+    except SyntaxError:
+        return None
+    allowed = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant,
+               ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod,
+               ast.USub, ast.UAdd)
+    for node in ast.walk(tree):
+        if not isinstance(node, allowed):
+            return None
+    try:
+        val = eval(py, {"__builtins__": {}}, {})
+    except Exception:
+        return None
+    if not isinstance(val, (int, float)):
+        return None
+    try:
+        if val != val or abs(val) > 1e15:   # NaN 或量级过大 → 拒绝
+            return None
+    except Exception:
+        return None
+    return val
+
+
+def _value_in_answer(val, text: str) -> bool:
+    """提取的表达式计算结果是否与正文出现的某个数值一致（容差内）。
+
+    小模型提取表达式常拼错（如把 -10.5 当操作数），若结果与正文数值对不上，
+    说明提取有误，不应把错误结果展示给学生，直接跳过终端。
+    """
+    try:
+        fv = float(val)
+    except Exception:
+        return False
+    for n in re.findall(r"-?\d+(?:\.\d+)?", text):
+        try:
+            fn = float(n)
+        except Exception:
+            continue
+        if abs(fv - fn) <= 1e-6 * max(1.0, abs(fv)):
+            return True
+    return False
+
+
+_EXPR_ITEM = r"-?\d+(?:\.\d+)?"
+# 纯数值算术表达式：数字与运算符交替（支持括号、负数、× ÷ ^ − 等）。
+# 注意重复组内运算符前要允许右括号 `\)?`——"(-4.5) - (6)" 这类被括号包裹
+# 的负数若不支持右括号，匹配会在 -4.5 处被 `)` 阻断而失败（端到端实测复现）。
+_EXPR_RE = re.compile(
+    r"(?:\(?\s*)?" + _EXPR_ITEM + r"(?:\s*\)?\s*[×÷*/^+\-−]\s*\(?\s*" + _EXPR_ITEM + r"\s*\)?){1,}"
+)
+
+
+def _find_numeric_expr(held: str) -> str | None:
+    """找文本中最长的纯数值算术表达式（含 × ÷ ^ − 等），找不到返回 None。"""
+    best = None
+    for m in _EXPR_RE.finditer(held):
+        cand = m.group(0)
+        if best is None or len(cand) > len(best):
+            best = cand
+    if not best:
+        return None
+    expr = best.replace("−", "-").replace("×", "*").replace("÷", "/")
+    expr = expr.replace(" ", "").replace("^", "**")
+    if _safe_expr_eval(expr) is None:
+        return None
+    return expr
+
+
+def _latex_to_py_math(s: str) -> str:
+    """把常见 LaTeX 算术写法翻译为可解析的纯文本，便于提取数值表达式。
+
+    模型常把计算式整个写进 LaTeX 块（如 `\\begin{aligned} &= 0.15 \\times (-30) - (0.15 \\times 40) \\end{aligned}`），
+    这类"老师自己写出的计算式"按字面求值即为其本意，可安全提取。
+    """
+    s = re.sub(r"\\frac\{([^{}]*)\}\{([^{}]*)\}", r"(\1)/(\2)", s)
+    s = s.replace("\\times", "*").replace("\\cdot", "*").replace("\\div", "/")
+    s = s.replace("\\,", "").replace("\\!", "").replace("\\;", "")
+    s = s.replace("\\quad", " ").replace("\\qquad", " ").replace("\\ ", " ")
+    s = s.replace("\\Delta", "d").replace("\\delta", "d")   # 变量名，不参与表达式匹配
+    s = s.replace("\\(", " ").replace("\\)", " ").replace("\\[", " ").replace("\\]", " ")
+    s = re.sub(r"\\begin\{[^}]*\}|\\end\{[^}]*\}", " ", s)
+    # 兜底清掉所有残余反斜杠（LaTeX 换行符 \\ 会在上一步被 "\\ " 替换吃掉一半，
+    # 残留的单反斜杠不清理会阻断数值表达式提取）
+    s = re.sub(r"\\+", " ", s)
+    s = s.replace("&", " ").replace("{", " ").replace("}", " ")
+    return s
+
+
+def _auto_terminal_from_answer(text: str) -> str | None:
+    """若回复已含明确数值计算但无 show_terminal 工具，提取表达式生成 python print 代码。
+
+    Returns:
+        可执行的 python 代码（如 `print(0.15*(-30-40))`），提取不到则 None。
+    """
+    if not text or not re.search(r"\d", text):
+        return None
+    # 先保护 LaTeX，避免在公式内部误匹配（公式里的 × / - 不能当成计算表达式）
+    _CLEAN_HOLD.clear()
+    held = _LATEX_BLOCK_RE.sub(_hold_for_clean, text)
+    # 1) 快速路径A：正文有字面数值表达式（如 "0.15 × (-30-40)"）→ 直接生成终端。
+    #    不依赖"计算/结果"关键词——出现了字面计算式本身就值得弹终端算一下。
+    expr = _find_numeric_expr(held)
+    if expr:
+        return f"print({expr})"
+    # 2) 快速路径B：数值写在 LaTeX 块里（被保护遮蔽），把 LaTeX 算术翻译后再次提取。
+    #    这类是模型自己写出的计算式，按字面求值即为其本意，无需一致性闸门。
+    expr = _find_numeric_expr(_latex_to_py_math(text))
+    if expr:
+        print(f"[TERMINAL-AUTO] LaTeX 表达式提取: {expr}", flush=True)
+        return f"print({expr})"
+    # 3) 二次路径：正文有计算关键词且数值确实存在，但无字面表达式可提取时，
+    #    调用小模型提取纯数值表达式，再经一致性闸门校验（结果须与正文数值吻合）。
+    if not _CALC_TRIGGER_RE.search(held):
+        return None
+    _expr2 = _llm_extract_calc_expr(text)
+    if _expr2 and _has_binop(_expr2):
+        _val2 = _safe_expr_eval(_expr2)
+        # 一致性闸门：计算结果必须与正文中的某个数值吻合，否则认为提取有误，跳过终端
+        if _val2 is not None and _value_in_answer(_val2, text):
+            print(f"[TERMINAL-AUTO] 二次提取表达式: {_expr2} = {_val2}", flush=True)
+            return f"print({_expr2})"
+        print(f"[TERMINAL-AUTO] 二次提取结果与正文数值不符，跳过: {_expr2} = {_val2}", flush=True)
+    return None
+
+
+# 用户明确要求打开终端时的意图词（4B 模型对工具协议遵循度低，
+# 用户说"开终端"时模型常把代码写进 markdown 代码块冒充，需要后端兜底）
+_TERM_REQUEST_RE = re.compile(
+    r"开(?:一下|一)?终端|打开终端|拉(?:起|出)?终端|召唤终端|把终端|终端[打拉]|终端怎么"
+)
+
+
+def _extract_fence_blocks(text: str) -> list[tuple[str, str]]:
+    """提取回复中的 ```lang\\n...\\n``` 代码块，返回 [(lang, code), ...]。
+
+    lang 缺省或为空字符串时记为 'python'（终端默认语言）。
+    """
+    blocks = []
+    for m in re.finditer(r"```([a-zA-Z0-9_+-]*)[ \t]*\n(.*?)```", text, re.DOTALL):
+        code = m.group(2).strip("\n")
+        if code.strip():
+            blocks.append(((m.group(1).strip().lower() or "python"), code))
+    return blocks
+
+
+# markdown 代码块语言 → 终端支持语言映射
+_TERM_LANG_MAP = {
+    "bash": "shell", "sh": "shell", "shell": "shell", "powershell": "powershell",
+    "js": "javascript", "node": "javascript", "javascript": "javascript",
+    "py": "python", "python": "python",
+}
+
+
+def _map_term_lang(lang: str) -> str:
+    return _TERM_LANG_MAP.get(lang.lower(), "python")
 
 
 def extract_tool_call(text: str) -> tuple[str, str | dict | None]:
@@ -4190,6 +4920,45 @@ def extract_tool_call(text: str) -> tuple[str, str | dict | None]:
     # 去掉末尾因剥离留下的空行
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip() + ("\n" if cleaned.endswith("\n") else "")
     return cleaned.strip(), tool_event
+
+
+def extract_tool_events_all(text: str) -> tuple[str, list]:
+    """从回复中提取【所有】工具标记，一次性从正文全部剥离。
+
+    此前 extract_tool_call 只取第一个工具：模型同时输出黑板 + 终端（或图片）时，
+    终端/图片被丢弃并残留为正文字面量。本函数支持一次回复多个工具，
+    按模型输出顺序返回 [tool_event, ...]（dict 或旧格式字符串 start_exam/next_unit）。
+
+    Returns:
+        (clean_text, [tool_event, ...])
+    """
+    if not text:
+        return text, []
+    tools: list = []
+    for m in _TOOL_JSON_RE.finditer(text):
+        try:
+            obj = json.loads(m.group(1))
+            if isinstance(obj, dict) and obj.get("type") in _VALID_TOOL_TYPES:
+                tools.append(obj)
+        except (json.JSONDecodeError, ValueError):
+            continue  # 非法 JSON 标记后续统一剥离
+    if tools:
+        cleaned = _TOOL_JSON_RE.sub("", text)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip() + ("\n" if cleaned.endswith("\n") else "")
+        # 部分标记 JSON 不合法时（未进 tools），也兜底剥掉，避免残留字面量
+        if "[TOOL" in cleaned.upper():
+            cleaned = _strip_tool_markers(cleaned)
+        return cleaned.strip(), tools
+    # 旧格式：[TOOL:start_exam] / [TOOL:next_unit]
+    m = _TOOL_RE.search(text)
+    if m:
+        cleaned = _TOOL_RE.sub("", text, count=1)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).rstrip() + ("\n" if cleaned.endswith("\n") else "")
+        return cleaned.strip(), [m.group(1).lower()]
+    # 无新格式工具但残留 [TOOL:...]（模型输出残缺）：兜底剥离，不触发工具
+    if "[TOOL" in text.upper():
+        return _strip_tool_markers(text), []
+    return text.strip(), []
 
 
 # 动作调用标记正则：匹配 [ACTION:point] / [ACTION:blackboard] 等
@@ -4386,14 +5155,16 @@ def api_chat():
         return jsonify({"error": "No active lesson selected"}), 400
 
     ACTIVE_LESSON["folder"] = lesson_folder
-    course_context = load_course_context(lesson_folder)
 
     def generate():
+        # 本地 Ollama 与云端都失败时的兜底：改为明确的故障提示，
+        # 不再用"示例回复"占位文本（避免误导用户以为是模型思考/示例）。
         fallback_answer = (
-            f"我正在根据课程资料作答。\n\n"
-            f"用户问题：{message}\n\n"
-            f"课程背景：{course_context[:1800]}\n\n"
-            "这是一个本地示例回复，表示知识已注入，并且可以继续接入本地 Ollama。"
+            f"（抱歉，老师这次没能给出回答。你问的是：{message}\n\n"
+            "本地 Ollama 与云端模型都没有返回有效内容，请检查：\n"
+            "① 本地 Ollama 服务是否已启动（设置 → 模型 → 测试连接）\n"
+            "② 云端 API Key 是否配置正确\n"
+            "③ 当前选择的模型是否可用）"
         )
 
         history = load_conversation(lesson_folder)
@@ -4470,8 +5241,64 @@ def api_chat():
                 or fallback_answer
             )
 
-        # 解析工具调用标记：剥离后得到对外展示的纯文本；tool_event 推送给前端
-        clean_answer, tool_event = extract_tool_call(generated_answer)
+        # 解析工具调用标记：支持一次回复输出多个工具（黑板+终端+图片可同时出现）。
+        # 此前 extract_tool_call 只取第一个，模型同时输出 show_board+show_terminal 时
+        # 终端被丢弃并残留为字面量——这正是"不主动调用终端"的根因之一。
+        clean_answer, tool_events = extract_tool_events_all(generated_answer)
+        tool_event = tool_events[0] if tool_events else None
+
+        # 终端意图兜底：本地小模型不输出 show_terminal 但正文已做数值计算时，
+        # 从正文提取表达式自动合成终端工具（黑板上写公式 + 终端算结果的完整链路）。
+        # 必须在黑板兜底之前执行——黑板兜底会从正文删除公式行，可能把数值一并删掉。
+        _term_code = None
+        _term_lang = "python"
+        if not any(isinstance(t, dict) and t.get("type") == "show_terminal" for t in tool_events):
+            # 提取源 = 正文 + 模型已输出的黑板内容：
+            # 本地小模型常把数值计算全写在 [TOOL:show_board] 的 content 里（LaTeX 公式），
+            # 正文反而没有具体数值，仅从正文提取会漏掉终端（端到端实测复现）。
+            _term_source = clean_answer
+            _board_contents = [
+                t.get("content", "") for t in tool_events
+                if isinstance(t, dict) and t.get("type") == "show_board" and t.get("content")
+            ]
+            if _board_contents:
+                _term_source = clean_answer + "\n" + "\n".join(_board_contents)
+            _term_code = _auto_terminal_from_answer(_term_source)
+            if _term_code:
+                print(f"[TERMINAL-AUTO] 自动生成终端工具: {_term_code}", flush=True)
+
+        # 用户明确要求"打开终端"但模型仍没输出 show_terminal 时兜底：
+        # 4B 模型常把可执行代码写进 markdown 代码块（```python）冒充打开终端，
+        # 后端把这些代码块提取成 show_terminal 工具；回复没有代码块则打开空交互终端。
+        if _term_code is None and not any(isinstance(t, dict) and t.get("type") == "show_terminal" for t in tool_events):
+            if _TERM_REQUEST_RE.search(message):
+                _blocks = _extract_fence_blocks(clean_answer)
+                if _blocks:
+                    _lang, _code = _blocks[0]
+                    _term_code = _code
+                    _term_lang = _map_term_lang(_lang)
+                    print(f"[TERMINAL-AUTO] 用户要求终端+正文含代码块, 提取 lang={_lang}->{_term_lang} len={len(_code)}", flush=True)
+                else:
+                    _term_code = ""   # 空代码 → 仅打开交互终端
+                    _term_lang = "python"
+                    print("[TERMINAL-AUTO] 用户要求终端但回复无代码块, 打开交互终端", flush=True)
+
+        # 板书意图兜底：模型在正文写公式并说"黑板/板书"但没输出 [TOOL:show_board] 时，
+        # 自动提取公式/推导行生成黑板工具（黑板上板书，正文保留叙述句）
+        board_auto = False
+        if not any(isinstance(t, dict) and t.get("type") == "show_board" for t in tool_events):
+            _board_content, clean_answer = _auto_board_from_answer(clean_answer)
+            if _board_content:
+                tool_events.insert(0, {"type": "show_board", "content": _board_content})  # 黑板先弹
+                board_auto = True
+                print(f"[BOARD-AUTO] 自动生成黑板工具，content_len={len(_board_content)}", flush=True)
+
+        # 终端工具在黑板之后追加（顺序：黑板写公式 → 终端算结果）
+        # 注意：_term_code 可能为 ""（用户要求终端但无代码 → 只打开交互终端），也要追加
+        if _term_code is not None:
+            tool_events.append({"type": "show_terminal", "language": _term_lang, "code": _term_code})
+
+        tool_event = tool_events[0] if tool_events else None
 
         # 解析动作指令标记：剥离后推送 action 给前端触发 Live2D 动作
         clean_answer, live2d_action = extract_action_call(clean_answer)
@@ -4540,9 +5367,15 @@ def api_chat():
                 tool_event = None
 
         # 工具调用事件：不在聊天框显示 teacher 气泡，只通过 toast/自动切面板通知
-        # 模型的工具触发语（如"我们来测验一下"）不展示，避免刷屏
+        # 模型的工具触发语（如"我们来测验一下"）不展示，避免刷屏。
+        # 例外：黑板与终端工具保留正文——AI 边讲边算，聊天气泡仍显示讲解文字
+        # （终端也保留正文：本地小模型常在正文里写好讲解 + 工具标记，终端弹窗只是验证结果）。
         if tool_event:
-            clean_answer = ""
+            _clears_answer = isinstance(tool_event, str) or (
+                isinstance(tool_event, dict) and tool_event.get("type") == "show_image"
+            )
+            if _clears_answer:
+                clean_answer = ""
 
         # 中文无空格时按字符分块，英文按空格分块；据此决定拼接时是否补空格
         # 分段策略（优先级递减）：
@@ -4648,8 +5481,9 @@ def api_chat():
             done_payload["emotion"] = live2d_emotion
         if live2d_params:
             done_payload["params"] = live2d_params
-        if tool_event:
-            done_payload["tool_event"] = tool_event
+        if tool_events:
+            done_payload["tool_events"] = tool_events        # 全部工具（黑板→终端→图片按序触发）
+            done_payload["tool_event"] = tool_events[0]      # 兼容旧前端：第一个为主事件
             # 附带最新进度，便于前端刷新进度条
             done_payload["progress"] = load_progress(lesson_folder)
             done_payload["units"] = units
@@ -4777,17 +5611,29 @@ def api_exam_generate():
         }
         # 读取本课聊天记录，让题目基于真实对话内容动态生成
         chat_history = load_conversation(lesson_folder) if lesson_folder else []
-        lesson_provider = (cfg.get("lesson_provider") or "cloud").strip().lower()
-        ollama_config = {
-            "ollama_base_url": cfg.get("ollama_base_url", ""),
-            "ollama_model": cfg.get("ollama_model", ""),
-        }
-        if lesson_provider == "ollama":
-            generated = generate_quiz_with_ollama(
+        # 出题 provider 与备课 provider 解耦：
+        # ① 本地模型可用（配置了 base_url/model 且 enable_local_ollama=True）→ 优先本地
+        # ② 本地失败/不可用 → 云端模型高质量出题兜底（4B 本地模型常出"大纲归属"烂题）
+        # ③ 两者都失败 → 结构化 fallback 题库
+        from_path = (cfg.get("enable_local_ollama", True)
+                     and cfg.get("ollama_base_url", "").strip()
+                     and cfg.get("ollama_model", "").strip())
+
+        def _qualified(quiz: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            """归一化 + 过滤无意义题后仍能用的题目；不够格的不算出题成功。"""
+            return _normalize_quiz_questions(quiz)
+
+        generated: List[Dict[str, Any]] = []
+        if from_path:
+            ollama_config = {
+                "ollama_base_url": cfg.get("ollama_base_url", ""),
+                "ollama_model": cfg.get("ollama_model", ""),
+            }
+            generated = _qualified(generate_quiz_with_ollama(
                 unit_content, personality_prompt, ollama_config, chat_history
-            )
-        else:
-            # 本地禁用时回退到云端模型
+            ))
+        # 本地题不够格（空 / 全被"无意义题"过滤器拦截）→ 云端高质量兜底
+        if len(generated) < 3 and (cfg.get("cloud_api_key", "").strip() or cfg.get("siliconflow_api_key", "").strip()):
             cloud_config = {
                 "cloud_api_key": cfg.get("cloud_api_key", ""),
                 "cloud_api_base_url": cfg.get("cloud_base_url", ""),
@@ -4797,14 +5643,17 @@ def api_exam_generate():
                 "siliconflow_base_url": cfg.get("siliconflow_base_url", ""),
                 "siliconflow_model": cfg.get("siliconflow_model", ""),
             }
-            generated = generate_quiz_with_model(
+            generated = _qualified(generate_quiz_with_model(
                 unit_content, personality_prompt, cloud_config, chat_history
-            )
+            ))
+            if generated:
+                print(f"[quiz] 本地出题失败/质量不足，云端兜底成功: {len(generated)} 题", flush=True)
 
         if generated:
             questions = generated
-            # 缓存到 unit 的 quiz_preset
-            if lesson_folder:
+            # 仅当模型出题成功（>=3 题，避免兜底缓存回读）才写 quiz_preset；
+            # 否则下次请求会从缓存读到兜底题（空泛题）。
+            if lesson_folder and len(questions) >= 3:
                 all_units = metadata.get("units", [])
                 if 0 <= cur_idx < len(all_units):
                     all_units[cur_idx]["quiz_preset"] = questions
@@ -4826,6 +5675,11 @@ def api_exam_generate():
         questions = _fallback_quiz(cur_unit or {"title": topic})
 
     questions = _normalize_quiz_questions(questions)
+
+    # 4. 模型出的题若全被"无意义题"过滤器拦截（4B 偶发输出崩坏格式）→ 二次兜底到
+    #    本地结构化题库，绝不能让用户拿到空题单
+    if not questions:
+        questions = _normalize_quiz_questions(_fallback_quiz(cur_unit or {"title": topic}))
 
     # 题型兜底：4B 本地模型常漏出多选/判断/填空（实测只出 2 道单选），
     # 从本地题库补齐缺失题型，确保填空等题型可用。
@@ -4999,6 +5853,7 @@ def api_unit_welcome():
         "2. 然后系统性地讲解本课的基础知识点，覆盖关键要点，每个要点配一个简单例子\n"
         "3. 用 Markdown 结构化输出（标题、列表、粗体），口语化、亲切，像真人老师面对面授课\n"
         "4. 篇幅适中（约 300-500 字），不要过于冗长，不要输出任何工具调用标记\n"
+        "5. 开场白不要报时间/日期/星期，直接进入课程内容\n"
     )
 
     def generate():
@@ -5015,6 +5870,12 @@ def api_unit_welcome():
             )
         answer = (answer or "").strip()
         answer = _strip_thinking_lead(_strip_thinking_residue(answer))
+        # 清除分段符 \c（welcome 链路按空行分段，不消费 \c；先保护 LaTeX 再剥离，
+        # 避免 \c 泄漏到气泡和对话历史存档）
+        _CLEAN_HOLD.clear()
+        held_answer = _LATEX_BLOCK_RE.sub(_hold_for_clean, answer)
+        held_answer = re.sub(r"\\+c", "", held_answer)
+        answer = _CODE_PH_RE.sub(lambda m: _CLEAN_HOLD[int(m.group(1))], held_answer).strip()
         if not answer:
             answer = "这节课的基础知识我还没准备好，你可以直接问我任何问题，我来为你讲解。"
 
@@ -5106,4 +5967,6 @@ def api_switch_lesson():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # use_reloader=False：Windows 下 debug 自动重载器不稳定，改代码时进程会悄悄退出，
+    # 导致前端 "Failed to fetch"。改用显式重启：改完代码由开发侧重启服务。
+    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)

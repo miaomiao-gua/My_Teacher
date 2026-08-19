@@ -28,7 +28,13 @@
             window.handleAITool = handleAITool;
 
             // 黑板打字机渲染入口：模型"蹲下→向上伸手→站起来"后，黑板拉下并逐字书写内容
+            let _boardTypingActive = false;   // 黑板正在打字机书写
+            let _boardTypingCancel = false;   // 用户已关闭，要求终止书写
             async function showBoardWithContent(content) {
+                // 防重复弹出：黑板正在打字机书写时，忽略再次触发
+                // （模型在流式回复中偶发输出多个 show_board 标记 / SSE 重复帧，
+                //   反复拉起会让用户觉得"莫名其妙弹出"且"关不掉"）
+                if (_boardTypingActive) return;
                 // 隐藏其它面板避免重叠
                 hideImagePanel();
                 hideTerminal();
@@ -38,12 +44,18 @@
                 // 显示内容层，隐藏 canvas 图片层
                 boardOverlayCanvas.style.display = 'none';
                 contentLayer.style.display = 'block';
+                _boardTypingActive = true;
+                _boardTypingCancel = false;
                 // 1) 模型"蹲下→向上伸手→站起来"（窗口动画并行）
                 const p = modelReachPanel('up');
                 // 2) 等模型伸手到位（~400ms），黑板拉下 + 打字机开始书写
                 setTimeout(function() {
                     boardOverlay.style.display = 'flex';
                     void boardOverlay.offsetWidth;
+                    // 清掉上次拖拽残留的内联 transform/animation，让黑板每次从屏幕上方居中拉下
+                    boardOverlay.style.transition = '';
+                    boardOverlay.style.animation = '';
+                    boardOverlay.style.transform = '';
                     boardOverlay.classList.add('board-active');
                     typeBoardContent(content, contentLayer);
                 }, 400);
@@ -55,12 +67,56 @@
             }
             window.showBoardWithContent = showBoardWithContent;
 
+            // 板书自由拖拽：按住标题栏拖动整个黑板到任意位置。
+            // 注意：黑板的 left/top 被 CSS 用 !important 锁定为 50%/50%（居中模态），
+            // 内联 left/top 无法覆盖，因此拖拽必须改用 transform 偏移实现。
+            (function initBoardDrag() {
+                const overlay = document.getElementById('board-overlay');
+                const head = document.querySelector('#board-overlay .board-overlay-head');
+                if (!overlay || !head) return;
+                let dragging = false, startX = 0, startY = 0;
+                let dx = 0, dy = 0;   // 相对 CSS 锚点（视口中心）的累计偏移
+                function applyDrag() {
+                    overlay.style.transform = 'translate(calc(-50% + ' + dx + 'px), calc(-50% + ' + dy + 'px)) scale(1)';
+                }
+                head.addEventListener('mousedown', function(e) {
+                    if (e.target.closest('#board-overlay-close')) return;   // 点关闭按钮不拖拽
+                    dragging = true;
+                    startX = e.clientX;
+                    startY = e.clientY;
+                    // 先按当前视觉位置反推累计偏移，再随鼠标累加，保证拖拽起点不跳变
+                    const rect = overlay.getBoundingClientRect();
+                    dx = (rect.left + rect.width / 2) - window.innerWidth / 2;
+                    dy = (rect.top + rect.height / 2) - window.innerHeight / 2;
+                    overlay.style.transition = 'none';   // 拖拽期间禁用过渡
+                    overlay.style.animation = 'none';    // 停止"拉下/关闭"动画，改用 transform 定位
+                    applyDrag();
+                    e.preventDefault();
+                });
+                document.addEventListener('mousemove', function(e) {
+                    if (!dragging) return;
+                    dx += e.clientX - startX;
+                    dy += e.clientY - startY;
+                    startX = e.clientX;
+                    startY = e.clientY;
+                    applyDrag();
+                });
+                document.addEventListener('mouseup', function() {
+                    if (!dragging) return;
+                    dragging = false;
+                    // 不恢复 animation/transition：boardEmerge 早已播放完毕（forwards 保持），
+                    // 恢复会触发重播导致黑板弹回中心；保持内联 transform 即可停在拖拽位置。
+                });
+            })();
+
             // 打字机渲染黑板内容：普通文本逐字 + $$公式$$（KaTeX）+ {graph:y=..} 曲线 + {line:..} 线段
             async function typeBoardContent(content, layer) {
+                content = cleanBoardContent(content);
                 const tokens = tokenizeBoardContent(content);
                 let p = null;        // 当前文本段落
                 let caret = null;    // 打字光标
                 for (const t of tokens) {
+                    if (_boardTypingCancel) return;   // 用户已关闭黑板：立即终止书写
                     if (t.kind === 'char') {
                         if (t.ch === '\n') {
                             if (caret) { caret.remove(); caret = null; }
@@ -83,20 +139,39 @@
                         layer.scrollTop = layer.scrollHeight;
                     } else if (t.kind === 'latex') {
                         if (caret) { caret.remove(); caret = null; }
-                        p = null;
-                        const div = document.createElement('div');
-                        div.className = 'math-block';
-                        try {
-                            if (typeof katex !== 'undefined') {
-                                katex.render(t.value, div, { throwOnError: false, displayMode: true });
-                            } else {
+                        if (t.block) {
+                            // 块公式：独占一行居中（KaTeX display 模式）
+                            p = null;
+                            const div = document.createElement('div');
+                            div.className = 'math-block';
+                            try {
+                                if (typeof katex !== 'undefined') {
+                                    katex.render(t.value, div, { throwOnError: false, displayMode: true });
+                                } else {
+                                    div.textContent = t.value;
+                                }
+                            } catch (e) {
                                 div.textContent = t.value;
                             }
-                        } catch (e) {
-                            div.textContent = t.value;
+                            layer.appendChild(div);
+                            await _aiDelay(320);
+                        } else {
+                            // 行内公式：嵌入当前段落（KaTeX inline 模式），光标保留继续打字
+                            if (!p || p.classList.contains('math-block')) { p = document.createElement('p'); layer.appendChild(p); }
+                            const span = document.createElement('span');
+                            span.className = 'board-inline-math';
+                            try {
+                                if (typeof katex !== 'undefined') {
+                                    katex.render(t.value, span, { throwOnError: false, displayMode: false });
+                                } else {
+                                    span.textContent = t.value;
+                                }
+                            } catch (e) {
+                                span.textContent = t.value;
+                            }
+                            if (caret) { caret.before(span); } else { p.appendChild(span); }
+                            await _aiDelay(160);
                         }
-                        layer.appendChild(div);
-                        await _aiDelay(320);
                         layer.scrollTop = layer.scrollHeight;
                     } else if (t.kind === 'graph') {
                         if (caret) { caret.remove(); caret = null; }
@@ -115,6 +190,26 @@
                     }
                 }
                 if (caret) caret.remove();
+                _boardTypingActive = false;   // 书写完成，允许后续再触发
+            }
+
+            // 黑板内容清洗：保护 LaTeX 公式块后清除 \c 分段符（避免黑板上逐字打出 \c / 公式内 \cdot 被误删）
+            function cleanBoardContent(content) {
+                const held = [];
+                let s = String(content || '');
+                s = s.replace(/\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\$[^$\n]*\$|\\\([\s\S]*?\\\)/g,
+                    m => { held.push(m); return '\u0000L' + (held.length - 1) + '\u0000'; });
+                // 字面量 \n（模型 JSON 转义丢失，直接输出反斜杠+n）→ 真实换行；
+                // 换行前残留的反斜杠（\\n → \ 换行）一并清理
+                s = s.replace(/\\n/g, '\n');
+                s = s.replace(/\\\n/g, '\n');
+                s = s.replace(/\\+c/g, ' ');
+                s = s.replace(/\u0000L(\d+)\u0000/g, (m, i) => held[+i] || m);
+                // 剥 markdown 粗体标记 **（黑板不渲染 markdown，逐字打出会显示星号）
+                s = s.replace(/\*\*/g, '');
+                // 兜底：独立成行的裸 c（模型把 \c 转义丢失后的写法）
+                s = s.split('\n').map(l => /^\s*c\s*$/.test(l) ? '' : l).join('\n');
+                return s.trim();
             }
 
             // 解析黑板内容为 token 流：文本字符 / $$公式$$ / {graph:..} / {line:..}
@@ -123,12 +218,21 @@
                 const s = String(content || '');
                 let i = 0;
                 while (i < s.length) {
-                    // $$...$$ 公式
+                    // $$...$$ 公式（块）
                     if (s.startsWith('$$', i)) {
                         const end = s.indexOf('$$', i + 2);
                         if (end > i) {
-                            tokens.push({ kind: 'latex', value: s.slice(i + 2, end) });
+                            tokens.push({ kind: 'latex', value: s.slice(i + 2, end), block: true });
                             i = end + 2;
+                            continue;
+                        }
+                    }
+                    // $...$ 行内公式（嵌入段落文本中渲染，不再逐字打出 $ 号）
+                    if (s[i] === '$') {
+                        const end = s.indexOf('$', i + 1);
+                        if (end > i) {
+                            tokens.push({ kind: 'latex', value: s.slice(i + 1, end), block: false });
+                            i = end + 1;
                             continue;
                         }
                     }
@@ -749,8 +853,19 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
-                }).then(r => r.json())
-                    .then(() => {
+                }).then(function(resp) {
+                    return resp.json().then(function(data) {
+                        // 后端校验失败返回 400：展示中文错误，不落盘
+                        if (!resp.ok) {
+                            const msgs = (data && data.errors) || ['保存失败'];
+                            const joined = msgs.join('；');
+                            _setSettingsSaveStatus('保存失败：' + joined, 'err');
+                            if (showAlert) alert('设置未保存：' + joined);
+                            throw new Error(joined);
+                        }
+                        return data;
+                    });
+                }).then(() => {
                         if (emoMap && Object.keys(emoMap).length) {
                             _emotionExpressionMap = emoMap;
                             _userCustomizedEmotionMap = true;
@@ -760,9 +875,12 @@
                         _setSettingsSaveStatus('已保存 · ' + new Date().toLocaleTimeString('zh-CN', { hour12: false }), 'ok');
                     })
                     .catch(err => {
-                        console.error('[settings] auto save failed', err);
-                        _setSettingsSaveStatus('保存失败', 'err');
-                        if (showAlert) alert('保存失败: ' + err.message);
+                        // 校验失败的错误已在上面提示过，这里不重复弹窗；网络错误才提示
+                        if (err && err.message && err.message.indexOf('设置未保存：') !== 0) {
+                            console.error('[settings] auto save failed', err);
+                            _setSettingsSaveStatus('保存失败', 'err');
+                            if (showAlert) alert('保存失败: ' + err.message);
+                        }
                     });
             }
 
@@ -928,6 +1046,7 @@ if (saveSettingsBtn) saveSettingsBtn.addEventListener('click', function() {
                     s.alignItems = ''; s.justifyContent = ''; s.background = ''; s.opacity = ''; s.visibility = '';
                 }
                 _previewPlan = null;
+                _previewOriginalPlan = null;
                 _previewLessonFolder = null;
                 _previewTopic = null;
                 // 恢复 menu-screen
@@ -938,6 +1057,8 @@ if (saveSettingsBtn) saveSettingsBtn.addEventListener('click', function() {
             function renderPreview(plan) {
                 try {
                     _previewPlan = JSON.parse(JSON.stringify(plan));
+                    // 首次渲染时保存原始 plan，作为后续"重新生成"对比删除课时的基线
+                    if (!_previewOriginalPlan) _previewOriginalPlan = JSON.parse(JSON.stringify(plan));
                     if (previewTitle) previewTitle.textContent = plan.topic || '课程预览';
                     const units = plan.units || [];
                     if (previewMeta) previewMeta.textContent = '共 ' + units.length + ' 课';
@@ -1131,19 +1252,23 @@ if (saveSettingsBtn) saveSettingsBtn.addEventListener('click', function() {
                 if (e.target === previewOverlay) hidePreviewOverlay();
             });
 
-            // 重新生成
+            // 重新生成（把用户编辑后的 plan 和原始 plan 一起发给后端，让 AI 保留编辑意图）
             if (previewRegenBtn) previewRegenBtn.addEventListener('click', function() {
-                if (previewBody) previewBody.innerHTML = '<div class="preview-loading"><div class="spin"></div>AI 正在重新备课…</div>';
+                if (previewBody) previewBody.innerHTML = '<div class="preview-loading"><div class="spin"></div>AI 正在根据你的修改重新备课…</div>';
                 if (previewRegenBtn) previewRegenBtn.disabled = true;
                 fetch('/api/regenerate_lesson', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ plan: _previewPlan })
+                    body: JSON.stringify({
+                        plan: _previewPlan,
+                        original_plan: _previewOriginalPlan
+                    })
                 }).then(function(r) { return r.json(); })
                     .then(function(data) {
                         if (previewRegenBtn) previewRegenBtn.disabled = false;
                         if (data.error) { alert(data.error); return; }
                         _previewLessonFolder = data.lesson_folder;
+                        _previewOriginalPlan = null; // 新基线：以重新生成结果为新的"原始"
                         renderPreview(data.plan);
                     })
                     .catch(function(err) {
@@ -1159,7 +1284,7 @@ if (saveSettingsBtn) saveSettingsBtn.addEventListener('click', function() {
                 fetch('/api/apply_lesson', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ plan: _previewPlan })
+                    body: JSON.stringify({ plan: _previewPlan, topic: (_previewPlan && _previewPlan.topic) || (_previewTopic || '') })
                 }).then(function(r) { return r.json(); })
                     .then(function(data) {
                         if (previewConfirmBtn) previewConfirmBtn.disabled = false;
