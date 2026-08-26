@@ -32,6 +32,19 @@ cache/
 *.tmp
 *.swp
 *.swo
+logs/
+project/debug_logs/
+
+# ====== 大文件 / 下载产物 / 临时脚本 ======
+*.whl
+test*.png
+download_*.py
+_test_*.py
+check*.py
+seethrough*/
+project/py_deps/
+reference/
+project/_backup_config_*.json
 
 # ====== 外部工具（如果放在项目内） ======
 Textoon/

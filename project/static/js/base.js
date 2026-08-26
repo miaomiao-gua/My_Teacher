@@ -9,7 +9,8 @@
                 exam: document.getElementById('view-exam'),
                 resource: document.getElementById('view-resource'),
                 lesson: document.getElementById('view-lesson'),
-                settings: document.getElementById('view-settings')
+                settings: document.getElementById('view-settings'),
+                dashboard: document.getElementById('view-dashboard')
             };
 
             // 首页菜单
@@ -595,6 +596,88 @@
                 });
             }
             bindCustomActionsEvents();
+
+            // 学生画像模块用到的 HTML 转义（与 settings.js 同名函数一致，防御性定义）
+            function _escHtml(s) {
+                return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            }
+
+            // ============================
+            // 学生画像（设置面板 → 高级 tab）：查看已蒸馏画像 + 手动蒸馏
+            // ============================
+            function loadStudentProfileBox() {
+                const box = document.getElementById('student-profile-box');
+                if (!box) return;
+                // 优先使用当前课程的 folder；无课程时提示
+                const folder = (typeof currentLesson !== 'undefined' && currentLesson && currentLesson !== 'default') ? currentLesson : '';
+                box.innerHTML = '<div style="font-size:12px; color:var(--text-muted);">正在读取画像…</div>';
+                fetch('/api/profile' + (folder ? '?folder=' + encodeURIComponent(folder) : ''))
+                    .then(function(r) { return r.json(); })
+                    .then(function(data) {
+                        const profile = data.profile || {};
+                        const keys = Object.keys(profile);
+                        if (!folder) {
+                            box.innerHTML = '<div style="font-size:12px; color:var(--text-muted);">尚未进入课程，暂无画像。</div>';
+                            return;
+                        }
+                        if (!keys.length) {
+                            box.innerHTML = '<div style="font-size:12px; color:var(--text-muted);">' +
+                                '当前课程还没有画像。学完一课后进入下一课（或点击下方「立即蒸馏」），系统会自动提炼你的学习画像。</div>';
+                            return;
+                        }
+                        let html = '';
+                        keys.forEach(function(k) {
+                            let v = profile[k];
+                            if (Array.isArray(v)) v = v.filter(Boolean).join('、');
+                            if (!v) return;
+                            html += '<div style="font-size:12.5px; line-height:1.7; margin-bottom:4px;">' +
+                                '<strong style="color:var(--gold);">' + k + '：</strong>' + _escHtml(String(v)) + '</div>';
+                        });
+                        if (!html) {
+                            box.innerHTML = '<div style="font-size:12px; color:var(--text-muted);">画像内容为空。</div>';
+                            return;
+                        }
+                        const units = data.units || {};
+                        const unitCount = Object.keys(units).length;
+                        box.innerHTML = html +
+                            '<div style="font-size:11px; color:var(--text-dim); margin-top:6px; border-top:1px dashed var(--border-mid); padding-top:6px;">' +
+                            '已蒸馏 ' + unitCount + ' 个单元' + (data.updated_at ? ' · 更新于 ' + data.updated_at : '') + '</div>';
+                    })
+                    .catch(function(err) {
+                        box.innerHTML = '<div style="font-size:12px; color:var(--text-muted);">读取画像失败：' + _escHtml(err.message) + '</div>';
+                    });
+            }
+
+            function bindStudentProfileEvents() {
+                const btn = document.getElementById('profile-distill-btn');
+                const status = document.getElementById('profile-distill-status');
+                if (!btn) return;
+                btn.addEventListener('click', function() {
+                    const folder = (typeof currentLesson !== 'undefined' && currentLesson && currentLesson !== 'default') ? currentLesson : '';
+                    if (!folder) {
+                        if (status) status.textContent = '请先进入一门课程';
+                        return;
+                    }
+                    if (btn) btn.disabled = true;
+                    if (status) status.textContent = '老师正在回顾你的学习特点…';
+                    fetch('/api/profile/distill', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ folder: folder })
+                    }).then(function(r) { return r.json(); })
+                        .then(function(data) {
+                            if (btn) btn.disabled = false;
+                            if (status) status.textContent = data.success ? '✅ 画像已更新' : '⚠️ 对话太少，暂无法蒸馏';
+                            loadStudentProfileBox();
+                        })
+                        .catch(function(err) {
+                            if (btn) btn.disabled = false;
+                            if (status) status.textContent = '❌ ' + _escHtml(err.message);
+                        });
+                });
+            }
+            bindStudentProfileEvents();
+            window.loadStudentProfileBox = loadStudentProfileBox;
 
             // 点击命中区域 → 语义化动作（基于模型 .model3.json 的 HitAreas）
             // 模型实际 HitAreas: Head, Body, Legs, HandR, HandL
@@ -1580,10 +1663,16 @@
                 initLive2D();
             }
 
-            window.addEventListener('DOMContentLoaded', initLive2D);
-            if (document.readyState === 'interactive' || document.readyState === 'complete') {
-                setTimeout(initLive2D, 100);
-            }
+            // 首屏不立即创建 WebGL 上下文（Live2D 在首页菜单底下不可见）：
+            // 改为菜单关闭（进入课程/设置）时再初始化，避免首屏加载卡顿。
+            // initLive2D 有 live2dInitStarted 防重，hideMenu 多次调用只会真正执行一次。
+            window.initLive2D = initLive2D;
+            // 兜底：长时间未关闭菜单的异常场景，15s 后仍自动初始化
+            setTimeout(function() {
+                if (!live2dInitStarted) {
+                    try { initLive2D(); } catch (e) { console.warn('Live2D 兜底初始化失败:', e); }
+                }
+            }, 15000);
             // 加载 Live2D 模型表情/动作清单，用于情绪映射
             window.addEventListener('DOMContentLoaded', loadLive2DModelInfo);
             if (document.readyState === 'interactive' || document.readyState === 'complete') {

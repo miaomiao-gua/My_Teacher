@@ -6,3 +6,4 @@ markdown>=3.6
 ollama>=0.1.0
 sse-starlette>=2.0.0
 python-dotenv>=1.0.0
+flask-compress>=1.15.0
