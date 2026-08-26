@@ -1,175 +1,153 @@
-# My Teacher — AI 全能私教 v3.0
+My Teacher v4.o(是o不是0) — AI 自适应教学系统
+从“AI 教师应用”升级为“以学习者为中心的自适应教学系统”。
+基于 v3 的对话式 AI 私教，v4 新增了学生数字孪生、知识图谱、多 Agent 协作、教学策略引擎和学习评估闭环。
+—— AI 不是老师，AI 是驱动“教学操作系统”的引擎。
 
-> 一个基于 Flask 的 AI 学习辅导平台，支持本地 Ollama / 云端大模型对话、语音朗读（TTS）、按课程分章节教学、随堂测验、代码沙箱运行等功能。前端采用 Galgame 风格，内置 Live2D 虚拟老师「艾琳老师」，支持自定义模型上传。
+🎯 v4.0 核心升级
+维度	v3	v4
+核心逻辑	LLM-centric（对话驱动）	Learner-centric（学生模型驱动）
+学生记忆	当前对话 + 课程进度	持续更新的学生数字孪生
+知识表示	课程大纲（线性目录）	知识图谱（节点 + 依赖关系）
+教学策略	Prompt 驱动（“你是一位老师……”）	教学策略引擎（诊断 → 规划 → 自适应）
+Agent 架构	单一 AI	多 Agent 协作（Tutor / Planner / Diagnostician / Examiner / Evaluator / Coach）
+效果评估	测验分数	学习增益 + 学习效率 + ROI 闭环
+数据飞轮	无	诊断 → 教学 → 评估 → 学习 → 数据 → 诊断
+✨ 功能特性
+AI 学习引擎（核心）
+模块	说明
+Learner Digital Twin	为每个学习者建立持续更新的知识状态画像（掌握度、遗忘曲线、认知特征、学习行为、错题记忆）
+Knowledge Graph	知识点之间的前置依赖关系图谱，支持动态学习路径生成
+Pedagogical Engine	自适应教学策略引擎，根据学生状态决定“讲什么、怎么讲、要不要重讲”
+Learning Evaluation	学习增益计算（前测 → 后测）、学习效率、学习 ROI、学习曲线可视化
+Agent System	6 个协作 Agent：Tutor、Planner、Diagnostician、Examiner、Evaluator、Coach
+教学功能（继承 v3 并增强）
+功能	说明
+智能对话	本地 Ollama / 云端模型双通道，SSE 流式输出
+AI 备课	输入主题自动生成课程大纲、分课教学、知识点、测验题
+PDF 教材优化	只提取目录 + 按章节按需提取文本 + easyocr 扫描版 OCR 兜底
+随堂测验	单选 / 多选 / 判断 / 填空，自动批改，逐题作答
+代码运行	Python 代码沙箱安全执行
+语音朗读	edge-tts（本地）/ CosyVoice2（云端）
+Live2D 虚拟老师	内置「艾琳老师」，7 种表情 + 9 组动作，支持自定义模型上传
+Galgame 对话体验	分段输出、按 Enter 逐段展开、打字机效果
+V4 仪表盘	能力雷达图、学习进度曲线、增益分析、教学洞察、错题本
+视觉与体验
+Galgame 风格界面（全局主题跟随）
 
----
+全局主题跟随：6 套背景主题，界面颜色自动适配
 
-## ✨ 功能特性
+聊天侧栏宽度可拖拽调节
 
-| 功能 | 说明 |
-|------|------|
-| **智能对话** | 支持本地 Ollama 模型 + 云端模型（硅基流动 / DeepSeek / OpenAI 兼容 API）双通道，自动回退，SSE 流式输出 |
-| **可视化模型配置** | 设置面板内自由选择对话 / 备课 / TTS / 识图模型（云端 / 本地 Ollama），API Key 可视化填写，一键连通性测试 |
-| **聊天附件上传** | 对话中可上传图片与文本文件：图片自动走识图模型理解、文本文件自动注入上下文 |
-| **自定义提示词** | 老师人格提示词与备课（分课教案）提示词均可前端编辑，留空自动回退内置默认 |
-| **AI 备课系统** | 输入主题自动生成课程大纲、分课教学、知识点与预设测验题，可预览编辑后确认创建 |
-| **Galgame 对话体验** | 老师回复分段输出，按 Enter 逐段展开；对话条可实时控制口型同步 |
-| **Live2D 虚拟老师** | 内置「艾琳老师」模型（表情 7 种 / 动作 9 组），说话口型同步、眨眼、动作切换 |
-| **自定义模型上传** | 支持上传 zip 压缩包（自动识别 `model3.json` / `model.json`）或单文件，兼容 Cubism 2.1 / 3 / 4 / 5 |
-| **全局主题跟随** | 内置 6 套背景主题，全局界面（主界面 / 菜单 / 面板 / 元素）颜色风格自动跟随 |
-| **随堂测验** | 单选 / 多选 / 判断 / 填空，自动批改，支持逐题作答与错题讲解 |
-| **语音朗读** | 云端 CosyVoice2 / edge-tts TTS，回复后自动播放，可独立开关 |
-| **分课进度** | 顶部进度条显示当前课时，达标后自动进入下一单元 |
-| **代码运行** | 对话中可直接运行 Python 代码（沙箱安全执行） |
-| **板书与资源** | 支持上传课程板书图片、单元图片与课程资源，按单元管理 |
-| **视觉定制** | 教师头像上传、Live2D 位置 / 缩放 / 漂浮动画调节、背景主题独立设置 |
-| **聊天侧栏** | 右侧聊天记录宽度可拖拽调节，或通过设置面板滑条调整 |
-| **键盘操作** | ESC 关闭弹窗 / 返回菜单 / 跳过分段 |
+键盘操作：ESC 关闭弹窗 / 返回菜单 / 跳过分段
 
----
-
-## 🚀 快速开始
-
-### 1. 克隆项目（v3 分支）
-
-```bash
-git clone -b v3 https://github.com/miaomiao-gua/My_Teacher.git
+🧠 V4 架构设计
+text
+┌─────────────────────────────────────────────────────────────────┐
+│                      Presentation Layer                         │
+│             Live2D / TTS / Galgame UI / Dashboard              │
+├─────────────────────────────────────────────────────────────────┤
+│                       Agent System (6 Agents)                   │
+│  Tutor │ Planner │ Diagnostician │ Examiner │ Evaluator │ Coach│
+├─────────────────────────────────────────────────────────────────┤
+│                     Pedagogical Engine                          │
+│        Diagnosis │ Planning │ Adaptation │ Learning Path       │
+├─────────────────────────────────────────────────────────────────┤
+│                       Knowledge Graph                           │
+│         Nodes │ Edges │ Prerequisites │ Skills                │
+├─────────────────────────────────────────────────────────────────┤
+│                      Learner Digital Twin                       │
+│   Knowledge State │ Cognitive Features │ Learning Behavior    │
+│   Error Memory │ Assessment History │ Goals                   │
+├─────────────────────────────────────────────────────────────────┤
+│                         Data Layer                             │
+│              JSON / SQLite / Redis / Vector DB                 │
+└─────────────────────────────────────────────────────────────────┘
+📁 项目结构
+text
+project/
+├── app.py                      # Flask 主程序（含 v4 API 路由）
+├── lesson_prep.py              # 备课逻辑（含知识图谱生成）
+├── code_executor.py            # 代码沙箱安全执行
+├── file_utils.py               # 文件 / 课程目录工具
+├── learner_model.py            # 🆕 学生数字孪生
+├── knowledge_graph.py          # 🆕 知识图谱
+├── pedagogical_engine.py       # 🆕 教学策略引擎
+├── learning_evaluation.py      # 🆕 学习评估闭环
+├── agents/                     # 🆕 多 Agent 系统
+│   ├── base_agent.py
+│   ├── tutor_agent.py
+│   ├── planner_agent.py
+│   ├── diagnostician_agent.py
+│   ├── examiner_agent.py
+│   ├── evaluator_agent.py
+│   └── coach_agent.py
+├── static/
+│   ├── css/style.css           # 全局样式（含仪表盘）
+│   ├── js/app.js               # 前端逻辑（含仪表盘交互）
+│   └── models/                 # Live2D 模型
+├── templates/
+│   └── index.html              # 单页应用（含仪表盘视图）
+└── lessons/                    # 课程数据（不入库）
+    ├── {course_id}/
+    │   ├── syllabus.json       # 课程大纲
+    │   ├── knowledge_graph.json # 🆕 知识图谱
+    │   └── ...
+    └── learners/               # 🆕 学生档案（不入库）
+        └── learner_{id}.json
+🚀 快速开始
+1. 克隆项目
+bash
+git clone -b v4.o https://github.com/miaomiao-gua/My_Teacher.git
 cd My_Teacher
-```
-
-### 2. 安装依赖（Python ≥ 3.10）
-
-```bash
+2. 安装依赖
+bash
 cd project
 pip install -r requirements.txt
-```
-
-### 3. 配置（可选）
-
-复制 `.env.example` 为 `.env` 并填写密钥：
-
-```bash
+3. 配置环境变量
+bash
 cp .env.example .env
-```
+编辑 .env，至少填写一个云端 API Key：
 
-不配置也可运行：默认使用云端 API（硅基流动）作为备用通道，未填写时自动回退本地 Ollama 或浏览器语音合成。
-
-### 4. 启动
-
-```bash
-cd project
+env
+MY_TEACHER_CLOUD_API_KEY=sk-your-key-here
+MY_TEACHER_CLOUD_MODEL=deepseek-ai/DeepSeek-V3
+MY_TEACHER_CLOUD_BASE_URL=https://api.siliconflow.cn/v1
+4. 启动服务
+bash
 python app.py
-# 或
-python -m flask run --port 5000
-```
+浏览器打开 http://127.0.0.1:5000
 
-浏览器访问：<http://127.0.0.1:5000/>
+🔌 API 概览（v4 新增）
+路由	方法	说明
+/api/v4/learner/<learner_id>	GET	获取学生数字孪生数据
+/api/v4/learner/<learner_id>/update	POST	更新知识状态
+/api/v4/diagnosis/<learner_id>	GET	运行诊断，返回知识漏洞列表
+/api/v4/path/<learner_id>	GET	生成自适应学习路径
+/api/v4/dashboard/<learner_id>	GET	获取仪表盘数据（雷达、曲线、增益）
+/api/v4/evaluate/<learner_id>	POST	计算学习增益和效率
+/api/v4/error_memory/<learner_id>	GET	获取错题本
+完整 API 列表见 README.md 中的 API 概览部分。
 
----
+🧪 数据飞轮
+text
+诊断 → 教学 → 评估 → 学习 → 数据 → 诊断
+每个学生每次交互都会更新其数字孪生，每次诊断都会生成更精准的教学策略，每次评估都会验证教学效果，从而形成持续优化的数据飞轮。
 
-## ⚙️ 环境变量
+📄 License
+MIT License
 
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `MY_TEACHER_CLOUD_API_KEY` | 云端 LLM API Key（硅基流动等） | 空 |
-| `MY_TEACHER_CLOUD_MODEL` | 云端模型名 | `deepseek-ai/DeepSeek-V3` |
-| `MY_TEACHER_CLOUD_BASE_URL` | 云端 API 地址 | `https://api.siliconflow.cn/v1` |
-| `MY_TEACHER_CHAT_*` | 独立的对话模型配置（可选） | 空 |
-| `MY_TEACHER_OLLAMA_BASE_URL` | 本地 Ollama 地址 | `http://localhost:11434` |
-| `MY_TEACHER_OLLAMA_MODEL` | 本地模型名 | `qwen2.5:7B` |
-| `MY_TEACHER_ENABLE_LOCAL_OLLAMA` | 是否启用本地 Ollama | `true` |
-| `MY_TEACHER_TTS_*` | TTS 语音相关配置 | `cloud` / `anna` |
-| `MY_TEACHER_ASSISTANT_NAME` | 老师名字 | `艾琳老师` |
-| `MY_TEACHER_DEFAULT_TOPIC` | 默认教学主题 | `Python 基础` |
+🙏 致谢
+Live2D Cubism
 
----
+Ollama
 
-## 📁 项目结构
+PixiJS
 
-```
-My_Teacher/
-├── README.md                   ← 本文件
-├── .env.example                ← 环境变量模板
-└── project/                    ← Flask 项目根目录
-    ├── app.py                  ← 后端主程序（全部 API 路由）
-    ├── file_utils.py           ← 文件 / 课程目录工具
-    ├── lesson_prep.py          ← AI 备课核心逻辑
-    ├── code_executor.py        ← 安全代码执行沙箱
-    ├── gen_motions.py          ← Live2D 动作生成工具
-    ├── requirements.txt        ← Python 依赖
-    ├── config.json             ← 全局配置（不入库，运行时生成）
-    ├── templates/
-    │   └── index.html          ← 前端单页应用（HTML 结构）
-    ├── static/
-    │   ├── css/style.css       ← 全局样式（拆分自 index.html）
-    │   └── js/
-    │       ├── base.js         ← 基础状态 / 动作 / 表情 / Live2D 引擎
-    │       ├── interact.js     ← 视图切换 / 菜单 / 聊天 / 终端 / 图片
-    │       ├── settings.js     ← AI 工具 / 设置加载 / 备课预览 / 初始化
-    │       ├── pl2d.js         ← Live2D Cubism 运行时（pixi-live2d-display）
-    │       └── ...             ← images / models（艾琳老师）等资源
-    └── lessons/                ← 所有已创建的课程（不入库）
-```
+SiliconFlow
 
----
+以及所有开源社区贡献者
 
-## 🔌 API 概览
+v4.o 分支，持续迭代中。
 
-| 分类 | 路由 | 说明 |
-|------|------|------|
-| 页面 | `GET /` | 主页面 |
-| 配置 | `GET/POST /api/config` | 全局配置读写 |
-| | `POST /api/config/test` | 测试 LLM / TTS 连通性 |
-| Live2D | `GET /api/live2d/model_info` | 模型表情 / 动作清单 |
-| | `POST /api/upload_model` | 上传自定义模型（zip / 单文件） |
-| | `POST /api/reset_model` | 恢复内置默认模型 |
-| 上传 | `POST /api/upload_avatar` | 教师头像 |
-| | `POST /api/upload_background` | 背景图 |
-| | `POST /api/set_background_theme` | 切换背景主题 |
-| | `POST /api/upload_file` | 聊天附件上传（图片 / 文本文件） |
-| 课程 | `POST /api/prepare_lesson` | AI 备课 |
-| | `POST /api/apply_lesson` | 确认创建课程 |
-| | `GET /api/lessons` | 课程列表 |
-| 学习 | `POST /api/chat` | SSE 流式对话 |
-| | `GET /api/progress` | 学习进度 |
-| 测验 | `POST /api/exam/generate` | 出题 |
-| | `POST /api/exam/submit` | 提交批改 |
-
----
-
-## 🎭 Live2D 自定义模型上传
-
-1. 打开设置面板 → 模型区域 → 选择文件。
-2. **推荐**：将整个模型文件夹（含 `*.model3.json` / `model.json` 入口文件）压缩为 zip 后上传，系统会自动解压并识别入口文件。
-3. 也支持直接上传 `model3.json` / `model.json` / `.moc3` / `.moc` 单文件（单文件缺少贴图 / 动作资源时可能无法完整显示）。
-4. 上传成功后刷新页面即生效；可随时点击「恢复默认」回到内置的艾琳老师模型。
-
----
-
-## 🧩 技术栈
-
-| 层 | 技术 |
-|----|------|
-| 后端 | Python + Flask |
-| AI | Ollama（本地）/ OpenAI 兼容云端 API |
-| TTS | edge-tts（本地）/ CosyVoice2（云端） |
-| 前端 | 原生 JS + Canvas + CSS Flex/Grid |
-| 角色渲染 | Live2D Cubism SDK + PixiJS（pl2d.js） |
-| 数据存储 | JSON 文件（无数据库） |
-
----
-
-## 📌 版本历史
-
-| 版本 | 分支 | 亮点 |
-|------|------|------|
-| v3.1 | `v3` | 模型 / API 可视化配置（对话 / 备课 / TTS / 识图四通道自由切换云端或本地 Ollama）；聊天附件上传与图片识图；备课与人格提示词前端可自定义；前端代码拆分（CSS 与 JS 独立文件）；终端执行记录与聊天记录分离 |
-| v3.0 | `v3` | 内置新版 Live2D 默认模型；支持自定义模型上传（Cubism 2.1~5 全格式）；全局主题跟随背景；界面美化与聊天交互优化 |
-| v2.0 | `v2.0` | 环境变量配置；.gitignore 项目隔离；功能大幅扩展 |
-| v1.0 | `main` | 基础版本 |
-
----
-
-## 📄 许可证
-
-MIT License — 详见 [LICENSE](LICENSE)
+从“会说话的 AI 老师”到“能理解、诊断、规划并持续改变学生的自适应教学系统”。
+—— 下一站：AI Education OS。
