@@ -41,7 +41,7 @@ DEFAULT_MODEL = "qwen2.5:7b"                 # 测试员模型（本地 Ollama�
 DEFAULT_TEACHER_URL = "http://127.0.0.1:5000/api/chat"
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
 DEFAULT_LESSON = "20260817_223036_Alevel_M1_60e2"
-LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+LOG_DIR = Path(__file__).resolve().parent.parent / "data" / "debug_logs"
 TEACHER_TIMEOUT = 120                          # 老师回答超时（秒）
 OLLAMA_TIMEOUT = 180                           # 测试员推理超时（秒）
 

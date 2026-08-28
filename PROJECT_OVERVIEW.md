@@ -1,68 +1,55 @@
 # AI 全能私教 - 项目结构文档
 
 > **生成时间**：项目当前进度
-> **入口**：`d:\My_teacher\project\`
-> **访问**：http://127.0.0.1:5000/
+> **入口**：`d:\My_teacher\server\`
+> **访问**：http://127.0.0.1:5000/（局域网：http://<本机IP>:5000/，需登录）
 
 ---
 
-## 一、项目结构
+## 一、项目结构（v4.o 前后端拆分）
 
 ```
 D:\My_teacher\
 ├── PROJECT_OVERVIEW.md         ← 本文件
-└── project/                    ← Flask 项目根目录
-    ├── app.py                  ← Flask 后端主程序（所有 API 路由）
-    ├── file_utils.py           ← 文件/课程目录工具
-    ├── lesson_prep.py          ← AI 备课核心逻辑（生成课程大纲/知识点/测验）
-    ├── code_executor.py        ← 安全代码执行沙箱
-    ├── gen_motions.py          ← Live2D 动作生成工具
-    ├── clean_fake_res.py       ← 测试/调试辅助
-    ├── check_js_*.py           ← HTML/JS 语法检查脚本（开发期）
-    ├── test_exam_apis.py       ← 测验 API 测试
-    │
-    ├── requirements.txt        ← Python 依赖
-    │
-    ├── templates/
-    │   └── index.html          ← 前端单页应用（约 5500 行）
-    │                              包含全部 CSS/JS/HTML
-    │
-    ├── static/
-    │   ├── css/
-    │   │   └── style.css       ← 外部 CSS（备用，目前主样式在 index.html 内联）
-    │   ├── js/
-    │   │   ├── app.js          ← 外部 JS（备用）
-    │   │   └── pl2d.js         ← Live2D Cubism SDK
-    │   ├── audio/              ← TTS 生成的音频缓存（自动清理）
-    │   ├── images/             ← 头像/背景上传目录
-    │   │   ├── avatar.upload.png
-    │   │   ├── bg.upload.png
-    │   │   └── teacher.svg
-    │   └── models/
-    │       └── my_teacher/     ← Live2D 角色模型（女老师）
-    │           ├── female_01Arkit_6.model3.json
-    │           ├── female_01Arkit_6.moc3
-    │           ├── female_01Arkit_6.cdi3.json
-    │           ├── female_01Arkit_6.physics3.json
-    │           ├── expressions/      ← 7 个表情 .exp3.json
-    │           ├── motions/          ← 5 组动作 + 备用 .bak
-    │           └── female_01Arkit_6.4096/  ← 9 张贴图 texture_XX.png
-    │
-    ├── data/                   ← 运行时生成
-    │   ├── config.json         ← 全局配置（教师人设/默认模型/背景主题）
-    │   └── lessons/            ← 所有已创建的课程目录
-    │       └── <YYYYMMDD_主题>/
-    │           ├── plan.json           ← 课程大纲（大纲+单元+知识点+测验）
-    │           ├── metadata.json       ← 课程元数据（创建时间/进度等）
-    │           ├── conversation.json   ← 聊天记录
-    │           ├── progress.json       ← 学习进度
-    │           ├── config.json         ← 课程级配置
-    │           ├── unit_<N>/           ← 各单元的上下文（AI prompt 用）
-    │           ├── board.png           ← 板书图片（可选）
-    │           └── assets/             ← 课程资源图片/文件
-    │
-    └── debug_logs/             ← 开发期错误日志
-        └── null-addEventListener.env
+├── README.md                   ← v4.o 说明文档
+├── server/                     ← 后端（Python + Flask，所有 API）
+│   ├── app.py                  ← Flask 主程序（含 /api/v4/* 与鉴权拦截）
+│   ├── auth.py                 ← 账号注册/登录/token 鉴权（data/users.json）
+│   ├── file_utils.py           ← 文件/课程目录工具
+│   ├── lesson_prep.py          ← AI 备课核心逻辑
+│   ├── learner_model.py        ← v4 学生数字孪生
+│   ├── knowledge_graph.py      ← v4 知识图谱
+│   ├── pedagogical_engine.py   ← v4 教学策略引擎
+│   ├── learning_evaluation.py  ← v4 学习评估闭环
+│   ├── agents/                 ← v4 多 Agent 系统
+│   ├── code_executor.py        ← 安全代码执行沙箱
+│   ├── gen_motions.py          ← Live2D 动作生成工具
+│   ├── clean_fake_res.py       ← 测试/调试辅助
+│   ├── check_js_*.py           ← HTML/JS 语法检查脚本（开发期）
+│   ├── test_exam_apis.py       ← 测验 API 测试
+│   └── requirements.txt        ← Python 依赖
+│
+├── client/                     ← 前端（原生 JS 单页应用）
+│   ├── index.html              ← 前端单页应用（含登录/注册页）
+│   └── static/
+│       ├── css/style.css       ← 全局样式
+│       ├── js/                 ← base.js / interact.js / settings.js / dashboard.js / pl2d.js
+│       ├── audio/              ← TTS 音频缓存
+│       ├── images/             ← 头像/背景
+│       ├── models/             ← Live2D 模型（my_teacher/ + uploads/）
+│       └── uploads/chat/       ← 聊天附件
+│
+└── data/                       ← 数据（运行时生成，与代码分离）
+    ├── config.json             ← 全局配置（教师人设/默认模型/背景主题）
+    ├── users.json              ← 用户账号（盐 + 哈希 + token）
+    └── lessons/                ← 所有已创建的课程目录
+        └── <YYYYMMDD_主题>/
+            ├── plan.json           ← 课程大纲
+            ├── config.json         ← 课程元数据（含 owner 归属）
+            ├── conversation.json   ← 聊天记录
+            ├── progress.json       ← 学习进度
+            ├── unit_<N>/           ← 各单元的上下文
+            └── assets/             ← 课程资源图片/文件
 ```
 
 ---

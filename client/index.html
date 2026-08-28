@@ -169,7 +169,7 @@
         }
     </script>
 
-    <link rel="stylesheet" href="/static/css/style.css?v=4.1">
+    <link rel="stylesheet" href="/static/css/style.css?v=4.3">
 </head>
 <body>
     <!-- ========== 首页菜单（覆盖层） ========== -->
@@ -256,6 +256,28 @@
         </div>
     </div>
 
+    <!-- ========== 登录 / 注册（前后端拆分后：需要账号才能访问） ========== -->
+    <div id="auth-overlay" class="auth-overlay">
+        <div class="auth-panel">
+            <div class="auth-brand">
+                <div class="auth-logo">🎓</div>
+                <div class="auth-title">AI 全能私教</div>
+                <div class="auth-subtitle">登录后继续使用 · 数据按账号隔离</div>
+            </div>
+            <div class="auth-tabs">
+                <button class="auth-tab active" data-auth-tab="login">登录</button>
+                <button class="auth-tab" data-auth-tab="register">注册</button>
+            </div>
+            <div class="auth-form">
+                <input type="text" id="auth-username" class="auth-input" placeholder="用户名" autocomplete="username">
+                <input type="password" id="auth-password" class="auth-input" placeholder="密码（至少 6 位）" autocomplete="current-password">
+                <div id="auth-error" class="auth-error" style="display:none;"></div>
+                <button id="auth-submit-btn" class="auth-submit">登 录</button>
+            </div>
+            <div class="auth-hint" id="auth-hint">首次使用请先注册账号</div>
+        </div>
+    </div>
+
     <!-- ========== 应用主界面 ========== -->
     <div id="app">
 
@@ -292,6 +314,10 @@
                 <button class="topbar-tab nav-btn" data-view="settings" title="设置">
                     <span class="tab-icon">⚙️</span><span class="tab-label">设置</span>
                 </button>
+            </div>
+            <div class="topbar-user" id="topbar-user" style="display:none;">
+                <span class="topbar-user-name" id="topbar-username"></span>
+                <button class="topbar-logout-btn" id="logout-btn" title="退出登录">⎋ 退出</button>
             </div>
         </div>
 
@@ -986,6 +1012,132 @@
         </div>
     </div>
     <!-- 应用逻辑：按依赖顺序加载（共享全局词法作用域）；?v= 用于开发期绕过浏览器缓存 -->
+    <script>
+    /* ========== 认证：fetch 注入 token + 登录/注册 + 401 处理 ========== */
+    (function () {
+        var TOKEN_KEY = "mt_token";
+        function getToken() { try { return localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; } }
+        function setToken(t) { try { if (t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY); } catch (e) {} }
+        function currentTab() {
+            var t = document.querySelector(".auth-tab.active");
+            return t ? (t.getAttribute("data-auth-tab") || "login") : "login";
+        }
+        function showError(msg) {
+            var el = document.getElementById("auth-error");
+            if (el) { el.textContent = msg; el.style.display = "block"; }
+        }
+        function hideError() {
+            var el = document.getElementById("auth-error");
+            if (el) { el.style.display = "none"; }
+        }
+        function showOverlay() { var o = document.getElementById("auth-overlay"); if (o) o.classList.add("visible"); }
+        function hideOverlay() { var o = document.getElementById("auth-overlay"); if (o) o.classList.remove("visible"); }
+        function setBusy(busy) {
+            var btn = document.getElementById("auth-submit-btn");
+            if (btn) {
+                btn.disabled = busy;
+                btn.textContent = busy ? "请稍候…" : (currentTab() === "register" ? "注 册" : "登 录");
+            }
+        }
+        function applyUser(username) {
+            var box = document.getElementById("topbar-user");
+            if (box) box.style.display = username ? "flex" : "none";
+            var u = document.getElementById("topbar-username");
+            if (u) u.textContent = username || "";
+            hideOverlay();
+        }
+
+        // 全局 fetch 包装：自动附带 Authorization: Bearer <token>；401（非 /api/auth/*）回到登录页
+        var _origFetch = window.fetch;
+        window.fetch = function (url, opts) {
+            opts = opts || {};
+            var token = getToken();
+            var urlStr = (typeof url === "string" ? url : (url && url.url) || "");
+            if (token && urlStr.indexOf("/api/") === 0) {
+                opts.headers = Object.assign({}, opts.headers);
+                if (!opts.headers["Authorization"]) opts.headers["Authorization"] = "Bearer " + token;
+            }
+            return _origFetch(url, opts).then(function (resp) {
+                if (resp && resp.status === 401 && urlStr.indexOf("/api/auth/") !== 0) {
+                    setTimeout(function () { showOverlay(); }, 50);
+                }
+                return resp;
+            });
+        };
+
+        function logout() {
+            var token = getToken();
+            setToken("");
+            if (token) {
+                try { fetch("/api/auth/logout", { method: "POST", headers: { "Authorization": "Bearer " + token } }); } catch (e) {}
+            }
+            location.reload(); // 刷新后回到登录页
+        }
+
+        function submit() {
+            var mode = currentTab();
+            var username = (document.getElementById("auth-username").value || "").trim();
+            var password = document.getElementById("auth-password").value || "";
+            if (!username) { showError("请输入用户名"); return; }
+            if (!password) { showError("请输入密码"); return; }
+            if (mode === "register" && password.length < 6) { showError("密码长度至少 6 位"); return; }
+            setBusy(true);
+            hideError();
+            fetch("/api/auth/" + mode, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ username: username, password: password }),
+            }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+              .then(function (res) {
+                if (res.ok && res.d && res.d.token) {
+                    setToken(res.d.token);
+                    applyUser(res.d.username || username);
+                    location.reload(); // 强制刷新，让各模块带着 token 重新初始化
+                } else {
+                    showError((res.d && res.d.error) || "操作失败，请重试");
+                }
+              })
+              .catch(function (e) { showError("网络错误：" + e); })
+              .finally(function () { setBusy(false); });
+        }
+
+        function init() {
+            document.querySelectorAll(".auth-tab").forEach(function (btn) {
+                btn.addEventListener("click", function () {
+                    document.querySelectorAll(".auth-tab").forEach(function (b) { b.classList.remove("active"); });
+                    btn.classList.add("active");
+                    hideError();
+                    setBusy(false);
+                });
+            });
+            var submitBtn = document.getElementById("auth-submit-btn");
+            if (submitBtn) submitBtn.addEventListener("click", submit);
+            var pw = document.getElementById("auth-password");
+            if (pw) pw.addEventListener("keydown", function (e) { if (e.key === "Enter") submit(); });
+            var logoutBtn = document.getElementById("logout-btn");
+            if (logoutBtn) logoutBtn.addEventListener("click", function (e) { e.stopPropagation(); logout(); });
+
+            // 检查登录态
+            fetch("/api/auth/me").then(function (r) {
+                if (!r.ok) throw new Error("AUTH_REQUIRED");
+                return r.json();
+            }).then(function (d) {
+                applyUser(d.username || "");
+            }).catch(function () {
+                // 未登录：若还没有任何账号，默认切到"注册"
+                fetch("/api/auth/status").then(function (r) { return r.json(); }).then(function (d) {
+                    if (!d || !d.registered_users) {
+                        var regBtn = document.querySelector('.auth-tab[data-auth-tab="register"]');
+                        if (regBtn) regBtn.click();
+                    }
+                    showOverlay();
+                }).catch(function () { showOverlay(); });
+            });
+        }
+        if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+        else init();
+    })();
+    </script>
     <script src="/static/js/base.js?v=4.2"></script>
     <script src="/static/js/interact.js?v=3.33"></script>
     <script src="/static/js/settings.js?v=3.15"></script>

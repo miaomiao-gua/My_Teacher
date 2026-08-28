@@ -10,8 +10,11 @@ import requests
 from docx import Document
 from pypdf import PdfReader
 
+# 前后端拆分后：数据统一放在 server/ 上一级的 data/ 目录
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
 # python-pptx 安装在项目本地目录（D 盘，避免写入系统 site-packages 受限）
-_PY_DEPS = Path(__file__).resolve().parent / "py_deps"
+_PY_DEPS = DATA_DIR / "py_deps"
 if _PY_DEPS.exists() and str(_PY_DEPS) not in sys.path:
     sys.path.insert(0, str(_PY_DEPS))
 from pptx import Presentation  # noqa: E402
@@ -27,7 +30,7 @@ def sanitize_topic(topic: str) -> str:
 
 
 def ensure_lesson_dir(lesson_name: str, base_dir: str | Path | None = None) -> Path:
-    base_path = Path(base_dir) if base_dir else Path(__file__).resolve().parent / "lessons"
+    base_path = Path(base_dir) if base_dir else DATA_DIR / "lessons"
     lesson_path = base_path / lesson_name
     lesson_path.mkdir(parents=True, exist_ok=True)
     return lesson_path
@@ -285,7 +288,7 @@ def load_course_context(lesson_folder: str | None) -> str:
     if not lesson_folder:
         return "未选择课程，使用通用教学模式。"
 
-    lesson_dir = Path(__file__).resolve().parent / "lessons" / lesson_folder
+    lesson_dir = DATA_DIR / "lessons" / lesson_folder
     if not lesson_dir.exists():
         return "该课程目录不存在。"
 
@@ -307,7 +310,7 @@ def load_course_context(lesson_folder: str | None) -> str:
 
 def unit_dir(lesson_folder: str, unit_index: int) -> Path:
     """返回某课对应的资料目录路径：lessons/<lesson>/section_N/。"""
-    return Path(__file__).resolve().parent / "lessons" / lesson_folder / f"section_{unit_index + 1}"
+    return DATA_DIR / "lessons" / lesson_folder / f"section_{unit_index + 1}"
 
 
 def load_unit_context(lesson_folder: str | None, unit_index: int) -> str:
@@ -321,7 +324,7 @@ def load_unit_context(lesson_folder: str | None, unit_index: int) -> str:
     udir = unit_dir(lesson_folder, unit_index)
     # 回退：旧结构 units/unit_NN
     if not udir.exists():
-        udir_old = Path(__file__).resolve().parent / "lessons" / lesson_folder / "units" / f"unit_{unit_index + 1:02d}"
+        udir_old = DATA_DIR / "lessons" / lesson_folder / "units" / f"unit_{unit_index + 1:02d}"
         if udir_old.exists():
             udir = udir_old
         else:

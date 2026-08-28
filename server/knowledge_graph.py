@@ -22,7 +22,7 @@ _GAP_THRESHOLD = 0.6
 
 
 def _course_dir(lesson_folder: str | None) -> Path:
-    base = Path(__file__).resolve().parent / "lessons"
+    base = Path(__file__).resolve().parent.parent / "data" / "lessons"
     return base / lesson_folder if lesson_folder else base
 
 

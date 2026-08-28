@@ -96,6 +96,7 @@
 - **交互式课前诊断**（实验功能，可开关）：备课前在**上课界面内**与学生对话摸底，AI 基于上下文自然追问，未知概念在备课时重点展开
 - **讲课概念联想**：结合知识图谱，讲课时自然类比相关概念（如 `cout<<` ↔ `print()`），每课最多 1~2 次
 - **聊天附件支持 PDF**：上传 PDF 自动提取前 20 页文本随消息发给模型
+- **前后端拆分 + 账号鉴权**：目录拆分为 `server/`（后端）+ `client/`（前端）+ `data/`（数据）；所有 `/api/*` 需登录后携带 token 访问（`/api/auth/*` 白名单），课程按创建者隔离，防止越权访问；支持局域网访问（`0.0.0.0:5000`）
 
 ---
 
@@ -111,7 +112,7 @@ cd My_Teacher
 ### 2. 安装依赖（Python ≥ 3.10）
 
 ```bash
-cd project
+cd server
 pip install -r requirements.txt
 ```
 
@@ -126,11 +127,15 @@ cp .env.example .env
 ### 4. 启动
 
 ```bash
-cd project
+cd server
 python app.py
 ```
 
 浏览器访问：<http://127.0.0.1:5000/>
+
+> 首次使用请先**注册账号**（登录页默认切到「注册」）；登录后数据按账号隔离。
+> 局域网设备访问：`http://<本机局域网IP>:5000/`（如 `http://10.0.85.2:5000/`）。
+> Windows 防火墙若拦截，请以管理员身份放行：`New-NetFirewallRule -DisplayName "My Teacher v4 (TCP 5000)" -Direction Inbound -Protocol TCP -LocalPort 5000 -Action Allow -Profile Any`
 
 ### 5. OCR（扫描版 PDF 可选）
 
@@ -145,27 +150,37 @@ My_Teacher/
 ├── README.md                   ← 本文件（v4.o）
 ├── PROJECT_OVERVIEW.md         ← 项目结构文档
 ├── .env.example                ← 环境变量模板
-└── project/                    ← Flask 项目根目录
-    ├── app.py                  ← 后端主程序（全部 API 路由，含 /api/v4/*）
-    ├── file_utils.py           ← 文件 / PDF 目录 / OCR 工具
-    ├── lesson_prep.py          ← AI 备课核心逻辑
-    ├── learner_model.py        ← v4 学生认知画像（数字孪生）
-    ├── knowledge_graph.py      ← v4 知识图谱
-    ├── pedagogical_engine.py   ← v4 教学策略引擎
-    ├── learning_evaluation.py  ← v4 学习评估闭环
-    ├── agents/                 ← v4 多 Agent 系统（6 类角色）
-    ├── code_executor.py        ← 安全代码执行沙箱
-    ├── requirements.txt        ← Python 依赖
-    ├── config.json             ← 全局配置（运行时生成）
-    ├── templates/index.html    ← 前端单页应用
-    └── static/
-        ├── css/style.css       ← 全局样式
-        └── js/
-            ├── base.js         ← 基础状态 / 动作 / 表情 / Live2D 引擎
-            ├── interact.js     ← 视图切换 / 聊天 / 备课 / 诊断
-            ├── dashboard.js    ← v4 前端仪表盘
-            ├── settings.js     ← 设置面板 / 备课预览
-            └── pl2d.js         ← Live2D Cubism 运行时（pixi-live2d-display）
+├── server/                     ← 后端（Python + Flask）
+│   ├── app.py                  ← 后端主程序（全部 API 路由，含 /api/v4/* 与鉴权）
+│   ├── auth.py                 ← 账号注册 / 登录 / token 鉴权（users.json）
+│   ├── file_utils.py           ← 文件 / PDF 目录 / OCR 工具
+│   ├── lesson_prep.py          ← AI 备课核心逻辑
+│   ├── learner_model.py        ← v4 学生认知画像（数字孪生）
+│   ├── knowledge_graph.py      ← v4 知识图谱
+│   ├── pedagogical_engine.py   ← v4 教学策略引擎
+│   ├── learning_evaluation.py  ← v4 学习评估闭环
+│   ├── agents/                 ← v4 多 Agent 系统（6 类角色）
+│   ├── code_executor.py        ← 安全代码执行沙箱
+│   └── requirements.txt        ← Python 依赖
+├── client/                     ← 前端（原生 JS 单页应用）
+│   ├── index.html              ← 前端单页应用（含登录/注册页）
+│   └── static/
+│       ├── css/style.css       ← 全局样式
+│       ├── js/
+│       │   ├── base.js         ← 基础状态 / 动作 / 表情 / Live2D 引擎
+│       │   ├── interact.js     ← 视图切换 / 聊天 / 备课 / 诊断
+│       │   ├── dashboard.js    ← v4 前端仪表盘
+│       │   ├── settings.js     ← 设置面板 / 备课预览
+│       │   └── pl2d.js         ← Live2D Cubism 运行时（pixi-live2d-display）
+│       ├── models/             ← Live2D 模型 / 上传模型
+│       ├── audio/              ← TTS 音频缓存
+│       └── uploads/            ← 聊天附件 / 板书图片
+└── data/                       ← 数据（运行时生成，与代码分离）
+    ├── config.json             ← 全局配置
+    ├── users.json              ← 用户账号（盐 + sha256 密码哈希 + token）
+    ├── lessons/                ← 所有课程（含 learners/ 学生档案）
+    ├── py_deps/                ← 本地 python-pptx 等依赖
+    └── debug_logs/             ← 运行日志
 ```
 
 ---
@@ -174,14 +189,19 @@ My_Teacher/
 
 | 分类 | 路由 | 说明 |
 |------|------|------|
-| 页面 | `GET /` | 主页面 |
-| 配置 | `GET/POST /api/config` | 全局配置读写（含 `ocr_available`） |
+| 页面 | `GET /` | 主页面（未登录自动跳登录页） |
+| 认证 | `POST /api/auth/register` | 注册账号 |
+| | `POST /api/auth/login` | 登录，返回 token |
+| | `POST /api/auth/logout` | 退出（token 失效） |
+| | `GET /api/auth/me` | 校验登录态 |
+| | `GET /api/auth/status` | 是否已有用户（前端引导注册） |
+| 配置 | `GET/POST /api/config` | 全局配置读写（含 `ocr_available`，需登录） |
 | 备课 | `POST /api/prepare_lesson` | AI 备课（JSON / multipart 教材） |
 | 诊断 | `POST /api/prep_diagnose/open` | 开启交互式课前诊断（第一问） |
 | | `POST /api/prep_diagnose/answer` | 提交回答，AI 基于上下文追问 |
 | | `POST /api/prep_diagnose/finish` | 结束诊断，返回摸底结论 |
-| 课程 | `POST /api/apply_lesson` | 确认创建课程 |
-| | `GET /api/lessons` | 课程列表 |
+| 课程 | `POST /api/apply_lesson` | 确认创建课程（归属当前账号） |
+| | `GET /api/lessons` | 课程列表（仅本人 + 遗留共享课程） |
 | 学习 | `POST /api/chat` | SSE 流式对话 |
 | | `GET /api/progress` | 学习进度 |
 | 测验 | `POST /api/exam/generate` | 出题 |
@@ -189,6 +209,8 @@ My_Teacher/
 | v4 | `GET /api/v4/dashboard` | 学习状态仪表盘数据 |
 | | `POST /api/v4/knowledge_graph/generate` | 知识图谱生成 |
 | | 其余 `/api/v4/*` | Learner Model / 教学引擎 / 评估等 |
+
+> 除 `/api/auth/*` 外，所有 `/api/*` 接口均需请求头携带 `Authorization: Bearer <token>`，否则返回 401；访问他人课程返回 403。
 
 ---
 
@@ -210,7 +232,7 @@ My_Teacher/
 
 | 版本 | 分支 | 亮点 |
 |------|------|------|
-| v4.o | `v4.o` | AI 自适应教学系统（学生数字孪生 / 知识图谱 / 多 Agent / 教学策略引擎 / 评估闭环 / 仪表盘）；PDF 整本教材导入 + OCR；备课对齐目录章节 / 交互式课前诊断 / token 展示；讲课概念联想；性能优化 |
+| v4.o | `v4.o` | AI 自适应教学系统（学生数字孪生 / 知识图谱 / 多 Agent / 教学策略引擎 / 评估闭环 / 仪表盘）；PDF 整本教材导入 + OCR；备课对齐目录章节 / 交互式课前诊断 / token 展示；讲课概念联想；性能优化；**前后端拆分（server / client / data）+ 账号注册登录 + 越权防护 + 局域网访问** |
 | v3.1 | `v3.0` | 模型 / API 可视化配置；聊天附件上传与图片识图；备课与人格提示词自定义 |
 | v3.0 | `v3.0` | 新版 Live2D 默认模型；自定义模型上传（Cubism 2.1~5）；全局主题跟随 |
 | v2.0 | `v2.0` | 环境变量配置；功能大幅扩展 |

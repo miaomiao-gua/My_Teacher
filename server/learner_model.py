@@ -19,8 +19,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# 学生档案存储目录：project/lessons/learners/
-LEARNERS_DIR = Path(__file__).resolve().parent / "lessons" / "learners"
+# 学生档案存储目录：data/lessons/learners/
+LEARNERS_DIR = Path(__file__).resolve().parent.parent / "data" / "lessons" / "learners"
 
 # 写文件加锁，避免并发读写损坏档案
 _LEARNER_LOCK = threading.Lock()

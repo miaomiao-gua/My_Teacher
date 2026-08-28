@@ -14,17 +14,21 @@ venv.bak/
 .env
 *.local
 
-# ====== JSON 配置（保留必要的） ======
-project/config.json
-# 如果还有其他需要提交的 json，可以单独白名单，目前全排除也可以
+# ====== 运行时数据（前后端拆分后统一在 data/） ======
+data/config.json
+data/users.json
+data/lessons/
+data/py_deps/
+data/debug_logs/
+data/_backup_config_*.json
+server/_backup_config_*.json
 
-# ====== 用户生成内容 ======
-project/lessons/
-project/static/images/bg.upload.*
-project/static/images/avatar.upload.*
-project/static/audio/
-project/static/models/uploads/
-project/static/uploads/
+# ====== 用户生成内容（client/static） ======
+client/static/images/bg.upload.*
+client/static/images/avatar.upload.*
+client/static/audio/
+client/static/models/uploads/
+client/static/uploads/
 
 # ====== 缓存 / 日志 / 临时 ======
 cache/
@@ -33,7 +37,6 @@ cache/
 *.swp
 *.swo
 logs/
-project/debug_logs/
 
 # ====== 大文件 / 下载产物 / 临时脚本 ======
 *.whl
@@ -42,19 +45,20 @@ download_*.py
 _test_*.py
 check*.py
 seethrough*/
-project/py_deps/
 reference/
-project/_backup_config_*.json
 
 # ====== 外部工具（如果放在项目内） ======
 Textoon/
 ComfyUI/
-cache/
 Open-LLM-VTuber/
-# ====== IDE / 系统 ======
 
+# ====== IDE / 系统 ======
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 *.sublime-*
+
+# ====== 用户业务文档（不入库） ======
+/*计划书*.pdf
+/*_My_Teacher.pdf

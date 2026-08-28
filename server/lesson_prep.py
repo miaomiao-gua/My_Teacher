@@ -847,7 +847,7 @@ def _call_siliconflow(topic: str, config: Dict[str, Any] | None = None, document
         logger.error("❌ 备课·JSON 解析失败: %s\n   错误上下文: %s", e, _ctx)
         # 把原始响应落盘，便于定位模型写坏 JSON 的位置
         try:
-            dump_dir = Path(__file__).resolve().parent.parent / "logs"
+            dump_dir = Path(__file__).resolve().parent.parent / "data" / "debug_logs"
             dump_dir.mkdir(parents=True, exist_ok=True)
             dump_path = dump_dir / f"lesson_failed_raw_{time.strftime('%Y%m%d_%H%M%S')}.txt"
             dump_path.write_text(str(e.doc)[:200000], encoding="utf-8")

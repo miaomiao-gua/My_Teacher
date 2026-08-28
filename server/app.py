@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
-from flask import Flask, Response, jsonify, render_template, request, send_file, stream_with_context
+from flask import Flask, Response, g, jsonify, render_template, request, send_file, send_from_directory, stream_with_context
 from werkzeug.utils import secure_filename
 
 # 尝试加载 .env 环境变量（开发环境）
@@ -72,8 +72,22 @@ from learning_evaluation import get_progress_curve as eval_progress_curve
 from pedagogical_engine import record_answer_result as ped_record_answer
 from pedagogical_engine import run_diagnosis as ped_diagnosis
 from pedagogical_engine import plan_next_lesson as ped_plan_next
+import auth
 
-app = Flask(__name__)
+# ============================
+# 目录结构（前后端拆分）：
+#   server/  后端代码（本目录）
+#   client/  前端（index.html + static/）
+#   data/    数据（lessons / config.json / py_deps / debug_logs）
+# ============================
+BASE_DIR = Path(__file__).resolve().parent          # server/
+CLIENT_DIR = BASE_DIR.parent / "client"             # 前端
+DATA_DIR = BASE_DIR.parent / "data"                 # 数据
+LESSONS_DIR = DATA_DIR / "lessons"
+LESSONS_DIR.mkdir(exist_ok=True)
+CONFIG_PATH = DATA_DIR / "config.json"
+
+app = Flask(__name__, static_folder=str(CLIENT_DIR / "static"), template_folder=str(CLIENT_DIR))
 
 # 开发期改模板（index.html）即时生效：每次请求检查模板 mtime（一次 stat，开销可忽略）
 app.config["TEMPLATES_AUTO_RELOAD"] = True
@@ -214,15 +228,12 @@ def _handle_exception(exc):
     # HTML 路由返回简单错误页
     return Response(f"<h1>500</h1><pre>{tb}</pre>", status=500, mimetype="text/html")
 
-BASE_DIR = Path(__file__).resolve().parent
-LESSONS_DIR = BASE_DIR / "lessons"
-LESSONS_DIR.mkdir(exist_ok=True)
-CONFIG_PATH = BASE_DIR / "config.json"
+# 目录常量（BASE_DIR/CLIENT_DIR/DATA_DIR/LESSONS_DIR/CONFIG_PATH）已在 Flask 初始化上方定义
 
 # ============================
 # 结构化日志（输出到 stdout + 文件）
 # ============================
-LOG_DIR = BASE_DIR.parent / "logs"
+LOG_DIR = DATA_DIR / "debug_logs"
 LOG_DIR.mkdir(exist_ok=True)
 LOG_FILE = LOG_DIR / "app.log"
 
@@ -275,16 +286,45 @@ app.logger.info(f"📝 日志文件: {LOG_FILE}")
 app.logger.info(f"📂 课程目录: {LESSONS_DIR}")
 app.logger.info("=" * 60)
 
-ACTIVE_LESSON = {
-    "folder": None,
-    "metadata": {},
-    "resources": [],
-    "prepared": {},
-    "conversation": [],
-    "progress": {},
-    "preview_plan": None,   # 备课预览时的临时数据（用户确认后才写入磁盘）
-    "preview_topic": None,  # 预览对应的课程主题
-}
+class _PerUserLessonState(dict):
+    """按用户名隔离的"当前激活课程"状态。
+
+    多用户登录后互不干扰：每个用户维护自己的一套 ACTIVE_LESSON 字段。
+    用法与原 dict 完全一致（ACTIVE_LESSON["folder"]=xxx / .get(...)）。
+    """
+    def _store(self) -> dict:
+        try:
+            key = g.username or "_anon"
+        except Exception:
+            key = "_anon"
+        return self.setdefault(key, {
+            "folder": None,
+            "metadata": {},
+            "resources": [],
+            "prepared": {},
+            "conversation": [],
+            "progress": {},
+            "preview_plan": None,   # 备课预览时的临时数据（用户确认后才写入磁盘）
+            "preview_topic": None,  # 预览对应的课程主题
+        })
+
+    def __getitem__(self, key):
+        return self._store()[key]
+
+    def __setitem__(self, key, value):
+        self._store()[key] = value
+
+    def get(self, key, default=None):
+        return self._store().get(key, default)
+
+    def __contains__(self, key):
+        return key in self._store()
+
+    def __repr__(self):
+        return repr(self._store())
+
+
+ACTIVE_LESSON = _PerUserLessonState()
 
 
 def now_iso() -> str:
@@ -2234,7 +2274,7 @@ def cloud_tts_audio(text: str) -> str | None:
         if not response.ok:
             print(f"[tts] 云端 TTS 失败 HTTP {response.status_code}: {response.text[:300]}", flush=True)
             return None
-        audio_dir = BASE_DIR / "static" / "audio"
+        audio_dir = CLIENT_DIR / "static" / "audio"
         audio_dir.mkdir(parents=True, exist_ok=True)
         file_name = f"tts_cloud_{int(time.time() * 1000)}.{response_format}"
         file_path = audio_dir / file_name
@@ -2246,7 +2286,7 @@ def cloud_tts_audio(text: str) -> str | None:
 
 
 # ============== 聊天附件上传 + 识图模型（可选） ==============
-CHAT_UPLOAD_DIR = BASE_DIR / "static" / "uploads" / "chat"
+CHAT_UPLOAD_DIR = CLIENT_DIR / "static" / "uploads" / "chat"
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 TEXT_EXT = {
     ".txt", ".md", ".py", ".js", ".ts", ".jsx", ".tsx", ".json", ".csv", ".log",
@@ -2274,7 +2314,7 @@ def _load_image_b64(image_url: str) -> str | None:
     raw: bytes | None = None
     if image_url.startswith("/static/"):
         rel = image_url.split("?", 1)[0][len("/static/"):]
-        local_path = BASE_DIR / "static" / rel
+        local_path = CLIENT_DIR / "static" / rel
         if not local_path.exists():
             print(f"[vision] 本地图片不存在: {local_path}", flush=True)
             return None
@@ -2461,7 +2501,7 @@ def local_tts_audio(text: str) -> str | None:
         )
         if not response.ok:
             return cloud_tts_audio(text)
-        audio_dir = BASE_DIR / "static" / "audio"
+        audio_dir = CLIENT_DIR / "static" / "audio"
         audio_dir.mkdir(parents=True, exist_ok=True)
         file_name = f"tts_{int(time.time() * 1000)}.wav"
         file_path = audio_dir / file_name
@@ -2499,6 +2539,134 @@ def index():
 @app.route("/favicon.ico")
 def favicon():
     return "", 204
+
+
+# ============================
+# 用户认证（/api/auth/* 白名单，无需登录）
+# ============================
+def _extract_token() -> str:
+    """从请求头提取 token：Authorization: Bearer xxx 或 X-Auth-Token。"""
+    auth_hdr = request.headers.get("Authorization", "")
+    if auth_hdr.lower().startswith("bearer "):
+        return auth_hdr[7:].strip()
+    return (request.headers.get("X-Auth-Token") or "").strip()
+
+
+@app.route("/api/auth/status", methods=["GET"])
+def api_auth_status():
+    """是否已有注册用户（前端据此决定默认展示"登录"还是"注册"）。"""
+    return jsonify({"registered_users": auth.user_count()})
+
+
+@app.route("/api/auth/register", methods=["POST"])
+def api_auth_register():
+    payload = request.get_json(silent=True) or {}
+    username = (payload.get("username") or "").strip()
+    password = payload.get("password") or ""
+    try:
+        auth.register(username, password)
+        token = auth.login(username, password)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"ok": True, "username": username, "token": token})
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def api_auth_login():
+    payload = request.get_json(silent=True) or {}
+    username = (payload.get("username") or "").strip()
+    password = payload.get("password") or ""
+    try:
+        token = auth.login(username, password)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 401
+    return jsonify({"ok": True, "username": username, "token": token})
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+def api_auth_logout():
+    token = _extract_token()
+    if token:
+        auth.logout(token)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/auth/me", methods=["GET"])
+def api_auth_me():
+    """校验当前 token 并返回用户名（/api/auth/* 在白名单内，需自行校验）。"""
+    username = auth.get_user_by_token(_extract_token())
+    if not username:
+        return jsonify({"error": "未登录"}), 401
+    return jsonify({"ok": True, "username": username})
+
+
+# ============================
+# 鉴权拦截：所有 /api/* 除 /api/auth/* 外必须携带有效 token；
+# 课程类路由同时校验"课程归属"（防止越权访问他人课程）
+# ============================
+def _lesson_owner(lesson_folder: str) -> str | None:
+    """读取课程 config.json 中的 owner 字段；无 owner 视为遗留课程（共享）。"""
+    if not lesson_folder:
+        return None
+    cfg_path = LESSONS_DIR / lesson_folder / "config.json"
+    if not cfg_path.exists():
+        return None
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return data.get("owner")
+
+
+def _tag_lesson_owner(lesson_folder: str) -> None:
+    """把当前登录用户标记为该课程 owner（仅当尚未标记）。"""
+    user = getattr(g, "username", None)
+    if not user:
+        return
+    cfg_path = LESSONS_DIR / lesson_folder / "config.json"
+    data = {}
+    if cfg_path.exists():
+        try:
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    if not data.get("owner"):
+        data["owner"] = user
+        _atomic_write_json(cfg_path, data)
+
+
+@app.url_value_preprocessor
+def _capture_lesson_folder(endpoint, values):
+    """从匹配到的路由参数中捕获课程目录名，供鉴权钩子校验归属。"""
+    if values:
+        g.lesson_folder = values.get("lesson_folder")
+
+
+@app.before_request
+def _require_auth():
+    """全局鉴权：非 /api/* 直接放行（静态资源/首页）；/api/auth/* 放行；其余必须登录。"""
+    if request.method == "OPTIONS":
+        return None
+    path = request.path
+    if not path.startswith("/api/"):
+        return None
+    if path.startswith("/api/auth"):
+        return None
+    username = auth.get_user_by_token(_extract_token())
+    if not username:
+        return jsonify({"error": "未登录或登录已过期，请先登录", "code": "AUTH_REQUIRED"}), 401
+    g.username = username
+    # 课程越权校验（路径参数中的 lesson_folder）
+    folder = getattr(g, "lesson_folder", None)
+    if not folder and path == "/api/switch_lesson":
+        payload = request.get_json(silent=True) or {}
+        folder = (payload.get("lesson_id") or payload.get("lesson_folder") or "").strip()
+    if folder:
+        owner = _lesson_owner(folder)
+        if owner and owner != username:
+            app.logger.warning(f"🔒 越权拦截: 用户 {username} 尝试访问他人课程 {folder}")
+            return jsonify({"error": "无权访问该课程"}), 403
+    return None
 
 
 @app.route("/api/config", methods=["GET"])
@@ -2605,7 +2773,7 @@ def _resolve_live2d_model_path(model_url: str) -> Path | None:
     if not clean.startswith("/static/"):
         return None
     rel = clean[len("/static/"):]
-    return (BASE_DIR / "static" / rel).resolve()
+    return (CLIENT_DIR / "static" / rel).resolve()
 
 
 @app.route("/api/live2d/model_info", methods=["GET"])
@@ -2697,7 +2865,7 @@ def api_config_test():
 
 
 # ============== 教师头像上传（支持课程独立存储） ==============
-AVATAR_DIR = BASE_DIR / "static" / "images"
+AVATAR_DIR = CLIENT_DIR / "static" / "images"
 ALLOWED_AVATAR_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
 
 # 文件大小限制：16MB
@@ -2706,7 +2874,7 @@ MAX_UPLOAD_SIZE = 16 * 1024 * 1024
 # 模型上传大小限制：100MB（Live2D 模型含贴图/动作资源）
 MAX_MODEL_UPLOAD_SIZE = 100 * 1024 * 1024
 # 自定义模型保存目录
-UPLOAD_MODELS_DIR = BASE_DIR / "static" / "models" / "uploads"
+UPLOAD_MODELS_DIR = CLIENT_DIR / "static" / "models" / "uploads"
 
 
 def _get_file_ext(file, allowed_ext=None) -> str:
@@ -3005,7 +3173,7 @@ def api_reset_avatar():
 
 
 # ============== 场景背景上传 / 重置（支持课程独立存储） ==============
-BG_DIR = BASE_DIR / "static" / "images"
+BG_DIR = CLIENT_DIR / "static" / "images"
 ALLOWED_BG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
 # 预设背景主题列表
@@ -3822,7 +3990,7 @@ def api_terminal_command():
             cwd = (LESSONS_DIR / lesson_folder)
             cwd.mkdir(parents=True, exist_ok=True)
         else:
-            cwd = Path(BASE_DIR) / "terminal_workspace"
+            cwd = DATA_DIR / "terminal_workspace"
 
         key = (lesson_folder or "", language)
         session = _TERMINAL_SESSIONS.get(key)
@@ -3936,6 +4104,7 @@ def api_lesson_config_put(lesson_folder: str):
 @app.route("/api/lessons", methods=["GET"])
 def api_lessons():
     items: List[Dict[str, Any]] = []
+    me = getattr(g, "username", None)
     if LESSONS_DIR.exists():
         for child in sorted(LESSONS_DIR.iterdir(), key=lambda p: p.name):
             if not child.is_dir():
@@ -3949,6 +4118,10 @@ def api_lessons():
                     metadata = json.loads(target_path.read_text(encoding="utf-8"))
                 except Exception:
                     metadata = {}
+            # 数据隔离：只列出自己创建的课程 + 无 owner 的遗留课程（共享）
+            owner = metadata.get("owner")
+            if owner and owner != me:
+                continue
             progress = load_progress(child.name)
             units = metadata.get("units") or []
             total_units = len(units)
@@ -4160,6 +4333,7 @@ def api_lesson_import():
         return jsonify({"error": f"解压失败：{exc}"}), 500
     finally:
         zf.close()
+    _tag_lesson_owner(dest.name)
     return jsonify({"status": "ok", "folder": dest.name, "imported_files": imported})
 
 
@@ -4809,6 +4983,7 @@ def api_apply_lesson():
 
     # 写入进度文件
     save_progress(lesson_folder, initial_progress)
+    _tag_lesson_owner(lesson_folder)
 
     # 清除预览状态
     ACTIVE_LESSON["preview_plan"] = None
@@ -7643,6 +7818,7 @@ def api_create_lesson():
     if "/" in lesson_folder or "\\" in lesson_folder or ".." in lesson_folder:
         return jsonify({"error": "非法的课程名"}), 400
     ensure_lesson_files(lesson_folder)
+    _tag_lesson_owner(lesson_folder)
     return jsonify({"ok": True, "lesson_folder": lesson_folder, "message": "课程创建成功"})
 
 
