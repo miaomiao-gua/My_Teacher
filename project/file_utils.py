@@ -129,9 +129,9 @@ def pdf_ocr_available() -> bool:
         return _OCR_CACHE["available"]
     _OCR_CACHE["checked"] = True
     try:
-        import os
+        # 注意：这里不要 import easyocr（会连带加载 torch，耗时数秒）。
+        # 只用标准库 zipfile 校验模型文件存在性与完整性；easyocr 只在真正 OCR 时懒加载。
         import zipfile
-        import easyocr  # noqa: F401
         # 模型目录 ~/.EasyOCR/model 下应有完整模型（detection + recognition）。
         # zip 需校验完整性（损坏/半截下载的模型视为不可用）；pth 需有实际大小。
         model_dir = os.path.join(os.path.expanduser("~"), ".EasyOCR", "model")

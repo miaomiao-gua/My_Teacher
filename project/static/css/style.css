@@ -1700,8 +1700,21 @@
             display: none;
             animation: sectionFade 0.25s ease;
         }
+        /* 内容区纵向排列，激活的 section 撑满剩余高度 → 各 tab 面板底部对齐 */
+        #view-settings .view-content-body {
+            display: flex;
+            flex-direction: column;
+        }
         .settings-section.active {
             display: block;
+            flex: 1 0 auto;
+        }
+        /* 各 section 内容底部对齐：card 之间间距统一 */
+        .settings-section.active > .card {
+            margin-bottom: 12px;
+        }
+        .settings-section.active > .card:last-child {
+            margin-bottom: 0;
         }
         /* ===== 字号：应用到右侧聊天面板和设置面板 ===== */
         .chat-sidebar,

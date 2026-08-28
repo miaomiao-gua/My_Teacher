@@ -6,7 +6,8 @@
     <title>AI 全能私教</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+    <noscript><link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600&display=swap" rel="stylesheet"></noscript>
     <!-- Markdown & Security（defer：不阻塞 HTML 解析，运行时才用到） -->
     <script defer src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
@@ -14,7 +15,7 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
     <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
     <!-- PixiJS v7 -->
-    <script src="https://cdn.jsdelivr.net/npm/pixi.js@7.3.2/dist/pixi.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/pixi.js@7.3.2/dist/pixi.min.js"></script>
     <!-- Polyfill: Node.js process global (used by pixi-live2d-display) -->
     <script>window.process = window.process || { env: { NODE_ENV: "production" } };</script>
     <!-- Polyfill: PixiJS v7 removed utils.EventEmitter, needed by pixi-live2d-display -->
@@ -117,7 +118,7 @@
     })();
     </script>
     <!-- Live2D Cubism Core -->
-    <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+    <script defer src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
     <!-- Cubism 2 minimal stub: satisfies pl2d load-time checks without real Cubism 2 SDK -->
     <script>
         if (!window.Live2D) window.Live2D = {};
@@ -152,9 +153,9 @@
         console.log('Cubism2 stub applied');
     </script>
     <!-- pixi-live2d-display -->
-    <script src="/static/js/pl2d.js"></script>
+    <script defer src="/static/js/pl2d.js"></script>
     <!-- Diagnostic: check if pixi-live2d-display loaded correctly -->
-    <script>
+    <script defer>
         console.log('PL2D check: PIXI.live2d keys =', Object.keys(PIXI.live2d || {}));
         console.log('PL2D check: Live2DModel =', typeof PIXI.live2d.Live2DModel);
         // If library failed to load, try to find internal model and expose it
@@ -168,7 +169,7 @@
         }
     </script>
 
-    <link rel="stylesheet" href="/static/css/style.css?v=4.0">
+    <link rel="stylesheet" href="/static/css/style.css?v=4.1">
 </head>
 <body>
     <!-- ========== 首页菜单（覆盖层） ========== -->
@@ -255,6 +256,7 @@
         </div>
     </div>
 
+    <!-- ========== 应用主界面 ========== -->
     <div id="app">
 
         <!-- ========== 顶部状态栏 v2 ========== -->
@@ -642,6 +644,16 @@
                                             <span class="val" id="lesson-search-val"></span>
                                         </div>
                                     </div>
+                                    <div class="setting-row">
+                                        <div class="setting-label">交互式备课（课前诊断）</div>
+                                        <div class="slider-control">
+                                            <label style="min-width:auto;"><input type="checkbox" id="interactive-prep-enabled" style="width:16px;height:16px;accent-color:var(--gold);cursor:pointer;vertical-align:middle;"></label>
+                                            <span class="val" id="interactive-prep-enabled-val">关</span>
+                                        </div>
+                                    </div>
+                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 0;">
+                                        实验功能：备课时先弹 4~6 道前置知识诊断题，AI 根据掌握情况生成针对性教案（未掌握的知识点讲解更详细）。
+                                    </p>
                                 </div>
 
                                 <div class="card">
@@ -974,9 +986,9 @@
         </div>
     </div>
     <!-- 应用逻辑：按依赖顺序加载（共享全局词法作用域）；?v= 用于开发期绕过浏览器缓存 -->
-    <script src="/static/js/base.js?v=4.1"></script>
-    <script src="/static/js/interact.js?v=3.28"></script>
-    <script src="/static/js/settings.js?v=3.14"></script>
+    <script src="/static/js/base.js?v=4.2"></script>
+    <script src="/static/js/interact.js?v=3.33"></script>
+    <script src="/static/js/settings.js?v=3.15"></script>
     <script src="/static/js/dashboard.js?v=4.0"></script>
 </body>
 </html>

@@ -610,7 +610,7 @@
                     const topic = quickPrepTopic ? quickPrepTopic.value.trim() : '';
                     if (!topic) { alert('请先输入课程主题'); return; }
                     closeModal(quickPrepModal);
-                    prepareAndEnter(topic, []);
+                    startPrepare(topic, []);
                 });
                 // 回车直接提交
                 if (quickPrepTopic) {
@@ -648,7 +648,7 @@
                     if (!topic) { alert('请先输入课程主题'); return; }
                     if (!files.length) { alert('请先选择至少一个课件文件'); return; }
                     closeModal(importPrepModal);
-                    prepareAndEnter(topic, files);
+                    startPrepare(topic, files);
                 });
                 if (menuImportTopic) {
                     menuImportTopic.addEventListener('keydown', function(e) {
@@ -657,8 +657,120 @@
                 }
             }
 
-            // AI 备课并进入课程（files：可选课程资料文件数组）
-            function prepareAndEnter(topic, files) {
+            // ============ 交互式备课诊断（实验功能 · 上课界面内对话） ============
+            // 复用上课聊天界面：老师气泡提问 → 学生底部输入回答 → AI 基于上下文追问，直到摸底完成。
+            let _diagMode = null;   // {session_id, topic, files, busy, final}
+
+            async function _diagStart(topic, files) {
+                _diagMode = { session_id: null, topic: topic, files: files || [], busy: false, final: null };
+                if (typeof hideMenu === 'function') hideMenu();
+                switchView('chat');
+                if (conversation) conversation.innerHTML = '';
+                updateTopbarCourseName('🎯 课前摸底 · ' + topic);
+                messageInput.placeholder = '回答老师的问题…（Enter 发送）';
+                addBubble('👋 在正式备课前，我想先和你聊两句，看看你对「' + topic + '」的基础掌握情况～', 'teacher');
+                try {
+                    const r = await fetch('/api/prep_diagnose/open', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ topic: topic })
+                    });
+                    const data = await r.json();
+                    if (data.error) throw new Error(data.error);
+                    _diagMode.session_id = data.session_id;
+                    addBubble('💡 ' + (data.question || ''), 'teacher');
+                    messageInput.focus();
+                } catch (err) {
+                    console.error('诊断开启失败', err);
+                    alert('诊断开启失败：' + (err.message || err) + '\n将直接进入普通备课');
+                    _diagEnd();
+                    prepareAndEnter(topic, files, null);
+                }
+            }
+
+            async function _diagSendAnswer(answer) {
+                if (!_diagMode || _diagMode.busy || !_diagMode.session_id) return;
+                _diagMode.busy = true;
+                sendBtn.disabled = true;
+                try {
+                    const r = await fetch('/api/prep_diagnose/answer', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ session_id: _diagMode.session_id, answer: answer })
+                    });
+                    const data = await r.json();
+                    if (data.error) throw new Error(data.error);
+                    if (data.reply) addBubble(data.reply, 'teacher');
+                    if (data.done) {
+                        // 摸底结束：总评 + 摸底结果卡 + 开始备课按钮
+                        if (data.summary) addBubble('📋 ' + data.summary, 'teacher');
+                        _diagMode.final = { known: data.known || [], partial: data.partial || [], unknown: data.unknown || [] };
+                        _diagShowSummaryCard();
+                    } else if (data.next_question) {
+                        // 兜底：若老师回应已以问句结尾（模型可能已把追问写进 reply），不再重复追加
+                        const replyIsQuestion = /[?？]\s*$/.test(data.reply || '') || /吗[。，]?\s*$/.test(data.reply || '');
+                        if (!replyIsQuestion) {
+                            const q = data.next_question + (data.next_concept ? '\n（考察：' + data.next_concept + '）' : '');
+                            addBubble('💡 ' + q, 'teacher');
+                        }
+                        messageInput.focus();
+                    } else {
+                        // 无下一问且未 done（异常）：直接收尾
+                        _diagMode.final = { known: data.known || [], partial: data.partial || [], unknown: data.unknown || [] };
+                        _diagShowSummaryCard();
+                    }
+                } catch (err) {
+                    console.error('提交回答失败', err);
+                    alert('提交失败：' + (err.message || err));
+                } finally {
+                    _diagMode.busy = false;
+                    sendBtn.disabled = false;
+                }
+            }
+
+            function _diagShowSummaryCard() {
+                const d = _diagMode.final || {};
+                const card = document.createElement('div');
+                card.className = 'bubble teacher';
+                let html = '<div><b>📊 摸底结果</b></div>';
+                html += '<div style="margin-top:6px;">📗 已掌握（' + (d.known || []).length + '）：' + ((d.known || []).join('、') || '（无）') + '</div>';
+                html += '<div>📙 部分掌握（' + (d.partial || []).length + '）：' + ((d.partial || []).join('、') || '（无）') + '</div>';
+                html += '<div>📕 未掌握（' + (d.unknown || []).length + '）：' + ((d.unknown || []).join('、') || '（无）') + '</div>';
+                html += '<div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">';
+                html += '<button class="btn btn-primary diag-start-prep">🚀 开始备课</button>';
+                html += '<button class="btn btn-ghost diag-cancel">取消</button>';
+                html += '</div>';
+                card.innerHTML = html;
+                conversation.appendChild(card);
+                conversation.scrollTop = conversation.scrollHeight;
+                const startBtn = card.querySelector('.diag-start-prep');
+                const cancelBtn = card.querySelector('.diag-cancel');
+                if (startBtn) startBtn.addEventListener('click', function() {
+                    const t = _diagMode.topic, f = _diagMode.files, d = _diagMode.final;
+                    _diagEnd();
+                    prepareAndEnter(t, f, d);
+                });
+                if (cancelBtn) cancelBtn.addEventListener('click', function() { _diagEnd(); });
+            }
+
+            function _diagEnd() {
+                _diagMode = null;
+                updateTopbarCourseName();
+                messageInput.placeholder = '输入你的问题...';
+            }
+
+            // 入口：根据 interactive_prep_enabled 决定走诊断还是直接备课
+            function startPrepare(topic, files) {
+                fetch('/api/config').then(r => r.json()).then(cfg => {
+                    const enabled = !!cfg.interactive_prep_enabled;
+                    if (enabled) {
+                        _diagStart(topic, files || []);
+                    } else {
+                        prepareAndEnter(topic, files || [], null);
+                    }
+                }).catch(() => prepareAndEnter(topic, files || [], null));
+            }
+
+            // AI 备课并进入课程（files：可选课程资料文件数组；diagnosis：可选诊断结果）
+            function prepareAndEnter(topic, files, diagnosis) {
                 // 显示备课中状态（使用专用 loading overlay）
                 var loadingOverlay = document.getElementById('menu-loading-overlay');
                 var loadingText = document.getElementById('menu-loading-text');
@@ -700,10 +812,12 @@
                     files.forEach(function(f) { fd.append('files', f); });
                     fetchOptions = { method: 'POST', body: fd };
                 } else {
+                    const body = { topic: topic };
+                    if (diagnosis) body.diagnosis = diagnosis;  // 把诊断结果喂给后端
                     fetchOptions = {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ topic: topic })
+                        body: JSON.stringify(body)
                     };
                 }
 
@@ -1138,6 +1252,15 @@
                     handleSlashCommand(slashMatch[1].toLowerCase(), slashMatch[2].trim());
                     messageInput.value = '';
                     messageInput.style.height = 'auto';
+                    return;
+                }
+                // 课前摸底模式：输入直接作为回答发给诊断接口（复用上课聊天界面）
+                if (_diagMode && _diagMode.session_id) {
+                    messageInput.value = '';
+                    messageInput.style.height = 'auto';
+                    if (!text) return;
+                    addBubble(text, 'user');
+                    _diagSendAnswer(text);
                     return;
                 }
                 // 未选择课程时提示
@@ -2328,7 +2451,7 @@
                 customPrompt('请输入课程主题，AI 将自动备课：\n\n例如：初中物理牛顿定律 / Python 入门 / Alevel 数学 M1P1')
                     .then(function(topic) {
                         if (topic && topic.trim()) {
-                            prepareAndEnter(topic.trim());
+                            startPrepare(topic.trim());
                         }
                     });
             });

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import random
+import secrets
 import re
 import shutil
 import subprocess
@@ -357,11 +358,14 @@ def default_config() -> Dict[str, Any]:
         "ocr_enabled": True,
         "ocr_engine": "easyocr",
         "ocr_langs": "ch_sim,en",
+        # 实验功能：交互式备课——开始备课时先弹一个多轮诊断问答，了解学生掌握度
+        # 再生成针对性教案。需要后端 /api/prep_diagnose 支持。
+        "interactive_prep_enabled": False,
         "auto_play_tts": False,
         "voice_enabled": False,
         "assistant_name": "AI 老师",                  # 用户可改成自己想要的老师名
         # 内置人设 prompt —— 用户可自由改写
-        "personality_prompt": "你是一位温柔、专业、耐心的 AI 学习导师。请以启发式提问方式指导学生：先解释概念，再给出生活化的例子，最后用一两个小问题确认理解。遇到学生答错时不要直接给答案，而是再换一种方式重讲一遍。保持亲切的口吻，称呼学生『你』，并适度使用 emoji 让对话更生动。",
+        "personality_prompt": "你是一位温柔、专业、耐心的 AI 学习导师。请以启发式提问方式指导学生：先解释概念，再给出生活化的例子，最后用一两个小问题确认理解。遇到学生答错时不要直接给答案，而是再换一种方式重讲一遍。保持亲切的口吻，称呼学生『你』，并适度使用 emoji 让对话更生动。\n\n【联想相似课程概念】讲到新概念时，如果学生可能已学过类似/对偶/对比的概念（比如 C++ 的 cout<< 与 Python 的 print()、Java 的 try-catch 与 Python 的 try-except），可以自然地用一句'这就像你之前学过的 X'做类比，让学生更易记忆；类比不要太频繁（每节课最多 1~2 次），且只在相似性高的地方用，不要硬凑。",
         # 备课（分课教案生成）system 提示词 —— 用户可在设置面板修改；下面是 v3 内置默认
         # （阶段一备课思考链 4 阶段升级版：课程级目标 + 每单元 3 维度设计 + 易混淆概念对比）
         "lesson_prompt": (
@@ -2525,7 +2529,7 @@ _BOOL_FIELDS = {
     "enable_local_ollama", "auto_play_tts", "voice_enabled",
     "tts_enabled", "tts_cloud_enabled", "vision_enabled",
     "enable_search", "chat_enable_search", "segment_enabled",
-    "portrait_float_enabled", "ocr_enabled",
+    "portrait_float_enabled", "ocr_enabled", "interactive_prep_enabled",
 }
 
 
@@ -4159,6 +4163,292 @@ def api_lesson_import():
     return jsonify({"status": "ok", "folder": dest.name, "imported_files": imported})
 
 
+# ============================
+# 交互式备课诊断（实验功能）：
+# 1) /api/prep_diagnose/open      —— 根据主题生成 4-6 个诊断问题（首轮），返回 questions
+# 2) /api/prep_diagnose/answer    —— 学生回答一轮问题，更新已掌握/未掌握清单，返回下一轮或 done
+# 3) /api/prep_diagnose/finish    —— 合并最终诊断结论 known_points / unknown_points
+# ============================
+_DIAGNOSIS_STATE: Dict[str, Dict[str, Any]] = {}
+
+
+def _diagnosis_get_lesson_provider_config() -> Dict[str, Any]:
+    """从当前 config 读取用于诊断问答的 provider / 模型信息，复用云端/对话配置。"""
+    cfg = load_config()
+    # 诊断对话语义与备课接近，优先用 lesson_provider；其没有时回退 chat_provider
+    provider = (cfg.get("lesson_provider") or cfg.get("chat_provider") or "auto").strip().lower()
+    if provider == "ollama":
+        base_url = (cfg.get("ollama_base_url") or "http://127.0.0.1:11434").rstrip("/")
+        return {
+            "provider": "ollama",
+            "base_url": base_url,
+            "model": (cfg.get("ollama_model") or "qwen3:8b").strip(),
+            "api_key": "",
+        }
+    # 云端 / auto 默认走 cloud_*
+    base_url = (cfg.get("cloud_base_url") or "https://api.siliconflow.cn/v1").rstrip("/")
+    return {
+        "provider": "cloud",
+        "base_url": base_url,
+        "model": (cfg.get("cloud_model") or "deepseek-ai/DeepSeek-V3").strip(),
+        "api_key": (cfg.get("cloud_api_key") or cfg.get("siliconflow_api_key") or "").strip(),
+    }
+
+
+def _diagnosis_get_fallback_config() -> Dict[str, Any]:
+    """fallback 配置：当主 provider 不可用时切换到这里。"""
+    cfg = load_config()
+    base_url = (cfg.get("cloud_base_url") or "https://api.siliconflow.cn/v1").rstrip("/")
+    api_key = (cfg.get("cloud_api_key") or cfg.get("siliconflow_api_key") or "").strip()
+    return {
+        "provider": "cloud",
+        "base_url": base_url,
+        "model": (cfg.get("cloud_model") or "deepseek-ai/DeepSeek-V3").strip(),
+        "api_key": api_key,
+    }
+
+
+def _diagnosis_call_llm(messages: List[Dict[str, str]], max_tokens: int = 1024, temperature: float = 0.5) -> Optional[str]:
+    """调用当前 provider 跑一次诊断问答，返回模型回复文本，失败返回 None。
+    主 provider 不可用（如本地 ollama 未启动）时，自动 fallback 到云端。
+    """
+    pc = _diagnosis_get_lesson_provider_config()
+    primary_err: Optional[str] = None
+    if pc["provider"] == "ollama":
+        try:
+            payload = {
+                "model": pc["model"],
+                "messages": messages,
+                "stream": False,
+                "think": False,
+                "options": {"temperature": temperature, "num_predict": max_tokens},
+            }
+            r = requests.post(f"{pc['base_url']}/api/chat", json=payload, timeout=20)
+            if r.ok:
+                text = (r.json().get("message", {}).get("content") or "").strip()
+                if text:
+                    return text
+                primary_err = "Ollama 返回空内容"
+            else:
+                primary_err = f"Ollama HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as exc:
+            primary_err = f"{type(exc).__name__}: {exc}"
+        # 失败：fallback 到云端
+        app.logger.warning("诊断·主路径 Ollama 不可用，自动 fallback 到云端 (%s)", primary_err)
+        pc = _diagnosis_get_fallback_config()
+    # 云端（OpenAI-compatible chat completions）
+    try:
+        if not pc.get("api_key"):
+            app.logger.error("诊断·云端 API Key 未配置 (primary_err=%s)", primary_err)
+            return None
+        url = f"{pc['base_url']}/chat/completions"
+        if pc["base_url"].endswith("/chat/completions"):
+            url = pc["base_url"]
+        payload = {
+            "model": pc["model"],
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        r = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {pc['api_key']}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=120,
+        )
+        if not r.ok:
+            app.logger.error("诊断·云端 HTTP %s: %s (primary_err=%s)", r.status_code, r.text[:300], primary_err)
+            return None
+        return (r.json()["choices"][0]["message"]["content"] or "").strip() or None
+    except Exception as exc:
+        app.logger.error("诊断·LLM 调用异常: %s: %s", type(exc).__name__, exc)
+        return None
+
+
+_DIAGNOSIS_OPEN_PROMPT = (
+    "你是一位经验丰富的老师，正在以对话的方式给学生做课前摸底。\n"
+    "针对【主题】，给出第一个开场问题：问该主题最基础、最关键的一个前置概念。\n"
+    "要求：问题简短自然（10~30 字），像老师课堂上随口发问，学生能用一两句话回答。\n\n"
+    "严格按 JSON 输出，禁止解释：\n"
+    '{"question": "第一个问题", "concept": "被考察的概念名"}'
+)
+
+
+_DIAGNOSIS_CONVO_PROMPT = (
+    "你是一位经验丰富的老师，正在以对话的方式给学生做课前摸底。\n"
+    "你要像真人老师一样自然交流：先回应学生上一轮的回答，再顺着上下文提出下一个问题，"
+    "一步步摸清学生对【主题】各核心方面的掌握情况。\n\n"
+    "【主题】\n{topic}\n\n"
+    "【对话记录】（老师与学生的历史问答）\n{history}\n\n"
+    "【本轮的最后一个学生回答】\n{answer}\n\n"
+    "现在请完成：\n"
+    "1. status：判断学生这轮回答的掌握程度（known=已掌握 / partial=部分掌握 / unknown=未掌握 / skip=跳过）\n"
+    "2. reply：一句简短的自然回应（≤30 字），只针对学生这轮的回答给出肯定、纠正或简单补充；"
+    "【绝对禁止】在 reply 中夹带任何问题或追问——所有追问一律只放在 next_question 字段里。\n"
+    "3. 决定下一步：\n"
+    "   - 若还需了解其他方面 → 给出 next_question（承接上下文的下一个问题，≤35 字）与 next_concept（该问题考察的概念名）\n"
+    "   - 若已了解足够（已覆盖该主题 4~6 个核心方面，或信息已充分）→ done=true，并给 summary（1~2 句总结学生整体水平）\n"
+    "4. known/partial/unknown：根据整个对话，把已确认的概念分别列出（只有明确确认才列入，不要重复）\n\n"
+    "严格按 JSON 输出，禁止多余文字：\n"
+    "{\n"
+    '  "status": "known|partial|unknown|skip",\n'
+    '  "reply": "老师对这次回答的回应",\n'
+    '  "next_question": "下一个问题（done 时为空）",\n'
+    '  "next_concept": "下一问概念（done 时为空）",\n'
+    '  "done": false,\n'
+    '  "summary": "总评（done 时填写，否则为空）",\n'
+    '  "known": ["概念"],\n'
+    '  "partial": ["概念"],\n'
+    '  "unknown": ["概念"]\n'
+    "}"
+)
+
+
+@app.route("/api/prep_diagnose/open", methods=["POST"])
+def api_prep_diagnose_open():
+    """开启诊断：生成对话式摸底的第一问。"""
+    payload = request.get_json(silent=True) or {}
+    topic = str(payload.get("topic") or "").strip()
+    if not topic:
+        return jsonify({"error": "topic 必填"}), 400
+    messages = [
+        {"role": "system", "content": _DIAGNOSIS_OPEN_PROMPT},
+        {"role": "user", "content": f"【主题】{topic}"},
+    ]
+    text = _diagnosis_call_llm(messages, max_tokens=300)
+    if not text:
+        return jsonify({"error": "诊断生成失败，请重试"}), 500
+    data = _robust_json_loads(text) if "_robust_json_loads" in globals() else json.loads(text)
+    if not isinstance(data, dict):
+        return jsonify({"error": "诊断问题格式错误", "raw": text[:500]}), 500
+    question = str(data.get("question") or "").strip()
+    concept = str(data.get("concept") or "").strip()
+    if not question:
+        return jsonify({"error": "诊断问题为空", "raw": text[:500]}), 500
+    # 分配 session id，状态保存到内存（一次诊断会话）
+    sid = secrets.token_urlsafe(16)
+    _DIAGNOSIS_STATE[sid] = {
+        "topic": topic,
+        "conversation": [],       # 每轮: {"q", "a", "status", "reply"}
+        "known": [],              # list of concept
+        "partial": [],
+        "unknown": [],
+        "rounds": 0,              # 已答轮数
+        "max_rounds": 6,          # 对话轮数上限，防止无限对话
+        "last_question": question,
+        "last_concept": concept,
+    }
+    return jsonify({"session_id": sid, "question": question, "concept": concept, "topic": topic})
+
+
+@app.route("/api/prep_diagnose/answer", methods=["POST"])
+def api_prep_diagnose_answer():
+    """对话式诊断：学生回答一轮，AI 基于完整对话历史生成回应 + 下一问（或结束）。"""
+    payload = request.get_json(silent=True) or {}
+    sid = str(payload.get("session_id") or "").strip()
+    answer = str(payload.get("answer") or "").strip()
+    state = _DIAGNOSIS_STATE.get(sid)
+    if not state:
+        return jsonify({"error": "session 已失效，请重新开启诊断"}), 400
+    if not answer:
+        return jsonify({"error": "answer 必填"}), 400
+    # 组装对话历史（老师的问题 + 学生的回答 + 历史评估）
+    history_lines = []
+    for turn in state["conversation"]:
+        history_lines.append(f"老师：{turn['q']}")
+        status_map = {"known": "已掌握", "partial": "部分掌握", "unknown": "未掌握", "skip": "跳过"}
+        history_lines.append(f"学生：{turn['a']}（我的判断：{status_map.get(turn['status'], turn['status'])})")
+    history_text = "\n".join(history_lines) or "（暂无，这是第一轮）"
+    sys_prompt = (_DIAGNOSIS_CONVO_PROMPT
+                  .replace("{topic}", state["topic"])
+                  .replace("{history}", history_text)
+                  .replace("{answer}", answer))
+    messages = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": answer},
+    ]
+    text = _diagnosis_call_llm(messages, max_tokens=700)
+    if not text:
+        return jsonify({"error": "评估失败，请重试"}), 500
+    try:
+        result = _robust_json_loads(text)
+    except Exception:
+        result = {}
+    if not isinstance(result, dict):
+        result = {}
+    status = str(result.get("status") or "unknown").strip().lower()
+    if status not in ("known", "partial", "unknown", "skip"):
+        status = "unknown"
+    reply = str(result.get("reply") or "").strip()
+    summary = str(result.get("summary") or "").strip()
+    next_q = str(result.get("next_question") or "").strip()
+    next_concept = str(result.get("next_concept") or "").strip()
+    done = bool(result.get("done") is True) or bool(str(result.get("done")).lower() == "true")
+    # 记录本轮
+    state["conversation"].append({
+        "q": state.get("last_question") or "",
+        "a": answer,
+        "status": status,
+        "reply": reply,
+    })
+    state["rounds"] += 1
+    # 合并概念清单（去重）
+    for bucket, items in (("known", result.get("known")), ("partial", result.get("partial")), ("unknown", result.get("unknown"))):
+        if isinstance(items, list):
+            for c in items:
+                c = str(c).strip()
+                if not c:
+                    continue
+                for b in (state["known"], state["partial"], state["unknown"]):
+                    if c in b:
+                        b.remove(c)
+                if c not in state[bucket]:
+                    state[bucket].append(c)
+    # 轮数硬限制：到上限强制结束
+    if not done and state["rounds"] >= state.get("max_rounds", 6):
+        done = True
+        if not summary:
+            summary = "对话已覆盖足够多的问题，摸底到此为止。"
+    # 下一问
+    if done:
+        next_q = ""
+        next_concept = ""
+    else:
+        state["last_question"] = next_q
+        state["last_concept"] = next_concept
+    return jsonify({
+        "status": status,
+        "reply": reply,
+        "next_question": next_q,
+        "next_concept": next_concept,
+        "done": done,
+        "summary": summary,
+        "known": state["known"],
+        "partial": state["partial"],
+        "unknown": state["unknown"],
+        "rounds": state["rounds"],
+        "max_rounds": state.get("max_rounds", 6),
+    })
+
+
+@app.route("/api/prep_diagnose/finish", methods=["POST"])
+def api_prep_diagnose_finish():
+    """结束诊断：合并所有轮的评估，返回结构化结论（known/partial/unknown），并清理 session。"""
+    payload = request.get_json(silent=True) or {}
+    sid = str(payload.get("session_id") or "").strip()
+    state = _DIAGNOSIS_STATE.pop(sid, None) if sid else None
+    if not state:
+        return jsonify({"error": "session 不存在或已结束"}), 400
+    return jsonify({
+        "topic": state["topic"],
+        "known": state["known"],
+        "partial": state["partial"],
+        "unknown": state["unknown"],
+        "total": state.get("rounds", 0),
+        "answered": state.get("rounds", 0),
+    })
+
+
 @app.route("/api/prepare_lesson", methods=["POST"])
 def api_prepare_lesson():
     """AI 备课预览（不保存到磁盘，用户确认后再保存）。
@@ -4240,7 +4530,12 @@ def api_prepare_lesson():
     if ACTIVE_LESSON.get("preview_pdf_files"):
         doc_toc = ACTIVE_LESSON["preview_pdf_files"][0].get("toc") or []
 
-    lesson_plan = prepare_lesson(topic, config=cfg, document_markdown=doc_markdown, doc_toc=doc_toc)
+    # 交互式备课诊断结论（来自 /api/prep_diagnose/finish）
+    diagnosis = payload.get("diagnosis") if isinstance(payload, dict) else None
+    if not isinstance(diagnosis, dict):
+        diagnosis = None
+
+    lesson_plan = prepare_lesson(topic, config=cfg, document_markdown=doc_markdown, doc_toc=doc_toc, diagnosis=diagnosis)
     # 备课来源元信息（是否兜底模板 / 降级说明 / 使用模型 / token 用量），从教案中摘出单独返回
     prep_meta = {}
     if isinstance(lesson_plan, dict):

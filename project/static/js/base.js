@@ -809,8 +809,10 @@
             function triggerAction(actionName, opts) {
                 opts = opts || {};
                 if (!live2dModel) {
-                    console.warn('Live2D not loaded, cannot trigger:', actionName);
-                    return Promise.reject(new Error('Live2D 未加载'));
+                    // Live2D 模型尚未加载完成（资源大、首次加载需要数秒）。
+                    // 静默忽略而不是 reject，避免在切换视图等高频场景抛出未捕获 Promise 错误。
+                    console.warn('Live2D 未加载，跳过动作:', actionName);
+                    return Promise.resolve(false);
                 }
                 // 自定义动作强度：优先调用方传入；否则取设置里该动作保存的强度
                 let intensity = opts.intensity;

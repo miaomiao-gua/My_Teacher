@@ -527,6 +527,15 @@
                             cloudApiKey.value = config.cloud_api_key || config.siliconflow_api_key || '';
                             cloudModel.value = config.cloud_model || config.siliconflow_model || '';
                             lessonSearch.checked = !!config.enable_search;
+                            const interactivePrep = document.getElementById('interactive-prep-enabled');
+                            if (interactivePrep) {
+                                interactivePrep.checked = !!config.interactive_prep_enabled;
+                                const val = document.getElementById('interactive-prep-enabled-val');
+                                if (val) val.textContent = interactivePrep.checked ? '开' : '关';
+                                interactivePrep.addEventListener('change', function() {
+                                    if (val) val.textContent = interactivePrep.checked ? '开' : '关';
+                                });
+                            }
                         }
                         if (ttsProvider) {
                             ttsProvider.value = (config.tts_provider || 'cloud').toLowerCase();
@@ -824,6 +833,10 @@
                                     cloud_api_key: cloudApiKey.value.trim(),
                                     cloud_model: cloudModel.value.trim(),
                                     enable_search: lessonSearch.checked,
+                                    interactive_prep_enabled: (function() {
+                                        const el = document.getElementById('interactive-prep-enabled');
+                                        return el ? el.checked : false;
+                                    })(),
                                     tts_provider: ttsProvider.value,
                                     tts_cloud_base_url: ttsCloudBaseUrl.value.trim(),
                                     tts_cloud_model: ttsCloudModel.value.trim(),
