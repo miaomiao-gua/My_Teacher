@@ -1,7 +1,9 @@
 import json
 import os
 import re
+import socket
 import sys
+import ipaddress
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import urlparse
@@ -24,6 +26,45 @@ ALLOWED_SCHEMES = {"http", "https"}
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".pptx", ".ppt", ".txt", ".md", ".html"}
 
 
+def _is_private_host(host: str) -> bool:
+    """判断主机是否为内网/回环/链路本地等不可信地址（SSRF 防护）。
+
+    明确的 IP（v4/v6）直接按分类判定；域名先解析，任一解析结果命中内网即拒绝。
+    解析失败（内网 DNS 环境）时放行，避免误伤正常公网下载。
+    """
+    host = (host or "").strip().rstrip(".").lower()
+    if not host:
+        return True
+
+    def _bad(ip: "ipaddress._BaseAddress") -> bool:
+        return (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+
+    try:
+        return _bad(ipaddress.ip_address(host))
+    except ValueError:
+        pass  # 不是纯 IP，按域名处理
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except Exception:
+        return False  # 解析失败放行（见函数注释）
+    for info in infos:
+        try:
+            if _bad(ipaddress.ip_address(info[4][0])):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def safe_url_check(url: str) -> bool:
+    """下载 URL 校验：仅允许 http/https，且目标不能是内网/回环等私网地址（SSRF 防护）。"""
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in ALLOWED_SCHEMES:
+        return False
+    return not _is_private_host(parsed.hostname or "")
+
+
 def sanitize_topic(topic: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fa5]+", "_", topic.strip())
     return cleaned.strip("_") or "lesson"
@@ -34,13 +75,6 @@ def ensure_lesson_dir(lesson_name: str, base_dir: str | Path | None = None) -> P
     lesson_path = base_path / lesson_name
     lesson_path.mkdir(parents=True, exist_ok=True)
     return lesson_path
-
-
-def safe_url_check(url: str) -> bool:
-    parsed = urlparse(url)
-    if parsed.scheme.lower() not in ALLOWED_SCHEMES:
-        return False
-    return True
 
 
 def download_resource(resource: Dict[str, Any], lesson_dir: str | Path, file_prefix: str = "resource") -> Path:

@@ -69,6 +69,14 @@ else
     echo "    .env 已存在，跳过"
 fi
 
+# ---------- 7. 数据文件权限加固 ----------
+# users.json / config.json 含密码哈希与 API Key，仅允许属主读写
+chmod 700 "${ROOT_DIR}/data" 2>/dev/null || true
+chmod 600 "${ROOT_DIR}/data/users.json" 2>/dev/null || true
+chmod 600 "${ROOT_DIR}/data/config.json" 2>/dev/null || true
+chmod 600 "${ROOT_DIR}/.env" 2>/dev/null || true
+find "${ROOT_DIR}/data" -type f -name '*.json' -exec chmod 600 {} + 2>/dev/null || true
+
 echo ""
 echo "安装完成。接下来："
 echo "  1) 编辑 .env 填写 API Key"

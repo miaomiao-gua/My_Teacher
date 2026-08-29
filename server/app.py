@@ -102,6 +102,10 @@ except ImportError:
 
 @app.after_request
 def no_cache_headers(response):
+    # 基础安全响应头（CSP 暂不加：页面使用大量内联脚本，硬加会破坏功能）
+    response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    response.headers.setdefault('X-Frame-Options', 'SAMEORIGIN')
+    response.headers.setdefault('Referrer-Policy', 'no-referrer')
     # 仅对 API 响应禁用缓存（保证数据实时性）；
     # /static/* 等静态资源走浏览器长缓存，避免每次刷新重复下载 pl2d.js 等大文件。
     # 注意必须直接赋值（而非 setdefault）：Flask 静态文件默认会带 Cache-Control: no-cache。
@@ -195,7 +199,7 @@ def _log_request():
                     body_summary = f"  body={_redact_body(raw)}"
             except Exception:
                 pass
-        app.logger.info(f"📥 {method} {path}{body_summary}")
+        app.logger.info(f"[REQ] {method} {path}{body_summary}")
     except Exception as exc:
         app.logger.warning(f"_log_request failed: {exc}")
 
@@ -211,11 +215,11 @@ def _log_response(response):
             return response
         status = response.status_code
         if status >= 500:
-            app.logger.error(f"📤 {status} {request.method} {path}")
+            app.logger.error(f"[RES:{status}] {request.method} {path}")
         elif status >= 400:
-            app.logger.warning(f"📤 {status} {request.method} {path}")
+            app.logger.warning(f"[RES:{status}] {request.method} {path}")
         else:
-            app.logger.info(f"📤 {status} {request.method} {path}")
+            app.logger.info(f"[RES:{status}] {request.method} {path}")
     except Exception:
         pass
     return response
@@ -225,7 +229,7 @@ def _log_response(response):
 def _handle_exception(exc):
     """捕获所有未处理异常，记录堆栈 + 返回 500。"""
     tb = traceback.format_exc()
-    app.logger.error(f"❌ 未处理异常 ({request.method} {request.path}): {exc}")
+    app.logger.error(f"[EXC] 未处理异常 ({request.method} {request.path}): {exc}")
     app.logger.error(tb)
     # 返回 JSON
     if request.path.startswith("/api/"):
@@ -286,9 +290,9 @@ for _sub_name in ("lesson_prep", "file_utils"):
     _sub_logger.propagate = False
 
 app.logger.info("=" * 60)
-app.logger.info("🚀 My Teacher app started")
-app.logger.info(f"📝 日志文件: {LOG_FILE}")
-app.logger.info(f"📂 课程目录: {LESSONS_DIR}")
+app.logger.info("[START] My Teacher app started")
+app.logger.info(f"[START] 日志文件: {LOG_FILE}")
+app.logger.info(f"[START] 课程目录: {LESSONS_DIR}")
 app.logger.info("=" * 60)
 
 class _PerUserLessonState(dict):
@@ -2640,15 +2644,40 @@ def api_auth_register():
     return jsonify({"ok": True, "username": username, "token": token})
 
 
+# 登录暴力破解防护：内存级失败计数 + 短时锁定（防御性加固；gunicorn 多 worker 不共享，够用）
+_LOGIN_FAILS: Dict[str, Dict[str, float]] = {}
+_LOGIN_FAIL_LOCK = threading.Lock()
+_LOGIN_FAIL_AFTER = 5      # 连续失败 N 次后锁定
+_LOGIN_FAIL_SECONDS = 60   # 锁定时长（秒）
+
+
+def _login_throttle_key(username: str) -> str:
+    return f"{request.remote_addr or '?'}@{username.strip().lower()}"
+
+
 @app.route("/api/auth/login", methods=["POST"])
 def api_auth_login():
     payload = request.get_json(silent=True) or {}
     username = (payload.get("username") or "").strip()
     password = payload.get("password") or ""
+    fail_key = _login_throttle_key(username)
+    now = time.time()
+    with _LOGIN_FAIL_LOCK:
+        rec = _LOGIN_FAILS.get(fail_key)
+        if rec and rec["until"] > now:
+            return jsonify({"error": f"尝试次数过多，请 {int(rec['until'] - now) + 1} 秒后再试"}), 429
     try:
         token = auth.login(username, password)
     except ValueError as exc:
+        with _LOGIN_FAIL_LOCK:
+            rec = _LOGIN_FAILS.get(fail_key)
+            fails = (rec["fails"] if rec else 0) + 1
+            until = now + _LOGIN_FAIL_SECONDS if fails >= _LOGIN_FAIL_AFTER else 0
+            _LOGIN_FAILS[fail_key] = {"fails": float(fails), "until": until}
         return jsonify({"error": str(exc)}), 401
+    # 登录成功：清除失败计数
+    with _LOGIN_FAIL_LOCK:
+        _LOGIN_FAILS.pop(fail_key, None)
     return jsonify({"ok": True, "username": username, "token": token})
 
 
@@ -3641,6 +3670,9 @@ def api_execute_code():
         cmd = _EXEC_LANG_MAP.get(language)
         if not cmd:
             return jsonify(ok=False, error=f"不支持的代码语言: {language}（支持 {', '.join(sorted(set(_EXEC_LANG_MAP)))}）")
+        # 破坏性命令拦截：shell 类语言与课程终端同规则（禁止删除/格式化/关机等）
+        if language in ("shell", "sh", "powershell") and any(p.search(code) for p in _DANGEROUS_PATTERNS):
+            return jsonify(ok=False, error=_DANGEROUS_MSG)
         # 解释器可用性检测：缺失时给出友好提示（而非"不是内部或外部命令"）
         # Windows 的 cmd/powershell 为系统内置，跳过 which 检测；其他平台一律检测
         exe_name = cmd[0]
@@ -5357,6 +5389,9 @@ def api_download_resources():
 
     if not lesson_folder:
         return jsonify({"error": "No active lesson selected"}), 400
+    # 安全校验：lesson_folder 必须是纯目录名，不能包含 .. / \（防路径穿越写文件）
+    if "/" in lesson_folder or "\\" in lesson_folder or ".." in lesson_folder:
+        return jsonify({"error": "非法的课程名"}), 400
 
     lesson_dir = LESSONS_DIR / lesson_folder
     lesson_dir.mkdir(parents=True, exist_ok=True)
