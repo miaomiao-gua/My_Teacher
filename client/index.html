@@ -169,7 +169,7 @@
         }
     </script>
 
-    <link rel="stylesheet" href="/static/css/style.css?v=4.3">
+    <link rel="stylesheet" href="/static/css/style.css?v=4.9">
 </head>
 <body>
     <!-- ========== 首页菜单（覆盖层） ========== -->
@@ -598,7 +598,7 @@
                             <div class="settings-section active" data-section="model">
                                 <div class="card">
                                     <h3>💬 对话模型（讲课用）</h3>
-                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                    <p class="card-desc">
                                         控制讲课时的对话。API Key 仅保存在本地 config.json，不会上传到任何服务器。
                                     </p>
                                     <div class="setting-row">
@@ -631,6 +631,13 @@
                                         <div class="setting-label">Ollama 模型</div>
                                         <input type="text" id="ollama-model" placeholder="qwen2.5:7b">
                                     </div>
+                                    <div class="setting-row chat-ollama-field" style="display:none;">
+                                        <div class="setting-label">客户端直连</div>
+                                        <label style="font-size:12px; color:var(--text-muted); display:flex; align-items:center; gap:6px; cursor:pointer;">
+                                            <input type="checkbox" id="ollama-client-direct" style="width:auto;">
+                                            聊天由浏览器直连「本机 Ollama」（局域网访问时使用客户端电脑上的模型）
+                                        </label>
+                                    </div>
                                     <div style="margin-top:8px;">
                                         <button id="chat-test-btn" class="btn-sm">测试 Ollama 连接</button>
                                         <span id="chat-test-status" style="font-size:12px; color:var(--text-muted); margin-left:8px;"></span>
@@ -639,7 +646,7 @@
 
                                 <div class="card">
                                     <h3>📚 备课模型（生成教案用）</h3>
-                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                    <p class="card-desc">
                                         控制「一句话备课」「导入课件备课」时调用哪个模型生成教案。
                                     </p>
                                     <div class="setting-row">
@@ -677,14 +684,14 @@
                                             <span class="val" id="interactive-prep-enabled-val">关</span>
                                         </div>
                                     </div>
-                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 0;">
+                                    <p class="card-desc">
                                         实验功能：备课时先弹 4~6 道前置知识诊断题，AI 根据掌握情况生成针对性教案（未掌握的知识点讲解更详细）。
                                     </p>
                                 </div>
 
                                 <div class="card">
                                     <h3>🖼️ 识图模型（可选）</h3>
-                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                    <p class="card-desc">
                                         启用后，聊天里上传的图片会先经识图模型识别，再把内容交给对话模型回答。
                                     </p>
                                     <div class="setting-row">
@@ -713,7 +720,7 @@
                             <div class="settings-section" data-section="tts">
                                 <div class="card">
                                     <h3>🔊 语音总开关</h3>
-                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                    <p class="card-desc">
                                         关闭后，AI 回复不再自动朗读，手动点 🔊 也不会发声。
                                     </p>
                                     <div class="setting-row">
@@ -727,13 +734,13 @@
 
                                 <div class="card">
                                     <h3>☁️ 云端 TTS（硅基流动 CosyVoice）</h3>
-                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                    <p class="card-desc">
                                         需要云端 API Key（与备课模型共用），无需本地 TTS 服务。
                                     </p>
                                     <div class="setting-row">
                                         <div class="setting-label">启用云端 TTS</div>
                                         <div class="slider-control">
-                                            <label style="min-width:auto;" title="云端 TTS 独立开关"><input type="checkbox" id="tts-cloud-enabled" style="width:14px;height:14px;accent-color:var(--gold);cursor:pointer;vertical-align:middle;"> 开</label>
+                                            <label style="min-width:auto;" title="云端 TTS 独立开关"><input type="checkbox" id="tts-cloud-enabled" style="width:14px;height:14px;accent-color:var(--gold);cursor:pointer;vertical-align:middle;"></label>
                                             <span class="val" id="tts-cloud-enabled-val">关</span>
                                         </div>
                                     </div>
@@ -753,7 +760,7 @@
 
                                 <div class="card">
                                     <h3>🖥️ 本地 TTS 服务</h3>
-                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                    <p class="card-desc">
                                         需要本地启动 TTS 服务（默认端口 8000）。
                                     </p>
                                     <div class="setting-row">
@@ -789,14 +796,14 @@
                             <div class="settings-section" data-section="prompt">
                                 <div class="card">
                                     <h3>🧑‍🏫 老师人格提示词</h3>
-                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                    <p class="card-desc">
                                         定义 AI 讲课时的性格、教学风格、口吻。留空使用内置默认。
                                     </p>
                                     <textarea id="personality-prompt-input" rows="6" placeholder="你是一位温柔、专业、耐心的 AI 学习导师..."></textarea>
                                 </div>
                                 <div class="card">
                                     <h3>📚 备课系统提示词</h3>
-                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                    <p class="card-desc">
                                         控制「一句话备课」「导入课件备课」时如何生成教案 JSON。留空使用内置默认。
                                     </p>
                                     <textarea id="lesson-prompt-input" rows="10" placeholder="定义生成分课教案的格式与要求（JSON 结构）..."></textarea>
@@ -807,7 +814,7 @@
                             <div class="settings-section" data-section="character">
                                 <div class="card">
                                     <h3>📍 角色位置与大小</h3>
-                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                    <p class="card-desc">
                                         调整 Live2D 角色在屏幕上的位置与缩放。改动立即生效。
                                     </p>
                                     <div class="setting-row">
@@ -835,7 +842,7 @@
 
                                 <div class="card">
                                     <h3>🦊 Live2D 模型</h3>
-                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                    <p class="card-desc">
                                         支持 .zip（模型包，内含 model3.json 或 model.json）、.model3.json / .moc3（Cubism 3/4/5）、model.json / .moc（Cubism 2.1）。
                                     </p>
                                     <div class="setting-row">
@@ -850,7 +857,7 @@
 
                                 <div class="card">
                                     <h3>🖼️ 头像 / 字号</h3>
-                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                    <p class="card-desc">
                                         头像在菜单页和课程列表显示；字号影响整个右侧聊天与设置面板。
                                     </p>
                                     <div class="setting-row">
@@ -869,7 +876,7 @@
 
                                 <div class="card">
                                     <h3>🎭 情绪映射（Open-LLM-VTuber 协议）</h3>
-                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                    <p class="card-desc">
                                         本地模型在回复中输出情绪标签（[joy] / [sadness] 等），自动调用对应表情与动作。
                                         留空则回退到默认映射（neutral→0、happy→3、sad→1 等）。
                                     </p>
@@ -881,7 +888,7 @@
                             <div class="settings-section" data-section="background">
                                 <div class="card">
                                     <h3>🖼️ 主题背景</h3>
-                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                    <p class="card-desc">
                                         选择预设主题或上传自定义图片作为整个应用的背景。
                                     </p>
                                     <div class="bg-preset-grid">
@@ -903,7 +910,7 @@
                             <div class="settings-section" data-section="advanced">
                                 <div class="card">
                                     <h3>✂️ 回复分段</h3>
-                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                    <p class="card-desc">
                                         老师的回复按分段标记拆成小段逐句展示。若本地模型把标记误写成代码块围栏（如 <code>```c</code>）导致格式错乱，系统会自动清洗并还原。
                                     </p>
                                     <div class="setting-row">
@@ -915,7 +922,7 @@
                                     </div>
                                     <div class="setting-row">
                                         <div class="setting-label">分段标记</div>
-                                        <input type="text" id="segment-marker" value="\c" spellcheck="false" style="background:rgba(0,0,0,0.25); border:1px solid var(--border-mid); border-radius:8px; padding:8px 10px; color:var(--text-primary); font-family:ui-monospace,Consolas,monospace; font-size:13px;">
+                                        <input type="text" id="segment-marker" value="\c" spellcheck="false">
                                     </div>
                                     <div class="setting-row">
                                         <div class="setting-label">每段行数上限</div>
@@ -928,7 +935,7 @@
 
                                 <div class="card">
                                     <h3>📐 右侧栏宽度</h3>
-                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                    <p class="card-desc">
                                         调整右侧聊天/设置面板占屏幕的百分比（25-60%）。也可以直接拖动分隔条。
                                     </p>
                                     <div class="setting-row">
@@ -942,7 +949,7 @@
 
                                 <div class="card">
                                     <h3>🎬 自定义动作</h3>
-                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                    <p class="card-desc">
                                         每个动作一行：左侧填<em>模型动作 ID</em>（如 wave / speak / think / idle / listen），
                                         右侧填<em>UI 名字</em>（触发关键字）。拖动下方滑条可实时调试动作强度。
                                         保存后用 <code>/action &lt;名字&gt;</code> 或让 AI 触发。
@@ -953,7 +960,7 @@
 
                                 <div class="card">
                                     <h3>🧠 学生画像（AI 记忆）</h3>
-                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                    <p class="card-desc">
                                         系统从每一课的对话中自动提炼你的性格、爱好与喜欢的授课方式，注入后续课程的
                                         系统提示词，让老师越教越懂你。也可在下方手动刷新当前画像。
                                     </p>
@@ -969,7 +976,7 @@
 
                             <div class="settings-save-bar">
                                 <button id="save-settings-btn" class="settings-save-btn">💾 立即保存</button>
-                                <span id="settings-save-status" data-kind="pending" style="margin-left:12px; font-size:12px; color:var(--text-muted); font-family:var(--font-serif);">自动保存已启用 · 改动后 0.5 秒生效</span>
+                                <span id="settings-save-status" class="save-status" data-kind="pending">自动保存已启用 · 改动后 0.5 秒生效</span>
                             </div>
                         </div>
                     </div>
@@ -1139,8 +1146,8 @@
     })();
     </script>
     <script src="/static/js/base.js?v=4.2"></script>
-    <script src="/static/js/interact.js?v=3.33"></script>
-    <script src="/static/js/settings.js?v=3.15"></script>
+    <script src="/static/js/interact.js?v=3.34"></script>
+    <script src="/static/js/settings.js?v=3.16"></script>
     <script src="/static/js/dashboard.js?v=4.0"></script>
 </body>
 </html>

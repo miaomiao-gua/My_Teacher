@@ -157,6 +157,36 @@ python app.py
 
 ---
 
+## 🐧 Linux 部署
+
+后端为 Flask，代码本身跨平台；终端执行模块在 Linux 上自动使用 `bash` 替代 `cmd/powershell`（`sys.platform` 判断，Windows 行为不变）。
+
+### 方式一：脚本安装（推荐）
+
+```bash
+cd deploy/linux
+bash install.sh        # 创建 .venv-linux + 安装依赖 + 生成 .env
+# 编辑 .env 填写 API Key 后：
+bash run.sh            # 开发模式（MODE=dev 默认）
+MODE=prod bash run.sh  # 生产模式（gunicorn，默认 2 个 worker）
+```
+
+可选环境变量：`HOST`（默认 `0.0.0.0`）、`PORT`（默认 `5000`）、`GUNICORN_WORKERS`、`VENV_DIR`。
+
+### 方式二：systemd 开机自启（生产）
+
+1. 将项目部署到 `/opt/my-teacher` 并执行 `install.sh`
+2. 复制服务单元并按实际路径修改其中的 `User` / `WorkingDirectory` / `ExecStart`：
+
+```bash
+sudo cp deploy/linux/my-teacher.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now my-teacher
+journalctl -u my-teacher -f   # 查看日志
+```
+
+> 说明：`requirements.txt` 含 python-pptx（后端硬依赖）；`gunicorn` 仅 Linux 生产需要，由 `install.sh` 单独安装，不影响 Windows 开发环境。OCR（easyocr + PyMuPDF + torch）依赖较重，默认跳过安装，需要时取消 `install.sh` 中对应注释即可。
+
 ## 📁 项目结构
 
 ```
@@ -176,6 +206,7 @@ My_Teacher/
 │   ├── agents/                 ← v4 多 Agent 系统（6 类角色）
 │   ├── code_executor.py        ← 安全代码执行沙箱
 │   └── requirements.txt        ← Python 依赖
+├── deploy/linux/               ← Linux 部署（install.sh / run.sh / systemd 服务）
 ├── client/                     ← 前端（原生 JS 单页应用）
 │   ├── index.html              ← 前端单页应用（含登录/注册页）
 │   └── static/

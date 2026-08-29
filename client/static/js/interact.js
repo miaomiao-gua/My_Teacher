@@ -1385,6 +1385,146 @@
                         startGalgamePlayback();
                     }
 
+                    // 客户端直连 Ollama（仅聊天）：后端不再转发，改由浏览器直连「客户端本机」的 ollama。
+                    // 在 read() 循环中识别 client_direct 帧后转入直连流程。
+                    async function startClientOllamaDirect(dp, sentText) {
+                        // 服务端只发直连包一帧，清理原 SSE 超时，由直连流程自行管理
+                        if (window._chatStreamTimeout) { clearTimeout(window._chatStreamTimeout); window._chatStreamTimeout = null; }
+                        window._chatStreamTimeout = setTimeout(function() {
+                            if (isStreaming) {
+                                console.warn('[ollama-direct] 直连超时（90s），强制释放');
+                                const b0 = segmentBubbles[0];
+                                if (b0) b0.textContent = (b0.textContent || '') + '\n（响应超时）';
+                                else segmentBubbles[0] = addBubble('（响应超时）', 'teacher');
+                                isStreaming = false;
+                                sendBtn.disabled = false;
+                                dialogueStreaming = false;
+                                if (live2dModel) { try { triggerAction('idle'); } catch (e) {} }
+                            }
+                        }, 90000);
+                        try {
+                            const resp = await fetch(dp.endpoint, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    model: dp.model,
+                                    messages: dp.messages,
+                                    stream: true,
+                                    options: dp.options || {}
+                                })
+                            });
+                            if (!resp.ok) throw new Error('Ollama HTTP ' + resp.status);
+                            if (!resp.body) throw new Error('无响应流');
+                            const reader = resp.body.getReader();
+                            const decoder = new TextDecoder();
+                            let fullText = '';
+                            // 直连流：先建一个气泡，token 实时追加（纯文本；结束后由后端分段重建）
+                            dialogueSegments.length = 0;
+                            segmentBubbles[0] = addBubble('', 'teacher');
+                            latestSeg = 0;
+                            function readDirect() {
+                                reader.read().then(function(respData) {
+                                    if (respData.done) {
+                                        finishClientOllamaDirect(fullText, sentText, null);
+                                        return;
+                                    }
+                                    const chunk = decoder.decode(respData.value, { stream: true });
+                                    const lines = chunk.split('\n');
+                                    for (const line of lines) {
+                                        if (!line.trim()) continue;
+                                        try {
+                                            const obj = JSON.parse(line);
+                                            // Ollama NDJSON：{"message":{"content":"token"},"done":false}
+                                            if (obj.message && obj.message.content) {
+                                                fullText += obj.message.content;
+                                                dialogueSegments[0] = fullText;
+                                                const b = segmentBubbles[0];
+                                                if (b) b.textContent = stripCodeFenceMarks(fullText);
+                                                const nearBottom = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 80;
+                                                if (nearBottom) conversation.scrollTop = conversation.scrollHeight;
+                                            }
+                                            if (obj.done) {
+                                                finishClientOllamaDirect(fullText, sentText, null);
+                                                return;
+                                            }
+                                        } catch (e) {}
+                                    }
+                                    readDirect();
+                                }).catch(function(err) {
+                                    console.error('[ollama-direct] read error:', err);
+                                    finishClientOllamaDirect(fullText, sentText, err);
+                                });
+                            }
+                            readDirect();
+                        } catch (err) {
+                            console.error('[ollama-direct] fetch error:', err);
+                            if (window._chatStreamTimeout) { clearTimeout(window._chatStreamTimeout); window._chatStreamTimeout = null; }
+                            const msg = '❌ 无法连接客户端本机 Ollama（' + (err.message || err) + '）\n请确认：① 本机已启动 Ollama；② 已安装模型 ' + dp.model + '；③ 若经局域网访问，本机 Ollama 需允许跨域（设置 OLLAMA_ORIGINS=* 并重启 Ollama）';
+                            const b0 = segmentBubbles[0];
+                            if (b0) b0.textContent = msg;
+                            else segmentBubbles[0] = addBubble(msg, 'teacher');
+                            isStreaming = false;
+                            sendBtn.disabled = false;
+                            dialogueStreaming = false;
+                            if (live2dModel) { try { triggerAction('idle'); } catch (e) {} }
+                        }
+                    }
+
+                    // 直连流结束后：交给后端收尾（分段/工具/TTS/存档），与服务端转发模式体验一致
+                    async function finishClientOllamaDirect(fullText, sentText, err) {
+                        if (window._chatStreamTimeout) { clearTimeout(window._chatStreamTimeout); window._chatStreamTimeout = null; }
+                        if (err) {
+                            const text = fullText || ('❌ 读取 Ollama 回复失败：' + (err.message || err));
+                            dialogueSegments = [text];
+                            renderSegmentsToBubbles();
+                            finishDialogue();
+                            return;
+                        }
+                        if (!fullText || !fullText.trim()) {
+                            dialogueSegments = ['（客户端 Ollama 未返回内容，请检查本机模型是否可用）'];
+                            renderSegmentsToBubbles();
+                            finishDialogue();
+                            return;
+                        }
+                        try {
+                            const resp = await fetch('/api/chat/postprocess', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ reply: fullText, lesson_folder: currentLesson, message: sentText })
+                            });
+                            const res = await resp.json();
+                            if (res && res.ok) {
+                                dialogueSegments = (res.segments && res.segments.length) ? res.segments.slice() : [res.content || fullText];
+                                // 重建每个分段的独立气泡（后端返回的最终分段）
+                                segmentBubbles.length = 0;
+                                for (let i = 0; i < dialogueSegments.length; i++) {
+                                    segmentBubbles[i] = addBubble('', 'teacher');
+                                }
+                                renderSegmentsToBubbles();
+                                // 工具调用（黑板/终端/图片按序触发）
+                                if (res.tool_events && res.tool_events.length) {
+                                    res.tool_events.forEach(function(t) {
+                                        if (t && typeof t === 'object' && typeof window.handleAITool === 'function') window.handleAITool(t);
+                                    });
+                                } else if (res.tool_event && typeof res.tool_event === 'object') {
+                                    if (typeof window.handleAITool === 'function') window.handleAITool(res.tool_event);
+                                }
+                                if (res.action) { try { triggerAction(res.action); } catch (e) {} }
+                                if (res.emotion) setEmotion(res.emotion);
+                                if (res.params && typeof window.setLive2DParams === 'function') window.setLive2DParams(res.params, 400, 2500);
+                                if (res.audio_url) _pendingWholeAudio = res.audio_url;
+                            } else {
+                                dialogueSegments = [fullText];
+                                renderSegmentsToBubbles();
+                            }
+                        } catch (e) {
+                            console.error('[ollama-direct] postprocess error:', e);
+                            dialogueSegments = [fullText];
+                            renderSegmentsToBubbles();
+                        }
+                        finishDialogue();
+                    }
+
                     function read() {
                         reader.read().then(({ done, value }) => {
                             if (done) {
@@ -1404,6 +1544,11 @@
                                     }
                                     try {
                                         const data = JSON.parse(payload);
+                                        // 客户端直连 Ollama（仅聊天）：后端仅下发直连包，浏览器直连本机 ollama
+                                        if (data.client_direct && data.payload) {
+                                            startClientOllamaDirect(data.payload, text);
+                                            return;
+                                        }
                                         // preview 帧：生成过程中的 token。不再实时刷新正文——高频 DOM 写入
                                         // 会造成"先卡顿过一遍" + 前端卡顿；内容统一由 content 帧 + 完成后
                                         // 的逐段播放呈现（对话条保持"思考中"动画）。

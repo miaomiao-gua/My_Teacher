@@ -520,6 +520,8 @@
                             chatModel.value = config.chat_model || '';
                             ollamaBaseUrl.value = config.ollama_base_url || '';
                             ollamaModel.value = config.ollama_model || '';
+                            const ollamaClientDirect = document.getElementById('ollama-client-direct');
+                            if (ollamaClientDirect) ollamaClientDirect.checked = !!config.ollama_client_direct;
                         }
                         if (lessonProvider) {
                             lessonProvider.value = (config.lesson_provider || 'cloud').toLowerCase();
@@ -828,6 +830,10 @@
                                     chat_model: chatModel.value.trim(),
                                     ollama_base_url: ollamaBaseUrl.value.trim() || 'http://127.0.0.1:11434',
                                     ollama_model: ollamaModel.value.trim() || 'qwen2.5:7b',
+                                    ollama_client_direct: (function() {
+                                        const el = document.getElementById('ollama-client-direct');
+                                        return el ? el.checked : false;
+                                    })(),
                                     lesson_provider: lessonProvider.value,
                                     cloud_base_url: cloudBaseUrl.value.trim(),
                                     cloud_api_key: cloudApiKey.value.trim(),

@@ -21,7 +21,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
-from flask import Flask, Response, g, jsonify, render_template, request, send_file, send_from_directory, stream_with_context
+from flask import (Flask, Response, g, has_request_context, jsonify, render_template,
+                   request, send_file, send_from_directory, stream_with_context)
 from werkzeug.utils import secure_filename
 
 # 尝试加载 .env 环境变量（开发环境）
@@ -108,6 +109,10 @@ def no_cache_headers(response):
         response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
         response.headers['Pragma'] = 'no-cache'
         response.headers['Expires'] = '0'
+    elif request.path == "/":
+        # HTML 页面必须每次回源校验（no-cache）：页面引用的静态资源带 ?v= 版本号，
+        # 若 HTML 也走 7 天长缓存，前端改动后用户会一直拿到旧引用导致样式/脚本不更新。
+        response.headers['Cache-Control'] = 'no-cache'
     else:
         response.headers['Cache-Control'] = 'public, max-age=604800'
     return response
@@ -360,6 +365,9 @@ def default_config() -> Dict[str, Any]:
         # 模拟"用户刚 clone 下来"的初始状态：本地服务 URL 保留，其余用户配置字段全部清空。
         "ollama_base_url": "http://127.0.0.1:11434",  # 本地服务，无需配置
         "ollama_model": "qwen3:8b",                   # 内置默认模型（用户可改成本地已安装的其它模型）
+        # 客户端直连：开启后聊天对话由浏览器直连「客户端本机」的 ollama（http://127.0.0.1:11434），
+        # 不再经由服务端转发；适用于局域网访问时使用客户端电脑上安装的 ollama（需客户端 ollama 允许 CORS）。
+        "ollama_client_direct": False,
         "ollama_num_ctx": 16384,
         "ollama_temperature": 0.7,
         "ollama_num_predict": 8192,
@@ -536,6 +544,41 @@ def default_config() -> Dict[str, Any]:
     }
 
 
+# ============== 用户级数据隔离（配置/头像/背景/模型/音频等按账号隔离） ==============
+
+def _current_username() -> Optional[str]:
+    """当前请求对应的登录用户名；无请求上下文或未登录时返回 None。"""
+    if not has_request_context():
+        return None
+    return getattr(g, "username", None)
+
+
+def _user_data_dir(username: str) -> Path:
+    """用户私有数据目录：data/users/<username>/（config.json 等）。"""
+    return DATA_DIR / "users" / username
+
+
+def _user_config_path(username: str) -> Path:
+    return _user_data_dir(username) / "config.json"
+
+
+def _load_user_config(username: str) -> Dict[str, Any]:
+    """读取用户级配置覆盖层（不存在或解析失败返回 {}）。"""
+    p = _user_config_path(username)
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _user_static_dir(kind: str, username: str) -> Path:
+    """用户私有静态资源目录：client/static/<kind>/users/<username>/。"""
+    return CLIENT_DIR / "static" / kind / "users" / (username or "")
+
+
 def load_config() -> Dict[str, Any]:
     # 记录磁盘上实际存在的字段名（用于旧字段名迁移判断，见 _env_override）
     disk_keys: set = set()
@@ -551,7 +594,14 @@ def load_config() -> Dict[str, Any]:
             cfg.update(data)
             disk_keys = set(data.keys())
 
-    # 环境变量覆盖（优先级高于 config.json）
+    # 用户级配置覆盖层（账号隔离）：当前登录用户的 config.json 优先级高于全局
+    username = _current_username()
+    if username:
+        user_cfg = _load_user_config(username)
+        if user_cfg:
+            cfg.update(user_cfg)
+
+    # 环境变量覆盖（优先级最高，部署级配置）
     _env_override(cfg, disk_keys)
     return cfg
 
@@ -599,10 +649,20 @@ def _env_override(cfg: Dict[str, Any], disk_keys: Optional[set] = None) -> None:
 
 
 def save_config(data: Dict[str, Any]) -> Dict[str, Any]:
-    """合并保存配置：在现有配置基础上覆盖传入字段，不丢失已有配置。"""
+    """合并保存配置：在现有配置基础上覆盖传入字段，不丢失已有配置。
+
+    账号隔离：请求上下文中存在登录用户时，写入该用户的私有 config.json
+    （data/users/<username>/config.json）；否则写入全局 config.json。
+    """
     current = load_config()
     current.update(data or {})
-    _atomic_write_json(CONFIG_PATH, current)
+    username = _current_username()
+    if username:
+        path = _user_config_path(username)
+        path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        path = CONFIG_PATH
+    _atomic_write_json(path, current)
     return current
 
 
@@ -2274,12 +2334,14 @@ def cloud_tts_audio(text: str) -> str | None:
         if not response.ok:
             print(f"[tts] 云端 TTS 失败 HTTP {response.status_code}: {response.text[:300]}", flush=True)
             return None
-        audio_dir = CLIENT_DIR / "static" / "audio"
+        # 账号隔离：音频存到 static/audio/users/<username>/
+        username = _current_username() or "default"
+        audio_dir = _user_static_dir("audio", username)
         audio_dir.mkdir(parents=True, exist_ok=True)
         file_name = f"tts_cloud_{int(time.time() * 1000)}.{response_format}"
         file_path = audio_dir / file_name
         file_path.write_bytes(response.content)
-        return f"/static/audio/{file_name}"
+        return f"/static/audio/users/{username}/{file_name}"
     except Exception as exc:
         print(f"[tts] 云端 TTS 异常: {exc}", flush=True)
         return None
@@ -2449,9 +2511,12 @@ def api_upload_file():
     data = f.read(MAX_UPLOAD_SIZE + 1)
     if len(data) > MAX_UPLOAD_SIZE:
         return jsonify({"ok": False, "message": f"文件过大，最大支持 {MAX_UPLOAD_SIZE // 1024 // 1024}MB"}), 400
-    CHAT_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    # 账号隔离：附件按用户存放 static/uploads/chat/<username>/
+    username = _current_username() or "default"
+    chat_dir = CHAT_UPLOAD_DIR / username
+    chat_dir.mkdir(parents=True, exist_ok=True)
     file_name = f"{int(time.time() * 1000)}_{safe}"
-    file_path = CHAT_UPLOAD_DIR / file_name
+    file_path = chat_dir / file_name
     file_path.write_bytes(data)
     att_type = "image" if ext in IMAGE_EXT else "file"
     content = ""
@@ -2470,7 +2535,7 @@ def api_upload_file():
     print(f"[upload_file] 已保存 {safe} → {file_path.name} ({len(data)} bytes, type={att_type})", flush=True)
     return jsonify({
         "ok": True,
-        "url": f"/static/uploads/chat/{file_name}",
+        "url": f"/static/uploads/chat/{username}/{file_name}",
         "name": safe,
         "type": att_type,
         "size": len(data),
@@ -2501,12 +2566,14 @@ def local_tts_audio(text: str) -> str | None:
         )
         if not response.ok:
             return cloud_tts_audio(text)
-        audio_dir = CLIENT_DIR / "static" / "audio"
+        # 账号隔离：音频存到 static/audio/users/<username>/
+        username = _current_username() or "default"
+        audio_dir = _user_static_dir("audio", username)
         audio_dir.mkdir(parents=True, exist_ok=True)
         file_name = f"tts_{int(time.time() * 1000)}.wav"
         file_path = audio_dir / file_name
         file_path.write_bytes(response.content)
-        return f"/static/audio/{file_name}"
+        return f"/static/audio/users/{username}/{file_name}"
     except Exception:
         return cloud_tts_audio(text)
 
@@ -2983,17 +3050,19 @@ def api_upload_avatar():
                 ACTIVE_LESSON["metadata"] = current
             return jsonify({"ok": True, "avatar_url": avatar_url, "lesson_folder": lesson_folder, "config": current})
 
-    # 全局存储
-    AVATAR_DIR.mkdir(parents=True, exist_ok=True)
-    for stale in AVATAR_DIR.glob("avatar.upload.*"):
+    # 账号隔离：头像存到 static/images/users/<username>/avatar.<ext>
+    username = _current_username() or "default"
+    avatar_dir = _user_static_dir("images", username)
+    avatar_dir.mkdir(parents=True, exist_ok=True)
+    for stale in avatar_dir.glob("avatar.*"):
         try:
             stale.unlink()
         except Exception:
             pass
-    filename = f"avatar.upload{ext}"
-    save_path = AVATAR_DIR / filename
+    filename = f"avatar{ext}"
+    save_path = avatar_dir / filename
     file.save(save_path)
-    avatar_url = f"/static/images/{filename}?v={int(time.time())}"
+    avatar_url = f"/static/images/users/{username}/{filename}?v={int(time.time())}"
     config = load_config()
     config["avatar_url"] = avatar_url
     save_config({"avatar_url": avatar_url})
@@ -3192,11 +3261,15 @@ def api_reset_avatar():
                 ACTIVE_LESSON["metadata"] = current
             return jsonify({"ok": True, "avatar_url": "", "lesson_folder": lesson_folder, "config": current})
 
-    for stale in AVATAR_DIR.glob("avatar.upload.*"):
-        try:
-            stale.unlink()
-        except Exception:
-            pass
+    # 账号隔离：仅清理当前用户自己的头像
+    username = _current_username() or "default"
+    avatar_dir = _user_static_dir("images", username)
+    if avatar_dir.exists():
+        for stale in avatar_dir.glob("avatar.*"):
+            try:
+                stale.unlink()
+            except Exception:
+                pass
     config = load_config()
     config["avatar_url"] = "/static/images/teacher.svg"
     save_config({"avatar_url": "/static/images/teacher.svg"})
@@ -3267,17 +3340,19 @@ def api_upload_background():
             current = _save_lesson_bg_config(lesson_folder, "custom", bg_url)
             return jsonify({"ok": True, "bg_theme": "custom", "bg_url": bg_url, "lesson_folder": lesson_folder, "config": current})
 
-    # 全局存储
-    BG_DIR.mkdir(parents=True, exist_ok=True)
-    for stale in BG_DIR.glob("bg.upload.*"):
+    # 账号隔离：背景存到 static/images/users/<username>/bg.<ext>
+    username = _current_username() or "default"
+    bg_dir = _user_static_dir("images", username)
+    bg_dir.mkdir(parents=True, exist_ok=True)
+    for stale in bg_dir.glob("bg.*"):
         try:
             stale.unlink()
         except Exception:
             pass
-    filename = f"bg.upload{ext}"
-    save_path = BG_DIR / filename
+    filename = f"bg{ext}"
+    save_path = bg_dir / filename
     file.save(save_path)
-    bg_url = f"/static/images/{filename}?v={int(time.time())}"
+    bg_url = f"/static/images/users/{username}/{filename}?v={int(time.time())}"
     # 检查是否为菜单背景上传
     target = (request.form.get("target") or "").strip().lower()
     if target == "menu":
@@ -3315,14 +3390,17 @@ def api_set_background_theme():
             current = _save_lesson_bg_config(lesson_folder, theme, "")
             return jsonify({"ok": True, "bg_theme": theme, "bg_url": "", "lesson_folder": lesson_folder, "config": current})
 
-    # 全局
+    # 账号隔离：仅清理当前用户自己的背景图
     bg_url = ""
     if theme != "custom":
-        for stale in BG_DIR.glob("bg.upload.*"):
-            try:
-                stale.unlink()
-            except Exception:
-                pass
+        username = _current_username() or "default"
+        bg_dir = _user_static_dir("images", username)
+        if bg_dir.exists():
+            for stale in bg_dir.glob("bg.*"):
+                try:
+                    stale.unlink()
+                except Exception:
+                    pass
     config = load_config()
     config["bg_theme"] = theme
     config["bg_url"] = bg_url
@@ -3347,11 +3425,15 @@ def api_reset_background():
             current = _save_lesson_bg_config(lesson_folder, "warm", "")
             return jsonify({"ok": True, "bg_theme": "warm", "bg_url": "", "lesson_folder": lesson_folder, "config": current})
 
-    for stale in BG_DIR.glob("bg.upload.*"):
-        try:
-            stale.unlink()
-        except Exception:
-            pass
+    # 账号隔离：仅清理当前用户自己的背景图
+    username = _current_username() or "default"
+    bg_dir = _user_static_dir("images", username)
+    if bg_dir.exists():
+        for stale in bg_dir.glob("bg.*"):
+            try:
+                stale.unlink()
+            except Exception:
+                pass
     config = load_config()
     config["bg_theme"] = "warm"
     config["bg_url"] = ""
@@ -3431,8 +3513,11 @@ def api_upload_model():
     if ext not in (".zip", ".json", ".moc3", ".moc"):
         return jsonify({"ok": False, "message": "仅支持 .zip（模型包）或 .model3.json / .moc3（Cubism 3/4/5）、model.json / .moc（Cubism 2.1）"}), 400
 
-    UPLOAD_MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    folder = UPLOAD_MODELS_DIR / f"{int(time.time())}_{safe_base.split('.')[0]}"
+    # 账号隔离：上传模型按用户存放 static/models/uploads/<username>/<folder>/
+    username = _current_username() or "default"
+    user_models_dir = UPLOAD_MODELS_DIR / username
+    user_models_dir.mkdir(parents=True, exist_ok=True)
+    folder = user_models_dir / f"{int(time.time())}_{safe_base.split('.')[0]}"
     folder.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -3463,13 +3548,13 @@ def api_upload_model():
             # 大纹理（>4096）自动缩放到 4096：避免浏览器 WebGL max texture size 限制导致贴图加载失败 → 模型发黑
             _downscale_oversized_textures(folder)
             rel_path = (model3_candidates or model2_candidates)[0].replace("\\", "/")
-            model_url = f"/static/models/uploads/{folder.name}/{rel_path}"
+            model_url = f"/static/models/uploads/{username}/{folder.name}/{rel_path}"
         else:
             # 单文件：按原文件名保存（model3.json / model.json / .moc3 / .moc）
             # 注意：moc3/moc 只是资源，一般需配合完整模型包；此处原样保存以便同目录资源可用
             dest = folder / safe_base
             file.save(dest)
-            model_url = f"/static/models/uploads/{folder.name}/{safe_base}"
+            model_url = f"/static/models/uploads/{username}/{folder.name}/{safe_base}"
             # 单文件大概率缺少贴图/动作，明确警告
             warning = ("⚠️ 单独上传的模型文件无法独立显示（缺少贴图/动作资源）。"
                        "请把整个模型文件夹压缩成 .zip（包含 model3.json、moc3、贴图目录）再上传。")
@@ -3485,9 +3570,11 @@ def api_upload_model():
 
 @app.route("/api/reset_model", methods=["POST"])
 def api_reset_model():
-    """恢复默认内置模型，并清理所有已上传的自定义模型目录。"""
-    if UPLOAD_MODELS_DIR.exists():
-        for d in UPLOAD_MODELS_DIR.iterdir():
+    """恢复默认内置模型，并清理当前用户上传的自定义模型目录。"""
+    username = _current_username() or "default"
+    user_models_dir = UPLOAD_MODELS_DIR / username
+    if user_models_dir.exists():
+        for d in user_models_dir.iterdir():
             if d.is_dir():
                 shutil.rmtree(d, ignore_errors=True)
     save_config({"live2d_model_url": _DEFAULT_LIVE2D_MODEL_URL})
@@ -3496,13 +3583,17 @@ def api_reset_model():
 
 # ============== 终端：代码执行与结果记录 ==============
 
+# 是否 Windows（决定 shell/sh/powershell 的解释器映射与终端执行方式）
+_IS_WINDOWS = sys.platform == "win32"
+
 # 语言 → 解释器命令映射（仅使用本机可用解释器；扩展语言缺失时后端会给出友好提示）
 _EXEC_LANG_MAP = {
     "python": [sys.executable, "-c"],
     "python3": [sys.executable, "-c"],
     "py": [sys.executable, "-c"],
-    "shell": ["cmd", "/c"],
-    "sh": ["powershell", "-NoProfile", "-Command"],
+    # shell/sh：Windows 用 cmd；Linux 用 bash（无 bash 时 install.sh 已检测）
+    "shell": (["cmd", "/c"] if _IS_WINDOWS else ["bash", "-c"]),
+    "sh": (["powershell", "-NoProfile", "-Command"] if _IS_WINDOWS else ["bash", "-c"]),
     "powershell": ["powershell", "-NoProfile", "-Command"],
     "js": ["node", "-e"],
     "javascript": ["node", "-e"],
@@ -3551,8 +3642,11 @@ def api_execute_code():
         if not cmd:
             return jsonify(ok=False, error=f"不支持的代码语言: {language}（支持 {', '.join(sorted(set(_EXEC_LANG_MAP)))}）")
         # 解释器可用性检测：缺失时给出友好提示（而非"不是内部或外部命令"）
+        # Windows 的 cmd/powershell 为系统内置，跳过 which 检测；其他平台一律检测
         exe_name = cmd[0]
-        if exe_name not in ("cmd", "powershell") and shutil.which(exe_name) is None:
+        if _IS_WINDOWS and exe_name in ("cmd", "powershell"):
+            pass
+        elif shutil.which(exe_name) is None:
             return jsonify(ok=False, error=f"未检测到 {_EXEC_LANG_DISPLAY.get(language, exe_name)} 解释器（{exe_name}），请先安装后重试")
 
         # 在临时目录运行，隔离代码产生的文件；编码统一 utf-8 容错
@@ -3921,8 +4015,8 @@ class TerminalSession:
                 return f"{_DANGEROUS_MSG}：{stripped[:80]}\n", False
         if stripped.lower().startswith("cd"):
             cd_arg = stripped[2:].strip()
-            # cmd 的 `cd /d X` 写法
-            if lang == "shell" and cd_arg[:3].lower() == "/d ":
+            # cmd 的 `cd /d X` 写法（仅 Windows shell）
+            if _IS_WINDOWS and lang == "shell" and cd_arg[:3].lower() == "/d ":
                 cd_arg = cd_arg[3:].strip()
             if not cd_arg:
                 return "", False  # 单独 `cd`：无输出（当前目录由后续命令可见）
@@ -3942,20 +4036,25 @@ class TerminalSession:
                     self.cwd = target
                     return "", False
                 return f"目录不存在: {new_dir}\n", False
-        exe = "cmd" if lang == "shell" else "powershell"
-        # 强制子进程输出 UTF-8（中文 Windows 默认 GBK，会导致乱码），统一按 utf-8 解码
-        # 末尾附带 cwd 标记：复合命令（如 `cd C:\ & dir`）偷改目录会被检测并重置回课程目录
-        m_start, m_end = "__CWD_START__", "__CWD_END__"
-        if lang == "shell":
-            real_cmd = f"chcp 65001 >nul & {cmd} & echo {m_start} & cd & echo {m_end}"
-            args = ["/c", real_cmd]
+        if _IS_WINDOWS:
+            # Windows：cmd / powershell，强制子进程输出 UTF-8（中文 Windows 默认 GBK，会导致乱码）
+            # 末尾附带 cwd 标记：复合命令（如 `cd C:\ & dir`）偷改目录会被检测并重置回课程目录
+            m_start, m_end = "__CWD_START__", "__CWD_END__"
+            if lang == "shell":
+                real_cmd = f"chcp 65001 >nul & {cmd} & echo {m_start} & cd & echo {m_end}"
+                exe, args = "cmd", ["/c", real_cmd]
+            else:
+                real_cmd = (
+                    f"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+                    f"[Console]::InputEncoding=[System.Text.Encoding]::UTF8; "
+                    f"{cmd}; Write-Output '{m_start}'; (Get-Location).Path; Write-Output '{m_end}'"
+                )
+                exe, args = "powershell", ["-NoProfile", "-Command", real_cmd]
         else:
-            real_cmd = (
-                f"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
-                f"[Console]::InputEncoding=[System.Text.Encoding]::UTF8; "
-                f"{cmd}; Write-Output '{m_start}'; (Get-Location).Path; Write-Output '{m_end}'"
-            )
-            args = ["-NoProfile", "-Command", real_cmd]
+            # Linux：bash 执行；同样用 pwd 标记检测复合命令是否跳出课程目录
+            m_start, m_end = "__CWD_START__", "__CWD_END__"
+            real_cmd = f"{cmd}; echo {m_start}; pwd; echo {m_end}"
+            exe, args = "bash", ["-c", real_cmd]
         try:
             result = subprocess.run(
                 [exe] + args,
@@ -4056,8 +4155,8 @@ def api_lesson_asset(lesson_folder: str, filename: str):
     try:
         resolved = file_path.resolve()
         base_resolved = target_dir.resolve()
-        # Windows 路径大小写不敏感，用 lower() 比较
-        if not str(resolved).lower().startswith(str(base_resolved).lower()):
+        # normcase 归一化路径比较：Windows 忽略大小写，Linux 保持原样
+        if not os.path.normcase(str(resolved)).startswith(os.path.normcase(str(base_resolved))):
             return jsonify({"error": "非法路径"}), 400
     except Exception:
         return jsonify({"error": "非法路径"}), 400
@@ -6760,6 +6859,34 @@ def strip_emotion_tags(text: str) -> str:
     return cleaned.strip()
 
 
+def _build_ollama_direct_payload(system_prompt: str, effective_message: str,
+                                 history: list, chat_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """构造「客户端直连 Ollama」对话包：浏览器直连客户端本机 127.0.0.1:11434。
+
+    与服务端转发模式保持同一套 system prompt / 历史 / 用户消息，仅发起方不同。
+    """
+    messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    for h in history[-20:]:  # 仅携带最近 20 条历史，避免对话包过大
+        if not isinstance(h, dict):
+            continue
+        role = "assistant" if str(h.get("role")) == "assistant" else "user"
+        content = str(h.get("content") or "").strip()
+        if content:
+            messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": effective_message})
+    return {
+        "endpoint": "http://127.0.0.1:11434/api/chat",  # 客户端本机地址，语义固定
+        "model": (chat_cfg.get("ollama_model") or "qwen3:8b").strip(),
+        "messages": messages,
+        "stream": True,
+        "options": {
+            "num_ctx": int(chat_cfg.get("ollama_num_ctx") or 16384),
+            "temperature": float(chat_cfg.get("ollama_temperature") or 0.7),
+            "num_predict": int(chat_cfg.get("ollama_num_predict") or 8192),
+        },
+    }
+
+
 @app.route("/api/chat", methods=["POST"])
 def api_chat():
     payload = request.get_json(silent=True) or {}
@@ -6779,7 +6906,7 @@ def api_chat():
     # V4：多 Agent 意图分发（关键词路由；Tutor / 无法识别时回退主聊天流程）
     try:
         from agents import route_message
-        _routed = route_message(message, lesson_folder=lesson_folder, learner_id="001")
+        _routed = route_message(message, lesson_folder=lesson_folder, learner_id=_current_username() or "001")
     except Exception as _v4_exc:
         print(f"[v4] Agent 路由异常，回退主流程: {_v4_exc}", flush=True)
         _routed = None
@@ -6888,6 +7015,16 @@ def api_chat():
             provider_chain = ("ollama",)
         else:  # auto
             provider_chain = ("ollama", "cloud")
+
+        # 客户端直连模式（仅聊天）：主用通道为 Ollama 时，不再由服务端转发，
+        # 把构造好的对话包下发给浏览器，由浏览器直连「客户端本机」的 ollama。
+        if chat_cfg.get("ollama_client_direct") and not force_cloud and "ollama" in provider_chain:
+            direct_payload = _build_ollama_direct_payload(
+                system_prompt, effective_message, history, chat_cfg
+            )
+            print(f"[OLLAMA-DIRECT] 聊天走客户端直连: endpoint={direct_payload['endpoint']} model={direct_payload['model']} messages={len(direct_payload['messages'])}", flush=True)
+            yield f"data: {json.dumps({'client_direct': True, 'done': True, 'payload': direct_payload})}\n\n"
+            return
 
         buffered_pieces: List[str] = []
         for _provider in provider_chain:
@@ -7182,6 +7319,136 @@ def api_chat():
         yield f"data: {json.dumps(done_payload)}\n\n"
 
     return Response(stream_with_context(generate()), mimetype="text/event-stream")
+
+
+@app.route("/api/chat/postprocess", methods=["POST"])
+def api_chat_postprocess():
+    """客户端直连 Ollama 模式的收尾处理：清洗、工具提取、分段、TTS、存档。
+
+    浏览器直连客户端本机 ollama 拿到完整回复后调用本接口，
+    补齐与 /api/chat generate() 一致的后处理管线（分段气泡 / 工具调用 / 朗读 / 对话存档）。
+    """
+    payload = request.get_json(silent=True) or {}
+    reply = (payload.get("reply") or "").strip()
+    lesson_folder = payload.get("lesson_folder") or ACTIVE_LESSON.get("folder")
+    if not reply:
+        return jsonify({"error": "reply is required"}), 400
+    if not lesson_folder:
+        return jsonify({"error": "No active lesson selected"}), 400
+
+    # 与 /api/chat 主流程一致：剥离思考残留/独白
+    generated_answer = _strip_thinking_lead(_strip_thinking_residue(reply)) or reply
+    clean_answer, tool_events = extract_tool_events_all(generated_answer)
+
+    # 终端意图兜底（与主流程一致）
+    _term_code = None
+    _term_lang = "python"
+    if not any(isinstance(t, dict) and t.get("type") == "show_terminal" for t in tool_events):
+        _term_source = clean_answer
+        _board_contents = [
+            t.get("content", "") for t in tool_events
+            if isinstance(t, dict) and t.get("type") == "show_board" and t.get("content")
+        ]
+        if _board_contents:
+            _term_source = clean_answer + "\n" + "\n".join(_board_contents)
+        _term_code = _auto_terminal_from_answer(_term_source)
+        if _term_code:
+            print(f"[TERMINAL-AUTO] 客户端直连·自动生成终端工具: {_term_code}", flush=True)
+    if _term_code is None and not any(isinstance(t, dict) and t.get("type") == "show_terminal" for t in tool_events):
+        _user_msg = (payload.get("message") or "").strip()
+        if _TERM_REQUEST_RE.search(_user_msg):
+            _blocks = _extract_fence_blocks(clean_answer)
+            if _blocks:
+                _lang, _code = _blocks[0]
+                _term_code = _code
+                _term_lang = _map_term_lang(_lang)
+            else:
+                _term_code = ""
+
+    # 板书意图兜底
+    if not any(isinstance(t, dict) and t.get("type") == "show_board" for t in tool_events):
+        _board_content, clean_answer = _auto_board_from_answer(clean_answer)
+        if _board_content:
+            tool_events.insert(0, {"type": "show_board", "content": _board_content})
+            print(f"[BOARD-AUTO] 客户端直连·自动生成黑板工具", flush=True)
+    if _term_code is not None:
+        tool_events.append({"type": "show_terminal", "language": _term_lang, "code": _term_code})
+    tool_event = tool_events[0] if tool_events else None
+
+    # 动作/情绪/参数标记
+    clean_answer, live2d_action = extract_action_call(clean_answer)
+    clean_answer, live2d_emotion = extract_emotion_call(clean_answer)
+    clean_answer, live2d_params = extract_param_call(clean_answer)
+    if not live2d_action:
+        live2d_action = infer_context_action(clean_answer)
+    if not live2d_emotion:
+        _inferred = infer_context_emotion(clean_answer)
+        if _inferred:
+            live2d_emotion = _inferred
+
+    # 清洗：整段代码块包裹
+    if clean_answer.strip().startswith("```") and clean_answer.strip().endswith("```"):
+        stripped = re.sub(r"^```[a-zA-Z0-9_-]*\s*\n?", "", clean_answer.strip())
+        stripped = re.sub(r"\n?\s*```\s*$", "", stripped)
+        if stripped.strip():
+            clean_answer = stripped.strip()
+
+    # 分段（与主流程一致：\c 标记 → 空行 → 句子）
+    seg_cfg = load_config()
+    seg_enabled = seg_cfg.get("segment_enabled", True)
+    seg_marker = (seg_cfg.get("segment_marker") or "\\c").replace("\\n", "\n")
+    clean_answer = _repair_code_fence_markers(clean_answer, seg_marker)
+    raw_segments = _split_by_marker_protecting_code(clean_answer, seg_marker)
+    raw_segments = [s.strip() for s in raw_segments if s.strip()]
+    if not seg_enabled or len(raw_segments) <= 1:
+        raw_segments = _split_paragraphs_protecting_code(clean_answer)
+        raw_segments = [s.strip() for s in raw_segments if s.strip()]
+    if len(raw_segments) <= 1:
+        raw_segments = _split_by_sentences(clean_answer, max_chars=500)
+    segments = raw_segments or [clean_answer]
+
+    # 存档版本：剥离分段标记 + 情绪标签
+    if seg_marker == "\\c":
+        _CLEAN_HOLD.clear()
+        held = _LATEX_BLOCK_RE.sub(_hold_for_clean, clean_answer)
+        held = re.sub(r"\\+c", "", held)
+        clean_answer_stored = strip_emotion_tags(_CODE_PH_RE.sub(lambda m: _CLEAN_HOLD[int(m.group(1))], held)).strip()
+    else:
+        clean_answer_stored = strip_emotion_tags(clean_answer.replace(seg_marker, "")).strip()
+
+    audio_url = local_tts_audio(_tts_safe_text(clean_answer)[:500]) if clean_answer else None
+
+    # 存档：用户消息优先取前端回传；缺失时从对话记录最后一条 user 补齐
+    user_message = (payload.get("message") or "").strip()
+    conversation = load_conversation(lesson_folder)
+    if not user_message:
+        for h in reversed(conversation):
+            if h.get("role") == "user":
+                user_message = str(h.get("content") or "").strip()
+                break
+    if user_message and (not conversation or conversation[-1].get("role") != "user"):
+        conversation.append({"role": "user", "content": user_message, "timestamp": now_iso()})
+    if not tool_event and clean_answer_stored:
+        conversation.append({"role": "assistant", "content": clean_answer_stored, "timestamp": now_iso()})
+    save_conversation(lesson_folder, conversation)
+    ACTIVE_LESSON["conversation"] = conversation
+
+    result: Dict[str, Any] = {
+        "ok": True,
+        "content": clean_answer_stored,
+        "segments": segments,
+        "audio_url": audio_url,
+    }
+    if live2d_action:
+        result["action"] = live2d_action
+    if live2d_emotion:
+        result["emotion"] = live2d_emotion
+    if live2d_params:
+        result["params"] = live2d_params
+    if tool_events:
+        result["tool_events"] = tool_events
+        result["tool_event"] = tool_events[0]
+    return jsonify(result)
 
 
 @app.route("/api/progress", methods=["GET"])
@@ -7538,7 +7805,7 @@ def api_exam_submit():
             from pedagogical_engine import record_answer_result as _ped_streak
             from learner_model import add_assessment_record as _lm_assess
             from learner_model import add_error_record as _lm_error
-            _learner_id = "001"
+            _learner_id = _current_username() or "001"
             _unit_idx = int(progress.get("current_unit", 0) or 0)
             _concept_id = f"KG{_unit_idx + 1:03d}"
             _lm_assess(_learner_id, {
@@ -7896,12 +8163,17 @@ def api_switch_lesson():
 # V4 自适应教学系统 API（/api/v4/* 前缀，避免与现有路由冲突）
 # ---------------------------------------------------------------------------
 def _v4_learner_id() -> str:
-    """单机应用默认学生 001；可通过 learner_id 参数（query / json）覆盖。"""
+    """学生画像 ID（账号隔离）：默认取当前登录用户名；可通过 learner_id 参数覆盖。"""
     lid = request.args.get("learner_id", "")
     if request.is_json:
         payload = request.get_json(silent=True) or {}
         lid = str(payload.get("learner_id") or lid)
-    return (str(lid).strip() or "001")
+    lid = str(lid).strip()
+    if lid:
+        # 防脏字符（learner_id 会拼进文件名）
+        lid = re.sub(r"[^A-Za-z0-9_.-]", "_", lid)
+        return lid or "001"
+    return _current_username() or "001"
 
 
 @app.route("/api/v4/learner/<path:learner_id>/progress", methods=["GET"])

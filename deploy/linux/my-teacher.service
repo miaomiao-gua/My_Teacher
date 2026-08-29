@@ -1,0 +1,31 @@
+# ============================================================
+# My Teacher v5 后端 · systemd 服务单元（示例）
+# 安装步骤：
+#   1) 将项目部署到 /opt/my-teacher（install.sh 安装后）
+#   2) sudo cp deploy/linux/my-teacher.service /etc/systemd/system/
+#   3) 按需修改下方 User / WorkingDirectory / ExecStart 中的路径
+#   4) sudo systemctl daemon-reload
+#   5) sudo systemctl enable --now my-teacher
+# 常用命令：journalctl -u my-teacher -f  查看日志
+# ============================================================
+
+[Unit]
+Description=My Teacher AI Teaching System (backend)
+After=network.target
+
+[Service]
+Type=simple
+# 运行用户：建议使用专用低权限账号，不要用 root
+User=myteacher
+Group=myteacher
+# 项目根目录（按实际部署位置修改）
+WorkingDirectory=/opt/my-teacher/server
+# 从 .env 读取环境变量
+EnvironmentFile=/opt/my-teacher/.env
+# gunicorn 生产模式：2 个 worker，绑定 0.0.0.0:5000
+ExecStart=/opt/my-teacher/.venv-linux/bin/gunicorn -w 2 -b 0.0.0.0:5000 --timeout 120 --graceful-timeout 30 app:app
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
