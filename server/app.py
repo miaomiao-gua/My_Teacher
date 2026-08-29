@@ -47,6 +47,7 @@ from file_utils import (
     unit_dir,
     _read_pdf_text,
 )
+from crypto_utils import open_dict, seal_dict
 from lesson_prep import (
     _fallback_quiz,
     _is_meaningful_question,
@@ -567,20 +568,42 @@ def _user_config_path(username: str) -> Path:
 
 
 def _load_user_config(username: str) -> Dict[str, Any]:
-    """读取用户级配置覆盖层（不存在或解析失败返回 {}）。"""
+    """读取用户级配置覆盖层（不存在或解析失败返回 {}）。
+
+    密钥字段加密落盘，读取时解密；发现旧明文立即加密回写（懒迁移）。
+    """
     p = _user_config_path(username)
     if not p.exists():
         return {}
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+    if not isinstance(data, dict):
+        return {}
+    plain = open_dict(data, _SECRET_FIELDS)
+    sealed = seal_dict(data, _SECRET_FIELDS)
+    if sealed != data:
+        try:
+            _atomic_write_json(p, sealed)
+        except Exception:
+            pass
+    return plain
 
 
 def _user_static_dir(kind: str, username: str) -> Path:
     """用户私有静态资源目录：client/static/<kind>/users/<username>/。"""
     return CLIENT_DIR / "static" / kind / "users" / (username or "")
+
+
+# 敏感字段（密钥）集合：这些字段加密后落盘，读取时自动解密。
+# 覆盖全局 config.json 与用户级 config.json 中所有 API key 字段。
+_SECRET_FIELDS = (
+    "cloud_api_key",
+    "chat_api_key",
+    "siliconflow_api_key",
+    "vision_api_key",
+)
 
 
 def load_config() -> Dict[str, Any]:
@@ -595,7 +618,15 @@ def load_config() -> Dict[str, Any]:
             data = {}
         cfg = default_config()
         if isinstance(data, dict):
-            cfg.update(data)
+            # 解密密钥字段供内存使用；磁盘上仍是旧明文时立即加密回写（懒迁移，一次性）
+            plain = open_dict(data, _SECRET_FIELDS)
+            sealed = seal_dict(data, _SECRET_FIELDS)
+            if sealed != data:
+                try:
+                    _atomic_write_json(CONFIG_PATH, sealed)
+                except Exception:
+                    pass
+            cfg.update(plain)
             disk_keys = set(data.keys())
 
     # 用户级配置覆盖层（账号隔离）：当前登录用户的 config.json 优先级高于全局
@@ -666,7 +697,8 @@ def save_config(data: Dict[str, Any]) -> Dict[str, Any]:
         path.parent.mkdir(parents=True, exist_ok=True)
     else:
         path = CONFIG_PATH
-    _atomic_write_json(path, current)
+    # 密钥字段加密后落盘；返回给调用方的 current 保持明文（前端/请求链路继续使用）
+    _atomic_write_json(path, seal_dict(current, _SECRET_FIELDS))
     return current
 
 
@@ -2496,6 +2528,15 @@ def vision_describe(image_url: str, name: str = "") -> str:
         return ""
 
 
+# 聊天附件禁止上传的扩展名：浏览器可直接同源执行的类型（HTML/SVG/XML）+
+# 常见服务端脚本（PHP/JSP/ASP），防止存储型 XSS / 脚本注入。
+_DANGEROUS_UPLOAD_EXT = {
+    ".html", ".htm", ".xhtml", ".svg", ".svgz", ".xml", ".mjs",
+    ".php", ".phtml", ".php3", ".php4", ".php5", ".phtm",
+    ".jsp", ".asp", ".aspx", ".cgi", ".htaccess", ".htpasswd",
+}
+
+
 @app.route("/api/upload_file", methods=["POST"])
 def api_upload_file():
     """聊天附件上传：保存到 /static/uploads/chat/。
@@ -2512,6 +2553,8 @@ def api_upload_file():
     if not safe:
         return jsonify({"ok": False, "message": "非法文件名"}), 400
     ext = Path(safe).suffix.lower()
+    if ext in _DANGEROUS_UPLOAD_EXT:
+        return jsonify({"ok": False, "message": f"不允许上传 {ext} 类型文件（防止脚本注入）"}), 400
     data = f.read(MAX_UPLOAD_SIZE + 1)
     if len(data) > MAX_UPLOAD_SIZE:
         return jsonify({"ok": False, "message": f"文件过大，最大支持 {MAX_UPLOAD_SIZE // 1024 // 1024}MB"}), 400
@@ -8306,6 +8349,32 @@ def api_v4_dashboard():
         })
     except Exception as exc:
         return jsonify({"error": f"仪表盘数据获取失败: {exc}"}), 500
+
+
+def _cleanup_dangerous_uploads() -> None:
+    """启动时清理历史遗留的可执行类附件（HTML/SVG/XML 等），防止存储型 XSS。
+
+    新上传已由 api_upload_file 的黑名单拦截；此处兜底清理黑名单生效前已落盘的旧文件。
+    """
+    if not CHAT_UPLOAD_DIR.exists():
+        return
+    removed = 0
+    for p in CHAT_UPLOAD_DIR.rglob("*"):
+        if p.is_file() and p.suffix.lower() in _DANGEROUS_UPLOAD_EXT:
+            try:
+                p.unlink()
+                removed += 1
+            except Exception:
+                pass
+    if removed:
+        app.logger.warning(f"[SECURITY] 已清理 {removed} 个历史遗留危险附件（{CHAT_UPLOAD_DIR}）")
+
+
+# 顶层启动：清理历史危险附件（gunicorn 导入时亦执行；幂等）
+try:
+    _cleanup_dangerous_uploads()
+except Exception:
+    pass
 
 
 if __name__ == "__main__":

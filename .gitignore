@@ -16,6 +16,7 @@ venv.bak/
 
 # ====== 运行时数据（前后端拆分后统一在 data/） ======
 data/config.json
+data/.secret_key
 data/users.json
 data/users/
 data/lessons/

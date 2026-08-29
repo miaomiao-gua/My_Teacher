@@ -8,3 +8,4 @@ ollama>=0.1.0
 sse-starlette>=2.0.0
 python-dotenv>=1.0.0
 flask-compress>=1.15.0
+cryptography>=41.0.0

@@ -14,7 +14,7 @@
 
 安全说明：
 - 用户名白名单（只允许字母数字 _ - 中文），防止路径穿越（用户名会拼进文件路径）。
-- 密码哈希：新注册用 PBKDF2-HMAC-SHA256（12 万次迭代）；旧 sha256 格式校验通过后自动升级。
+- 密码哈希：新注册用 PBKDF2-HMAC-SHA256（60 万次迭代）；旧 sha256 / 低迭代哈希校验通过后自动升级。
 - token 由 secrets 生成（CSPRNG），30 天过期。
 """
 
@@ -39,8 +39,8 @@ TOKEN_TTL = 30 * 24 * 3600
 # 禁止 `..` `/` `\` 空格等——用户名会拼进 data/users/<name>/ 路径，必须防穿越。
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9_\-\u4e00-\u9fa5]{2,32}$")
 
-# PBKDF2 迭代次数（OWASP 建议 >= 60 万；兼顾低配教学机取 12 万）
-_PBKDF2_ITER = 120_000
+# PBKDF2 迭代次数（OWASP 推荐 >= 60 万；登录耗时约 0.2~0.8s，可接受）
+_PBKDF2_ITER = 600_000
 _PBKDF2_PREFIX = "pbkdf2$"
 
 _lock = threading.Lock()
@@ -120,8 +120,16 @@ def login(username: str, password: str) -> str:
             raise ValueError("用户名或密码错误")
         if not verify_password(password, user["salt"], user["password_hash"]):
             raise ValueError("用户名或密码错误")
-        # 旧 sha256 哈希校验通过后，自动升级为 PBKDF2
-        if not user["password_hash"].startswith(_PBKDF2_PREFIX):
+        # 哈希升级：旧 sha256 格式 / 迭代次数低于当前标准 的 PBKDF2 哈希，
+        # 校验通过后自动重哈希为最新迭代次数（幂等，仅在登录时发生一次）
+        need_upgrade = not user["password_hash"].startswith(_PBKDF2_PREFIX)
+        if not need_upgrade:
+            try:
+                _, iter_s, _ = user["password_hash"].split("$")
+                need_upgrade = int(iter_s) < _PBKDF2_ITER
+            except Exception:
+                need_upgrade = True
+        if need_upgrade:
             salt, pwd_hash = hash_password(password, user["salt"])
             user["salt"], user["password_hash"] = salt, pwd_hash
         token = secrets.token_hex(24)
