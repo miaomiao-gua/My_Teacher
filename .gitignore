@@ -19,6 +19,7 @@ data/config.json
 data/.secret_key
 data/app.db*
 data/users.json
+data/users.json.bak
 data/users/
 data/lessons/
 data/py_deps/
