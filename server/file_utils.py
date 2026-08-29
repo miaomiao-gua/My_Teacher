@@ -10,8 +10,11 @@ import requests
 from docx import Document
 from pypdf import PdfReader
 
+# 前后端拆分后：数据统一放在 server/ 上一级的 data/ 目录
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
 # python-pptx 安装在项目本地目录（D 盘，避免写入系统 site-packages 受限）
-_PY_DEPS = Path(__file__).resolve().parent / "py_deps"
+_PY_DEPS = DATA_DIR / "py_deps"
 if _PY_DEPS.exists() and str(_PY_DEPS) not in sys.path:
     sys.path.insert(0, str(_PY_DEPS))
 from pptx import Presentation  # noqa: E402
@@ -27,7 +30,7 @@ def sanitize_topic(topic: str) -> str:
 
 
 def ensure_lesson_dir(lesson_name: str, base_dir: str | Path | None = None) -> Path:
-    base_path = Path(base_dir) if base_dir else Path(__file__).resolve().parent / "lessons"
+    base_path = Path(base_dir) if base_dir else DATA_DIR / "lessons"
     lesson_path = base_path / lesson_name
     lesson_path.mkdir(parents=True, exist_ok=True)
     return lesson_path
@@ -87,15 +90,135 @@ def download_resource(resource: Dict[str, Any], lesson_dir: str | Path, file_pre
     return target_path
 
 
-def _read_pdf_text(file_path: str | Path) -> str:
+def _read_pdf_text(file_path: str | Path, start_page: int | None = None, end_page: int | None = None) -> str:
+    """提取 PDF 文本，支持页码范围（页码从 1 开始，含两端）。
+
+    文字提取为空时回退 OCR（若本地可用）；OCR 也失败则返回空字符串。
+    """
     try:
         reader = PdfReader(str(file_path))
+        total = len(reader.pages)
+        s = 1 if start_page is None else max(1, int(start_page))
+        e = total if end_page is None else min(total, int(end_page))
         pages = []
-        for page in reader.pages:
-            pages.append(page.extract_text() or "")
-        return "\n\n".join(pages)
+        for i in range(s - 1, e):
+            pages.append(reader.pages[i].extract_text() or "")
+        text = "\n\n".join(pages)
+        if text.strip():
+            return text
+        # 扫描版（提取不到文字）→ OCR 兜底
+        return _pdf_ocr_pages(str(file_path), s, e)
     except Exception:
         return ""
+
+
+# OCR 可用性缓存：避免每次请求都重复导入/检测（easyocr 导入较慢）
+_OCR_CACHE = {"checked": False, "available": False}
+# OCR 总开关（由 config.json 的 ocr_enabled 控制，app.py 启动/保存配置时同步）
+_OCR_ENABLED = True
+
+
+def set_ocr_enabled(enabled: bool) -> None:
+    """设置 OCR 总开关（来自 config.json 的 ocr_enabled 字段）。"""
+    global _OCR_ENABLED
+    _OCR_ENABLED = bool(enabled)
+
+
+def pdf_ocr_available() -> bool:
+    """检测本地 OCR 是否可用（easyocr + 完整模型文件）。结果进程内缓存。"""
+    if not _OCR_ENABLED:
+        return False
+    if _OCR_CACHE["checked"]:
+        return _OCR_CACHE["available"]
+    _OCR_CACHE["checked"] = True
+    try:
+        # 注意：这里不要 import easyocr（会连带加载 torch，耗时数秒）。
+        # 只用标准库 zipfile 校验模型文件存在性与完整性；easyocr 只在真正 OCR 时懒加载。
+        import zipfile
+        # 模型目录 ~/.EasyOCR/model 下应有完整模型（detection + recognition）。
+        # zip 需校验完整性（损坏/半截下载的模型视为不可用）；pth 需有实际大小。
+        model_dir = os.path.join(os.path.expanduser("~"), ".EasyOCR", "model")
+        if os.path.isdir(model_dir):
+            good = 0
+            for fname in os.listdir(model_dir):
+                fp = os.path.join(model_dir, fname)
+                try:
+                    if fname.endswith(".zip"):
+                        with open(fp, "rb") as fh:
+                            head = fh.read(4)
+                        if head == b"PK\x03\x04" and zipfile.is_zipfile(fp) and os.path.getsize(fp) > 100_000:
+                            good += 1
+                    elif fname.endswith(".pth") and os.path.getsize(fp) > 500_000:
+                        good += 1
+                except Exception:
+                    continue
+            _OCR_CACHE["available"] = good >= 2  # 至少检测 + 识别模型各一
+    except Exception:
+        pass
+    return _OCR_CACHE["available"]
+
+
+def _pdf_ocr_pages(file_path: str | Path, start_page: int, end_page: int) -> str:
+    """对扫描版 PDF 页码范围做 OCR：fitz 渲染页 → easyocr 识别。"""
+    if not pdf_ocr_available():
+        return ""
+    try:
+        import fitz  # PyMuPDF：把 PDF 页渲染成图片（无 poppler 依赖）
+        import easyocr
+        import numpy as np
+        from PIL import Image
+    except Exception:
+        return ""
+    try:
+        reader = fitz.open(str(file_path))
+        # easyocr 实例较重，懒加载单例
+        if not hasattr(_pdf_ocr_pages, "_reader"):
+            _pdf_ocr_pages._reader = easyocr.Reader(["ch_sim", "en"], gpu=False, verbose=False)
+        ocr = _pdf_ocr_pages._reader
+        parts = []
+        for pno in range(max(0, start_page - 1), min(reader.page_count, end_page)):
+            page = reader.load_page(pno)
+            pix = page.get_pixmap(dpi=150)
+            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            result = ocr.readtext(np.array(img), detail=0, paragraph=True)
+            if result:
+                parts.append(f"\n\n".join(result))
+        reader.close()
+        return "\n\n".join(parts)
+    except Exception:
+        return ""
+
+
+def extract_pdf_toc(file_path: str | Path) -> List[Dict[str, Any]]:
+    """提取 PDF 书签目录（目录）。返回 [{title, page, level}]，page 为 1 起始页码。
+
+    无书签的 PDF 返回空列表（不强行猜测目录）。
+    """
+    try:
+        reader = PdfReader(str(file_path))
+        outline = reader.outline
+        if not outline:
+            return []
+        items: List[Dict[str, Any]] = []
+
+        def _walk(node, level):
+            for item in node:
+                if isinstance(item, list):
+                    _walk(item, level + 1)
+                    continue
+                title = str(getattr(item, "title", "") or "").strip()
+                if not title:
+                    continue
+                try:
+                    page = reader.get_destination_page_number(item) + 1
+                except Exception:
+                    page = 0
+                items.append({"title": title, "page": page, "level": level})
+
+        _walk(outline, 0)
+        return items
+    except Exception:
+        return []
 
 
 def _read_docx_text(file_path: str | Path) -> str:
@@ -132,11 +255,11 @@ def _read_pptx_text(file_path: str | Path) -> str:
         return ""
 
 
-def convert_document_to_markdown(file_path: str | Path) -> str:
+def convert_document_to_markdown(file_path: str | Path, start_page: int | None = None, end_page: int | None = None) -> str:
     path = Path(file_path)
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        text = _read_pdf_text(path)
+        text = _read_pdf_text(path, start_page, end_page)
     elif suffix in {".docx", ".doc"}:
         text = _read_docx_text(path)
     elif suffix == ".pptx":
@@ -165,7 +288,7 @@ def load_course_context(lesson_folder: str | None) -> str:
     if not lesson_folder:
         return "未选择课程，使用通用教学模式。"
 
-    lesson_dir = Path(__file__).resolve().parent / "lessons" / lesson_folder
+    lesson_dir = DATA_DIR / "lessons" / lesson_folder
     if not lesson_dir.exists():
         return "该课程目录不存在。"
 
@@ -187,7 +310,7 @@ def load_course_context(lesson_folder: str | None) -> str:
 
 def unit_dir(lesson_folder: str, unit_index: int) -> Path:
     """返回某课对应的资料目录路径：lessons/<lesson>/section_N/。"""
-    return Path(__file__).resolve().parent / "lessons" / lesson_folder / f"section_{unit_index + 1}"
+    return DATA_DIR / "lessons" / lesson_folder / f"section_{unit_index + 1}"
 
 
 def load_unit_context(lesson_folder: str | None, unit_index: int) -> str:
@@ -201,7 +324,7 @@ def load_unit_context(lesson_folder: str | None, unit_index: int) -> str:
     udir = unit_dir(lesson_folder, unit_index)
     # 回退：旧结构 units/unit_NN
     if not udir.exists():
-        udir_old = Path(__file__).resolve().parent / "lessons" / lesson_folder / "units" / f"unit_{unit_index + 1:02d}"
+        udir_old = DATA_DIR / "lessons" / lesson_folder / "units" / f"unit_{unit_index + 1:02d}"
         if udir_old.exists():
             udir = udir_old
         else:

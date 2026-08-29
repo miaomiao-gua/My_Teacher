@@ -1,0 +1,339 @@
+项目背景
+你正在协助开发 My_Teacher v4 —— 一个从“AI 教师应用”升级为“AI 自适应教学系统”的开源项目。
+
+当前 v3 已实现的功能：
+
+Flask 后端（app.py）提供对话、备课、测验、代码执行等 API
+
+前端单页应用（Galgame 风格 + Live2D 虚拟老师）
+
+本地 Ollama / 云端模型双通道
+
+课程管理（备课 → 分课 → 测验 → 进度）
+
+TTS 语音朗读、图片/文本附件上传
+
+v4 的升级目标：
+从“LLM-centric 对话式老师”升级为“Learner-centric 自适应教学系统”。
+
+核心升级方向：
+
+建立学生数字孪生（Learner Digital Twin）
+
+建立知识图谱（Knowledge Graph）
+
+拆分多 Agent 系统
+
+建立学习效果评估闭环
+
+实现基于学生状态的自适应学习路径推荐
+
+具体任务清单
+任务一：建立 Learner Model 模块（最优先）
+在 project/ 目录下新建 learner_model.py，实现学生数字孪生的数据结构和持久化。
+
+数据结构：
+
+python
+# learner_model.py 核心数据结构
+
+LEARNER_SCHEMA = {
+    "learner_id": str,              # 用户唯一标识
+    "knowledge_state": {
+        # key: 知识点ID (如 "KG001")
+        # value: 掌握度 (0.0 ~ 1.0)
+        # 示例: "KG001": 0.82
+    },
+    "cognitive_features": {
+        "abstract_reasoning": str,   # "高" / "中" / "低"
+        "memory_retention": str,     # "高" / "中" / "低"
+        "math_reasoning": str,
+        "hands_on_practice": str
+    },
+    "learning_behavior": {
+        "optimal_time": str,         # "上午" / "下午" / "晚上"
+        "avg_focus_duration": int,   # 平均专注时长（分钟）
+        "error_types": [str],        # 易错类型列表
+        "forgetting_rate": str       # "快" / "中" / "慢"
+    },
+    "error_memory": [
+        # 每个错误记录：{ "timestamp": str, "concept": str, "error": str }
+    ],
+    "assessment_history": [
+        # 每次测验记录：{ "timestamp": str, "score": float, "concepts": [str] }
+    ],
+    "learning_goals": {
+        "target_concepts": [str],    # 目标知识点列表
+        "target_score": float,       # 目标分数
+        "deadline": str              # 目标完成时间
+    },
+    "created_at": str,
+    "updated_at": str
+}
+需要实现的函数：
+
+get_learner(learner_id) → 加载学生档案
+
+save_learner(learner_id, data) → 保存学生档案
+
+update_knowledge_state(learner_id, concept_id, score) → 更新单个知识点掌握度
+
+add_error_record(learner_id, concept_id, error_description) → 记录错误
+
+add_assessment_record(learner_id, assessment_data) → 记录测验结果
+
+compute_learning_gain(learner_id, pre_test, post_test) → 计算学习增益
+
+存储方式：在 project/lessons/ 目录下新建 learners/ 文件夹，每个学生一个 JSON 文件（如 learner_001.json）。
+
+集成方式：在 app.py 中调用 learner_model.py 的函数，在对话/测验/备课时同步更新学生状态。
+
+任务二：建立 Knowledge Graph 模块
+在 project/ 目录下新建 knowledge_graph.py，实现知识图谱的数据结构和检索功能。
+
+数据结构：
+
+python
+# knowledge_graph.py 核心数据结构
+
+KNOWLEDGE_NODE_SCHEMA = {
+    "id": str,                      # 唯一标识 (如 "KG001")
+    "name": str,                    # 知识点名称 (如 "牛顿第二定律")
+    "description": str,             # 简要描述
+    "prerequisites": [str],         # 前置知识点ID列表
+    "concepts": [str],              # 核心概念列表 (如 ["F=ma", "加速度"])
+    "skills": [str],                # 技能列表 (如 ["能列出受力方程"])
+    "tags": [str],                  # 标签 (如 ["力学", "动力学"])
+    "difficulty": float,            # 难度系数 (0.0 ~ 1.0)
+    "estimated_time": int,          # 预计学习时间（分钟）
+    "related_quiz_questions": [str] # 关联的测验题ID列表
+}
+
+KNOWLEDGE_EDGE_SCHEMA = {
+    "from": str,                    # 起点知识点ID
+    "to": str,                      # 终点知识点ID
+    "type": str,                    # 关系类型: "prerequisite" / "related" / "sub_concept"
+    "strength": float               # 关联强度 (0.0 ~ 1.0)
+}
+需要实现的函数：
+
+load_knowledge_graph(lesson_folder) → 从课程文件夹加载知识图谱
+
+get_node(node_id) → 获取单个知识点
+
+get_prerequisites(node_id) → 获取某知识点的所有前置知识点（递归）
+
+find_gaps(learner_knowledge, target_knowledge) → 找出学生知识点与目标之间的差距
+
+generate_learning_path(learner_id, target_node_id) → 根据学生当前状态生成学习路径
+
+知识图谱来源：
+
+在备课系统中，AI 生成课程大纲的同时，生成对应的知识图谱结构。
+
+在 lesson_prep.py 中增加 generate_knowledge_graph(lesson_data) 函数。
+
+知识图谱存储在 lessons/{课程名}/knowledge_graph.json 中。
+
+任务三：建立 Pedagogical Engine（教学策略引擎）
+在 project/ 目录下新建 pedagogical_engine.py，实现教学策略决策逻辑。
+
+核心功能：
+
+诊断引擎（Diagnosis Engine）
+
+输入：学生答题记录、测验结果、对话历史
+
+输出：知识漏洞列表、薄弱点分析
+
+函数：run_diagnosis(learner_id, course_id) → 返回诊断报告
+
+规划引擎（Planning Engine）
+
+输入：学生当前状态、学习目标
+
+输出：下一课推荐、学习路径调整建议
+
+函数：plan_next_lesson(learner_id, course_id) → 返回推荐的下一个单元
+
+自适应策略（Adaptive Strategy）
+
+规则示例：
+
+如果连续答错 2 题 → 切换教学方式（换类比、换例子）
+
+如果连续答对 3 题 → 推进到下一个知识点
+
+如果掌握度 < 0.5 → 重讲 + 更多练习题
+
+如果掌握度 > 0.8 → 跳过基础练习，直接进入应用层
+
+需要实现的函数：
+
+adapt_teaching_strategy(learner_id, context) → 返回教学策略建议
+
+should_advance(learner_id, concept_id) → 判断是否应该推进到下一个概念
+
+get_next_action(learner_id, current_state) → 获取下一步教学动作
+
+任务四：拆分多 Agent 系统
+将现有的单一 AI 拆分为多个协作的 Agent。在 project/agents/ 目录下新建以下模块：
+
+text
+agents/
+├── __init__.py
+├── base_agent.py          # Agent 基类
+├── tutor_agent.py         # 教学讲解 Agent（复用现有 /api/chat）
+├── planner_agent.py       # 课程规划 Agent（复用现有 lesson_prep.py）
+├── diagnostician_agent.py # 诊断 Agent（调用 learner_model + knowledge_graph）
+├── examiner_agent.py      # 出题 Agent（复用现有测验模块，增加智能出题）
+├── evaluator_agent.py     # 评估 Agent（计算学习增益、ROI）
+└── coach_agent.py         # 教练 Agent（学习动力、行为管理）
+Agent 协作流程：
+
+text
+用户消息
+    ↓
+Router (根据意图分发)
+    ↓
+    ├── 教学提问 → Tutor Agent
+    ├── 课程规划 → Planner Agent
+    ├── 诊断请求 → Diagnostician Agent
+    ├── 测验请求 → Examiner Agent
+    ├── 评估请求 → Evaluator Agent
+    └── 情感/动力 → Coach Agent
+    ↓
+各 Agent 共享 Learner Model + Knowledge Graph
+    ↓
+返回结果 + 更新学生状态
+具体实现：
+
+在 app.py 中增加路由分发器，根据用户输入意图调用不同的 Agent。意图识别可以使用关键词匹配或小模型分类（建议用关键词匹配快速实现）。
+
+任务五：建立学习效果评估闭环
+在 project/ 目录下新建 learning_evaluation.py，实现学习增益计算和可视化。
+
+核心指标：
+
+python
+def compute_learning_gain(pre_score: float, post_score: float) -> float:
+    """计算学习增益 = 后测 - 前测"""
+    return post_score - pre_score
+
+def compute_learning_efficiency(gain: float, time_spent: float) -> float:
+    """计算学习效率 = 增益 / 时间"""
+    return gain / time_spent if time_spent > 0 else 0
+
+def compute_learning_roi(gain: float, time_spent: float, effort: float) -> float:
+    """计算学习 ROI = 增益 / (时间 * 努力程度)"""
+    return gain / (time_spent * effort) if time_spent * effort > 0 else 0
+需要新增的 API 路由：
+
+GET /api/learner/{id}/progress → 获取学生学习进度曲线
+
+GET /api/learner/{id}/gain_report → 获取学习增益报告
+
+GET /api/learner/{id}/insights → 获取 AI 生成的学习洞察
+
+任务六：V4 前端仪表盘（可选）
+在 templates/index.html 中增加一个“学习仪表盘”视图，显示：
+
+知识掌握度雷达图（用 Canvas 绘制）
+
+学习进度曲线（折线图）
+
+推荐的下一步学习内容
+
+学习增益统计
+
+错题本
+
+实现方式：在现有 Galgame 界面中增加一个“仪表盘”视图，通过底部导航切换。
+
+项目结构变化（V4 新增文件）
+text
+project/
+├── app.py                      # 主程序（增加新路由）
+├── lesson_prep.py              # 备课逻辑（增加知识图谱生成）
+├── code_executor.py            # 代码沙箱（保持不变）
+├── file_utils.py               # 文件工具（保持不变）
+├── learner_model.py            # 【新增】学生数字孪生
+├── knowledge_graph.py          # 【新增】知识图谱
+├── pedagogical_engine.py       # 【新增】教学策略引擎
+├── learning_evaluation.py      # 【新增】学习评估
+├── agents/                     # 【新增】多 Agent 系统
+│   ├── __init__.py
+│   ├── base_agent.py
+│   ├── tutor_agent.py
+│   ├── planner_agent.py
+│   ├── diagnostician_agent.py
+│   ├── examiner_agent.py
+│   ├── evaluator_agent.py
+│   └── coach_agent.py
+├── static/
+│   ├── css/style.css           # 增加仪表盘样式
+│   ├── js/app.js               # 增加仪表盘交互
+│   └── images/
+├── templates/
+│   └── index.html              # 增加仪表盘视图
+└── lessons/
+    ├── {course_id}/
+    │   ├── syllabus.json       # 现有课程大纲
+    │   ├── knowledge_graph.json # 【新增】知识图谱
+    │   └── ...
+    └── learners/               # 【新增】学生档案目录
+        ├── learner_001.json
+        └── ...
+开发顺序建议
+请按以下顺序依次实现：
+
+Learner Model（基础数据层）→ 有了它，后面的所有模块才有数据支撑
+
+Knowledge Graph（知识表示层）→ 让系统理解“知识点之间的关系”
+
+Diagnostician Agent（诊断模块）→ 能找出学生薄弱点
+
+Pedagogical Engine（教学策略引擎）→ 能根据诊断结果决定“接下来讲什么”
+
+学习评估闭环（Learning Evaluation）→ 验证系统是否有效
+
+仪表盘（可视化）→ 展示学习数据
+
+其他 Agent（规划、教练等）→ 完善 Agent 系统
+
+测试用例
+实现每个模块后，请用以下测试用例验证：
+
+Learner Model 测试：
+
+创建学生档案 → 更新知识状态 → 记录错误 → 计算学习增益 → 验证数据持久化
+
+Knowledge Graph 测试：
+
+加载知识图谱 → 查询前置知识 → 生成学习路径 → 检测知识漏洞
+
+Pedagogical Engine 测试：
+
+模拟学生连续答错 → 引擎输出“切换教学方式”策略
+
+模拟学生掌握度高 → 引擎输出“跳过基础练习”策略
+
+Agent 系统测试：
+
+用户提问“什么是牛顿第二定律” → 路由到 Tutor Agent
+
+用户提问“我接下来该学什么” → 路由到 Planner Agent
+
+用户提问“帮我分析一下我的薄弱点” → 路由到 Diagnostician Agent
+
+注意事项
+保持向后兼容：新增模块不应破坏 v3 已有的功能（对话、备课、测验等）
+
+数据迁移：现有用户数据可能需要迁移到新的 Learner Model 结构
+
+API 版本管理：新增 API 路由建议使用 /api/v4/* 前缀，避免与现有路由冲突
+
+性能考虑：知识图谱查询可能涉及递归，注意缓存和索引
+
+隐私保护：学生档案数据敏感，确保 .gitignore 已排除 learners/ 目录
+
