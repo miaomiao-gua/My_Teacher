@@ -2687,13 +2687,7 @@ def api_auth_register():
     return jsonify({"ok": True, "username": username, "token": token})
 
 
-# 登录暴力破解防护：内存级失败计数 + 短时锁定（防御性加固；gunicorn 多 worker 不共享，够用）
-_LOGIN_FAILS: Dict[str, Dict[str, float]] = {}
-_LOGIN_FAIL_LOCK = threading.Lock()
-_LOGIN_FAIL_AFTER = 5      # 连续失败 N 次后锁定
-_LOGIN_FAIL_SECONDS = 60   # 锁定时长（秒）
-
-
+# 登录暴力破解防护：失败计数持久化到 SQLite（auth.login_fails 表），gunicorn 多 worker 共享
 def _login_throttle_key(username: str) -> str:
     return f"{request.remote_addr or '?'}@{username.strip().lower()}"
 
@@ -2704,23 +2698,16 @@ def api_auth_login():
     username = (payload.get("username") or "").strip()
     password = payload.get("password") or ""
     fail_key = _login_throttle_key(username)
-    now = time.time()
-    with _LOGIN_FAIL_LOCK:
-        rec = _LOGIN_FAILS.get(fail_key)
-        if rec and rec["until"] > now:
-            return jsonify({"error": f"尝试次数过多，请 {int(rec['until'] - now) + 1} 秒后再试"}), 429
+    locked = auth.throttle_until(fail_key)
+    if locked > 0:
+        return jsonify({"error": f"尝试次数过多，请 {int(locked) + 1} 秒后再试"}), 429
     try:
         token = auth.login(username, password)
     except ValueError as exc:
-        with _LOGIN_FAIL_LOCK:
-            rec = _LOGIN_FAILS.get(fail_key)
-            fails = (rec["fails"] if rec else 0) + 1
-            until = now + _LOGIN_FAIL_SECONDS if fails >= _LOGIN_FAIL_AFTER else 0
-            _LOGIN_FAILS[fail_key] = {"fails": float(fails), "until": until}
+        auth.throttle_fail(fail_key)
         return jsonify({"error": str(exc)}), 401
     # 登录成功：清除失败计数
-    with _LOGIN_FAIL_LOCK:
-        _LOGIN_FAILS.pop(fail_key, None)
+    auth.throttle_reset(fail_key)
     return jsonify({"ok": True, "username": username, "token": token})
 
 

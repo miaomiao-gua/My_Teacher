@@ -75,6 +75,7 @@ chmod 700 "${ROOT_DIR}/data" 2>/dev/null || true
 chmod 600 "${ROOT_DIR}/data/users.json" 2>/dev/null || true
 chmod 600 "${ROOT_DIR}/data/config.json" 2>/dev/null || true
 chmod 600 "${ROOT_DIR}/data/.secret_key" 2>/dev/null || true
+chmod 600 "${ROOT_DIR}/data/app.db" 2>/dev/null || true
 chmod 600 "${ROOT_DIR}/.env" 2>/dev/null || true
 find "${ROOT_DIR}/data" -type f -name '*.json' -exec chmod 600 {} + 2>/dev/null || true
 
