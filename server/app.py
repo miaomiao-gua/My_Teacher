@@ -2565,6 +2565,8 @@ def api_auth_register():
     password = payload.get("password") or ""
     try:
         auth.register(username, password)
+        # 课程按账号完全隔离：首个注册的账号接管无 owner 的遗留课程
+        _migrate_legacy_lessons()
         token = auth.login(username, password)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
@@ -2605,7 +2607,7 @@ def api_auth_me():
 # 课程类路由同时校验"课程归属"（防止越权访问他人课程）
 # ============================
 def _lesson_owner(lesson_folder: str) -> str | None:
-    """读取课程 config.json 中的 owner 字段；无 owner 视为遗留课程（共享）。"""
+    """读取课程 config.json 中的 owner 字段；无 owner 返回 None（迁移未完成前的临时状态）。"""
     if not lesson_folder:
         return None
     cfg_path = LESSONS_DIR / lesson_folder / "config.json"
@@ -2616,6 +2618,35 @@ def _lesson_owner(lesson_folder: str) -> str | None:
     except Exception:
         return None
     return data.get("owner")
+
+
+def _migrate_legacy_lessons() -> int:
+    """把没有 owner 的遗留课程一次性划给「第一个注册的账号」，实现课程完全隔离。
+
+    幂等：仅处理无 owner 的课程；返回迁移的课程数。
+    """
+    owner = auth.first_user()
+    if not owner or not LESSONS_DIR.exists():
+        return 0
+    migrated = 0
+    for child in LESSONS_DIR.iterdir():
+        if not child.is_dir():
+            continue
+        cfg_path = child / "config.json"
+        if not cfg_path.exists():
+            continue
+        try:
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if data.get("owner"):
+            continue
+        data["owner"] = owner
+        _atomic_write_json(cfg_path, data)
+        migrated += 1
+    if migrated:
+        app.logger.info(f"🔑 遗留课程迁移: {migrated} 门课程划归账号 {owner}")
+    return migrated
 
 
 def _tag_lesson_owner(lesson_folder: str) -> None:
@@ -4118,9 +4149,8 @@ def api_lessons():
                     metadata = json.loads(target_path.read_text(encoding="utf-8"))
                 except Exception:
                     metadata = {}
-            # 数据隔离：只列出自己创建的课程 + 无 owner 的遗留课程（共享）
-            owner = metadata.get("owner")
-            if owner and owner != me:
+            # 数据隔离：课程按账号完全隔离，只列出自己创建的课程
+            if metadata.get("owner") != me:
                 continue
             progress = load_progress(child.name)
             units = metadata.get("units") or []
@@ -7977,6 +8007,11 @@ if __name__ == "__main__":
         set_ocr_enabled(bool(load_config().get("ocr_enabled", True)))
     except Exception:
         pass
+    # 启动时迁移：若已有用户，把无 owner 的遗留课程划给第一个注册账号（幂等）
+    try:
+        _migrate_legacy_lessons()
+    except Exception:
+        app.logger.exception("遗留课程迁移失败")
     # use_reloader=False：Windows 下 debug 自动重载器不稳定，改代码时进程会悄悄退出，
     # 导致前端 "Failed to fetch"。改用显式重启：改完代码由开发侧重启服务。
     # debug=False：启用 GZip/静态缓存优化（werkzeug 的 debug 调试器会破坏 flask-compress 的压缩）。

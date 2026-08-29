@@ -128,3 +128,14 @@ def get_user_by_token(token: str) -> str | None:
 def user_count() -> int:
     """已注册用户数（用于前端判断是否需要引导注册）。"""
     return len(_load()["users"])
+
+
+def first_user() -> str | None:
+    """最早注册的用户名（无用户时返回 None）。
+
+    用于「课程按账号完全隔离」的旧数据迁移：无 owner 的遗留课程划给第一个注册账号。
+    """
+    users = _load()["users"]
+    if not users:
+        return None
+    return min(users, key=lambda u: users[u].get("created_at", ""))
