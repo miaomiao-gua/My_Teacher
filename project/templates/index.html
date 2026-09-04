@@ -4,15 +4,18 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI 全能私教</title>
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@300;400;600;700&display=swap" rel="stylesheet">
-    <!-- Markdown & Security -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+    <noscript><link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600&display=swap" rel="stylesheet"></noscript>
+    <!-- Markdown & Security（defer：不阻塞 HTML 解析，运行时才用到） -->
+    <script defer src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
     <!-- KaTeX：黑板公式渲染 -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
     <!-- PixiJS v7 -->
-    <script src="https://cdn.jsdelivr.net/npm/pixi.js@7.3.2/dist/pixi.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/pixi.js@7.3.2/dist/pixi.min.js"></script>
     <!-- Polyfill: Node.js process global (used by pixi-live2d-display) -->
     <script>window.process = window.process || { env: { NODE_ENV: "production" } };</script>
     <!-- Polyfill: PixiJS v7 removed utils.EventEmitter, needed by pixi-live2d-display -->
@@ -115,7 +118,7 @@
     })();
     </script>
     <!-- Live2D Cubism Core -->
-    <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+    <script defer src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
     <!-- Cubism 2 minimal stub: satisfies pl2d load-time checks without real Cubism 2 SDK -->
     <script>
         if (!window.Live2D) window.Live2D = {};
@@ -150,9 +153,9 @@
         console.log('Cubism2 stub applied');
     </script>
     <!-- pixi-live2d-display -->
-    <script src="/static/js/pl2d.js"></script>
+    <script defer src="/static/js/pl2d.js"></script>
     <!-- Diagnostic: check if pixi-live2d-display loaded correctly -->
-    <script>
+    <script defer>
         console.log('PL2D check: PIXI.live2d keys =', Object.keys(PIXI.live2d || {}));
         console.log('PL2D check: Live2DModel =', typeof PIXI.live2d.Live2DModel);
         // If library failed to load, try to find internal model and expose it
@@ -166,7 +169,7 @@
         }
     </script>
 
-    <link rel="stylesheet" href="/static/css/style.css?v=3.10">
+    <link rel="stylesheet" href="/static/css/style.css?v=4.1">
 </head>
 <body>
     <!-- ========== 首页菜单（覆盖层） ========== -->
@@ -176,6 +179,7 @@
             <div class="menu-loading-spinner"></div>
             <div class="menu-loading-text" id="menu-loading-text">⏳ 正在备课…</div>
             <div class="menu-loading-sub" id="menu-loading-sub">AI 正在生成课程大纲、知识点与随堂测验<br>约需 1-3 分钟，请稍候</div>
+            <div class="menu-loading-model" id="menu-loading-model">当前模型：获取中…</div>
             <div class="menu-loading-progress"><div class="menu-loading-progress-bar"></div></div>
         </div>
         <div class="menu-container">
@@ -252,6 +256,7 @@
         </div>
     </div>
 
+    <!-- ========== 应用主界面 ========== -->
     <div id="app">
 
         <!-- ========== 顶部状态栏 v2 ========== -->
@@ -278,6 +283,9 @@
                     <span class="tab-icon">💬</span><span class="tab-label">对话</span>
                 </button>
                 <!-- 测验/课程 tab 已隐藏：仅由命令（/exam、/lesson）或模型工具触发 -->
+                <button class="topbar-tab nav-btn" data-view="dashboard" title="学习仪表盘">
+                    <span class="tab-icon">📊</span><span class="tab-label">仪表盘</span>
+                </button>
                 <button class="topbar-tab nav-btn" data-view="resource" title="资源">
                     <span class="tab-icon">📄</span><span class="tab-label">资源</span>
                 </button>
@@ -346,7 +354,11 @@
                 <!-- 终端弹窗：可交互代码执行（/terminal 或 AI [TOOL:show_terminal] 触发） -->
                 <div id="terminal-overlay">
                     <div class="terminal-overlay-head">
-                        <span><span class="terminal-dot"></span>Terminal · 代码执行</span>
+                        <span class="terminal-head-title">
+                            <span class="terminal-dots"><i class="terminal-dot t-red"></i><i class="terminal-dot t-yellow"></i><i class="terminal-dot t-green"></i></span>
+                            <span class="terminal-icon">⌁</span> Terminal
+                            <span class="terminal-tag">交互式 REPL</span>
+                        </span>
                         <button class="terminal-close" id="terminal-overlay-close" title="关闭">✕</button>
                     </div>
                     <div class="terminal-output" id="terminal-output">
@@ -354,10 +366,19 @@
                     </div>
                     <div class="terminal-input-row">
                         <select id="terminal-lang" title="选择语言">
-                            <option value="python">🐍 Python</option>
-                            <option value="javascript">🟨 JavaScript</option>
-                            <option value="shell">💻 CMD</option>
-                            <option value="powershell">🔷 PowerShell</option>
+                            <optgroup label="脚本语言">
+                                <option value="python">🐍 Python</option>
+                                <option value="javascript">🟨 JavaScript (Node)</option>
+                                <option value="ruby">💎 Ruby</option>
+                                <option value="perl">🐪 Perl</option>
+                                <option value="php">🐘 PHP</option>
+                                <option value="lua">🌙 Lua</option>
+                                <option value="r">📊 R</option>
+                            </optgroup>
+                            <optgroup label="系统命令">
+                                <option value="shell">💻 CMD</option>
+                                <option value="powershell">🔷 PowerShell</option>
+                            </optgroup>
                         </select>
                         <textarea id="terminal-input" rows="1" placeholder="输入代码或命令，Enter 运行，Ctrl+Enter 换行" autocomplete="off" spellcheck="false"></textarea>
                         <button id="terminal-run" title="运行">▶ 运行</button>
@@ -415,6 +436,40 @@
                                 <div id="exam-list"><span style="color:var(--text-dim);">点击生成题目</span></div>
                                 <button id="exam-submit-btn" class="btn-sm" style="display:none; margin-top:8px;">提交答案</button>
                             </div>
+                            <div class="card">
+                                <h3>📋 期末测验（标准试卷）</h3>
+                                <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+                                    <input type="file" id="exam-paper-upload" accept=".txt,.md,.json,.pdf,.docx,.doc,.ppt" style="flex:1; min-width:150px;">
+                                    <button id="exam-paper-upload-btn" class="btn-sm">上传试卷</button>
+                                    <button id="exam-final-btn" class="btn-sm" disabled>开始期末测验</button>
+                                </div>
+                                <div id="exam-paper-info" style="font-size:12px; color:var(--text-muted); line-height:1.6;">未上传试卷。上传后课程讲解将围绕这份试卷展开，学习完可开始期末测验。</div>
+                            </div>
+                            <div class="card">
+                                <h3>📊 学习统计</h3>
+                                <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:8px;">
+                                    <div class="stat-chip"><strong id="stat-quiz-count">–</strong><br><span>测验次数</span></div>
+                                    <div class="stat-chip"><strong id="stat-avg-score">–</strong><br><span>平均分</span></div>
+                                    <div class="stat-chip"><strong id="stat-last-score">–</strong><br><span>最近得分</span></div>
+                                    <div class="stat-chip"><strong id="stat-wrong-count">–</strong><br><span>错题数</span></div>
+                                    <div class="stat-chip"><strong id="stat-code-attempts">–</strong><br><span>代码练习</span></div>
+                                </div>
+                                <div id="stat-score-trend" style="font-size:12px; color:var(--text-muted); line-height:1.7; margin-bottom:6px;"></div>
+                                <div id="stat-weak-topics" style="font-size:12px; color:var(--text-muted); line-height:1.7;"></div>
+                                <div style="margin-top:8px; font-size:13px; font-weight:600; color:var(--text-primary);">📕 错题本</div>
+                                <div id="stat-wrong-book" style="font-size:12px; color:var(--text-muted); line-height:1.7; margin-top:4px;"></div>
+                                <button id="stat-refresh-btn" class="btn-sm" style="margin-top:8px;">🔄 刷新统计</button>
+                            </div>
+                            <div class="card">
+                                <h3>💬 历史对话回顾</h3>
+                                <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+                                    <button id="history-refresh-btn" class="btn-sm">📜 加载对话记录</button>
+                                    <button id="history-export-btn" class="btn-sm">⬇️ 导出 Markdown</button>
+                                </div>
+                                <div id="history-list" style="font-size:12px; color:var(--text-muted); line-height:1.7; max-height:320px; overflow-y:auto;">
+                                    点击「加载对话记录」查看每个单元的聊天回顾。
+                                </div>
+                            </div>
                         </div>
                     </div>
                     <!-- Resource pane -->
@@ -425,6 +480,50 @@
                                 <h3>📄 学习资源</h3>
                                 <div id="resource-list"><span style="color:var(--text-dim);">暂无资源</span></div>
                                 <button id="download-btn" class="btn-sm" style="margin-top:10px;">⬇ 下载选中</button>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Dashboard pane (V4 自适应学习仪表盘) -->
+                    <div id="view-dashboard" class="view-content">
+                        <button class="view-close" data-view="dashboard" title="关闭">✕</button>
+                        <div class="view-content-body">
+                            <div class="card">
+                                <div class="dashboard-header">
+                                    <h3>📊 学习仪表盘</h3>
+                                    <div class="dashboard-header-meta">
+                                        <span id="dash-learner-id" class="dash-meta"></span>
+                                        <span id="dash-lesson" class="dash-meta"></span>
+                                        <button id="dash-refresh-btn" class="btn-sm">🔄 刷新</button>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="dash-grid">
+                                <div class="card dash-card dash-card-radar">
+                                    <h4>🧠 知识掌握度雷达图</h4>
+                                    <canvas id="dash-radar" width="300" height="300"></canvas>
+                                    <div id="dash-radar-empty" class="dash-empty">暂无知识点数据，先完成备课并学习几课吧</div>
+                                </div>
+                                <div class="card dash-card dash-card-curve">
+                                    <h4>📈 学习进度曲线</h4>
+                                    <canvas id="dash-curve" width="300" height="180"></canvas>
+                                    <div id="dash-curve-empty" class="dash-empty">暂无测验记录，完成测验后这里会显示分数曲线</div>
+                                </div>
+                                <div class="card dash-card dash-card-next">
+                                    <h4>🎯 推荐的下一步</h4>
+                                    <div id="dash-next" class="dash-body">—</div>
+                                </div>
+                                <div class="card dash-card dash-card-gain">
+                                    <h4>🏆 学习增益统计</h4>
+                                    <div id="dash-gain" class="dash-body">—</div>
+                                </div>
+                                <div class="card dash-card dash-card-insight">
+                                    <h4>💡 学习洞察</h4>
+                                    <div id="dash-insights" class="dash-body">—</div>
+                                </div>
+                                <div class="card dash-card dash-card-wrong">
+                                    <h4>📕 错题本</h4>
+                                    <div id="dash-wrong-book" class="dash-body">—</div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -447,7 +546,11 @@
                             <div class="card">
                                 <h3>🔄 切换课程</h3>
                                 <div id="lesson-list"><span style="color:var(--text-dim);">加载中...</span></div>
-                                <button id="create-lesson-btn" class="btn-sm" style="margin-top:10px;">➕ 新建课程</button>
+                                <div style="display:flex; gap:8px; margin-top:10px;">
+                                    <button id="create-lesson-btn" class="btn-sm">➕ 新建课程</button>
+                                    <button id="import-lesson-btn" class="btn-sm">📥 导入备份</button>
+                                    <input type="file" id="import-lesson-file" accept=".zip" style="display:none;">
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -541,6 +644,16 @@
                                             <span class="val" id="lesson-search-val"></span>
                                         </div>
                                     </div>
+                                    <div class="setting-row">
+                                        <div class="setting-label">交互式备课（课前诊断）</div>
+                                        <div class="slider-control">
+                                            <label style="min-width:auto;"><input type="checkbox" id="interactive-prep-enabled" style="width:16px;height:16px;accent-color:var(--gold);cursor:pointer;vertical-align:middle;"></label>
+                                            <span class="val" id="interactive-prep-enabled-val">关</span>
+                                        </div>
+                                    </div>
+                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 0;">
+                                        实验功能：备课时先弹 4~6 道前置知识诊断题，AI 根据掌握情况生成针对性教案（未掌握的知识点讲解更详细）。
+                                    </p>
                                 </div>
 
                                 <div class="card">
@@ -811,6 +924,21 @@
                                     <div id="custom-actions-list"></div>
                                     <button id="custom-action-add" class="btn-sm">＋ 添加动作</button>
                                 </div>
+
+                                <div class="card">
+                                    <h3>🧠 学生画像（AI 记忆）</h3>
+                                    <p style="font-size:12px; color:var(--text-muted); margin:6px 0 10px;">
+                                        系统从每一课的对话中自动提炼你的性格、爱好与喜欢的授课方式，注入后续课程的
+                                        系统提示词，让老师越教越懂你。也可在下方手动刷新当前画像。
+                                    </p>
+                                    <div id="student-profile-box" style="background:rgba(0,0,0,0.2); border:1px solid var(--border-mid); border-radius:10px; padding:12px; margin-bottom:10px;">
+                                        <div style="font-size:12px; color:var(--text-muted);">尚未蒸馏画像：学完一课后进入下一课，系统会自动生成。</div>
+                                    </div>
+                                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                                        <button id="profile-distill-btn" class="btn-sm">🔄 立即蒸馏</button>
+                                        <span id="profile-distill-status" style="font-size:12px; color:var(--text-muted);"></span>
+                                    </div>
+                                </div>
                             </div>
 
                             <div class="settings-save-bar">
@@ -828,7 +956,7 @@
         <div class="input-area">
             <div id="attach-panel" style="display:none; flex:1 1 100%;"></div>
             <button id="attach-btn" class="btn btn-icon" title="上传文件 / 图片">📎</button>
-            <input type="file" id="attach-file-input" accept="image/*,.txt,.md,.py,.js,.ts,.json,.csv,.log,.html,.css,.xml,.yaml,.yml,.c,.cpp,.h,.java,.go,.rs,.sql,.sh,.bat,.ps1,.ipynb" multiple style="display:none;">
+            <input type="file" id="attach-file-input" accept="image/*,.pdf,.txt,.md,.py,.js,.ts,.json,.csv,.log,.html,.css,.xml,.yaml,.yml,.c,.cpp,.h,.java,.go,.rs,.sql,.sh,.bat,.ps1,.ipynb" multiple style="display:none;">
             <textarea id="message-input" rows="1" placeholder="输入你的问题..."></textarea>
             <button id="long-input-btn" class="btn btn-icon" title="长文本模式（写作文 / 长代码）">📝</button>
             <button id="send-btn" class="btn btn-primary">发送</button>
@@ -858,8 +986,9 @@
         </div>
     </div>
     <!-- 应用逻辑：按依赖顺序加载（共享全局词法作用域）；?v= 用于开发期绕过浏览器缓存 -->
-    <script src="/static/js/base.js?v=3.11"></script>
-    <script src="/static/js/interact.js?v=3.15"></script>
-    <script src="/static/js/settings.js?v=3.12"></script>
+    <script src="/static/js/base.js?v=4.2"></script>
+    <script src="/static/js/interact.js?v=3.33"></script>
+    <script src="/static/js/settings.js?v=3.15"></script>
+    <script src="/static/js/dashboard.js?v=4.0"></script>
 </body>
 </html>

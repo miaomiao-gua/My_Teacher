@@ -489,13 +489,36 @@ def _robust_json_loads(text: str) -> Any:
 MIN_UNITS = 8  # 与 system prompt 硬性要求一致
 
 
-def _units_target(data: Dict[str, Any]) -> int:
-    """目标课数：total_lessons 有值时取它（至少 8），否则取 8。"""
+def _units_target(data: Dict[str, Any], toc_count: int = 0) -> int:
+    """目标课数：优先按书籍目录顶层章节数（1~40）；其次 total_lessons（至少 8）；否则 8。"""
+    if toc_count and toc_count > 0:
+        return min(max(int(toc_count), 1), 40)
     try:
         total = int(data.get("total_lessons") or 0)
     except (TypeError, ValueError):
         total = 0
     return max(total, MIN_UNITS)
+
+
+def _count_toc_chapters(toc) -> int:
+    """统计书籍目录的顶层章节数：优先 level 0 条目；无 level 0 时取最小 level。
+
+    只计"像章节"的顶层条目（以「第N章/第N讲/第N课/N. /Chapter N」开头），
+    过滤掉前言/附录/版权页等非章节页；若一条都没匹配则回退为全部顶层条目数。
+    """
+    if not isinstance(toc, list) or not toc:
+        return 0
+    items = [it for it in toc if isinstance(it, dict)]
+    if not items:
+        return 0
+    levels = [int(it.get("level") or 0) for it in items]
+    top = 0 if 0 in levels else min(levels)
+    top_items = [it for it in items if int(it.get("level") or 0) == top]
+    chapter_like = [
+        it for it in top_items
+        if re.match(r"^第\s*[\d〇零一二三四五六七八九十百千]+\s*[章讲节课]|^\d+\s*[\.、]|^[Cc]hapter\s*\d+", str(it.get("title") or "").strip())
+    ]
+    return len(chapter_like) if chapter_like else len(top_items)
 
 
 def _extract_syllabus_titles(syllabus: str) -> List[str]:
@@ -511,12 +534,129 @@ def _extract_syllabus_titles(syllabus: str) -> List[str]:
     return titles
 
 
-def _build_user_message(topic: str, document_markdown: str = "") -> str:
+def _extract_titles_from_syllabus(syllabus: str) -> List[Dict[str, str]]:
+    """从 syllabus Markdown 中提取课时标题，返回 [{title}] 列表。
+
+    与 _extract_syllabus_titles 行为相同但返回结构化格式，供两阶段备课阶段1 兜底用。
+    """
+    titles = _extract_syllabus_titles(syllabus)
+    return [{"title": t} for t in titles]
+
+
+def _build_outline_message(topic: str, document_markdown: str, toc_count: int) -> str:
+    """阶段1 用户消息：只要求大纲（course_target / syllabus / key_points / units 标题）。
+
+    阶段2 会逐课单独请求详细 modules，所以阶段1 的 units 数组里只需要 title/summary/key_points/prerequisites。
+    """
+    if toc_count > 0:
+        lesson_req = (
+            f"你收到了用户上传的整本教材，其目录共有 {toc_count} 个顶层章节。"
+            f"请严格按照目录生成恰好 {toc_count} 个 unit（每章对应一课）："
+            f"unit 的 title 必须与目录章节标题一一对应（如「第一章 xxx」→「第1课：xxx」），"
+            f"禁止合并章节，也禁止凭空增减课时；total_lessons 必须等于 {toc_count}。"
+        )
+    else:
+        lesson_req = "共 12 课（允许 8~16 课）"
+    doc_section = ""
+    if document_markdown:
+        doc = document_markdown[:40000]
+        doc_section = (
+            f"\n以下是用户上传的课程资料文档（Markdown，请以此为准）：\n"
+            f"--- 课程资料开始 ---\n{doc}\n--- 课程资料结束 ---\n"
+        )
+    return (
+        f"请为【{topic}】设计【阶段一·大纲】：{lesson_req}。"
+        f"{doc_section}"
+        f"\n【本阶段只输出大纲骨架】，按下方 schema 输出 JSON：\n"
+        f"{{\n"
+        f'  "course_target": "课程级核心目标（一句话）",\n'
+        f'  "acceptance_criteria": "可量化的验收标准",\n'
+        f'  "total_lessons": <整数，=units 长度>,\n'
+        f'  "topic": "{topic}",\n'
+        f'  "syllabus": "### 第1课：xxx\\n### 第2课：xxx\\n...(全部课时标题，Markdown 列表)",\n'
+        f'  "key_points": ["全局核心概念1", "全局核心概念2", ...至少 5 个],\n'
+        f'  "units": [\n'
+        f"    {{\"title\": \"第 N 课：xxx\", \"summary\": \"本课1-2句概述\", \"key_points\": [\"本课要点1\", \"本课要点2\"], \"prerequisites\": [\"第N-1课（标题）\"]}}\n"
+        f"    ...(必须与 total_lessons 完全一致，每个 unit 只含这 4 个字段，不要写 modules/quiz/source_files)\n"
+        f"  ]\n"
+        f"}}\n"
+        f"【重要】units 数组必须完整闭合，禁止只写几课就结束。\n"
+    )
+
+
+def _build_unit_detail_message(topic: str, seed: Dict[str, Any], document_markdown: str, total: int,
+                                 diagnosis: Optional[Dict[str, Any]] = None) -> str:
+    """阶段2 单课请求用户消息：基于阶段1 的标题/summary，要求详细 modules。
+
+    每课单独一次请求：max_tokens=2048、字段精简到 30~60 字，确保必能完整闭合 JSON。
+    diagnosis 包含已知/部分/未知概念列表，让模型对未知概念讲得更详细、对已知概念快速带过。
+    """
+    title = str(seed.get("title") or "").strip()
+    summary = str(seed.get("summary") or "").strip()
+    key_points = list(seed.get("key_points") or [])
+    prerequisites = list(seed.get("prerequisites") or [])
+    # 诊断上下文：只在本课相关概念上展开
+    diag_section = ""
+    if diagnosis and isinstance(diagnosis, dict):
+        known = list(diagnosis.get("known") or [])
+        partial = list(diagnosis.get("partial") or [])
+        unknown = list(diagnosis.get("unknown") or [])
+        if known or partial or unknown:
+            diag_section = (
+                "\n【学生摸底结果】（来自交互式备课诊断，仅本课相关）：\n"
+                f"  - 已掌握：{'; '.join(known) or '（无）'}\n"
+                f"  - 部分掌握：{'; '.join(partial) or '（无）'}\n"
+                f"  - 未掌握：{'; '.join(unknown) or '（无）'}\n"
+                "请据此调整讲解深度：未掌握的概念要详细解释（含公式推导、生活类比、易错点），"
+                "已掌握的概念只做 1 句话的快速回顾即可；部分掌握的概念重点讲缺失部分。\n"
+            )
+    # 单课请求不带文档（节省 token）：阶段1 已经把文档上下文喂给了模型
+    return (
+        f"你正在为【{topic}】编写【第 {seed.get('index', 0) + 1}/{total} 课】的详细教案。\n"
+        f"主题：{title}\n"
+        f"概述：{summary}\n"
+        f"要点：{'；'.join(key_points) or '（无）'}\n"
+        f"前置：{'；'.join(prerequisites) or '无'}\n"
+        f"{diag_section}\n"
+        f"按下方 schema 输出 JSON（必须以右花括号闭合，禁止截断）：\n"
+        f"{{\n"
+        f'  "target": "本课能力目标（一句话）",\n'
+        f'  "contribution_to_target": "本课对总目标的贡献（1句）",\n'
+        f'  "core_formulas": [\n'
+        f'    {{"name": "公式/概念名", "formula": "标准写法", "variables": "变量说明"}}\n'
+        f"    ...(1~3 项)\n"
+        f"  ],\n"
+        f'  "gateway_questions": ["问题1", "问题2", "问题3"],\n'
+        f'  "modules": [\n'
+        f'    {{"id": "M1", "title": "模块标题", "concept": "本模块核心概念（30~60字）",\n'
+        f'     "example": "演示例子（30~60字）", "anchor": "一句话记忆锚点",\n'
+        f'     "interaction": "本模块的提问/互动", "action": "建议的 Live2D 动作"}},\n'
+        f"    ...(必须有 3 个 modules)\n"
+        f"  ],\n"
+        f'  "contrasts": [{{"a":"易混A","b":"易混B","difference":"一句话区别"}}]\n'
+        f"}}\n"
+        f"【精简】每个字段不要超过 60 字；modules 严格 3 个；只输出这一个 JSON 对象，"
+        f"禁止包含 units 数组或解释性文字。"
+    )
+
+
+def _build_user_message(topic: str, document_markdown: str = "", toc_count: int = 0) -> str:
     """构造备课的用户消息：无文档时只给主题；有文档时附上文档全文并要求基于文档拆分。
 
     强调"完整输出全部课时"：模型（尤其 DeepSeek-V3）经常只写几个 unit 就提前闭合 JSON，
     因此用户消息里必须显式要求课数与"禁止提前结束"。
+    toc_count > 0 时（用户上传了整本教材且成功提取目录）：必须按目录顶层章节数
+    生成相同数量的 unit，每章对应一课，禁止合并/增减章节。
     """
+    if toc_count > 0:
+        lesson_req = (
+            f"你收到了用户上传的整本教材，其目录共有 {toc_count} 个顶层章节。"
+            f"请严格按照目录生成恰好 {toc_count} 个 unit（每章对应一课）："
+            f"unit 的 title 必须与目录章节标题一一对应（如「第一章 xxx」→「第1课：xxx」），"
+            f"禁止合并章节，也禁止凭空增减课时；total_lessons 必须等于 {toc_count}。"
+        )
+    else:
+        lesson_req = "共 12 课（允许 8~16 课）"
     tail = (
         f"【重要】units 数组必须完整包含全部课时：写出多少个标题，就必须有多少个 unit 对象，"
         f"禁止只写部分单元就提前闭合 JSON 结束输出。"
@@ -526,14 +666,14 @@ def _build_user_message(topic: str, document_markdown: str = "") -> str:
     )
     if not document_markdown:
         return (
-            f"请为【{topic}】设计一份分课教案，共 12 课（允许 8~16 课），"
+            f"请为【{topic}】设计一份分课教案，{lesson_req}，"
             f"每课独立含资源与要点。\n{tail}"
         )
     doc = document_markdown[:60000]  # 截断防 token 爆炸
     return (
         f"以下是用户上传的课程资料文档（Markdown，请以此为准，不要脱离文档编造内容）：\n\n"
         f"--- 课程资料开始 ---\n{doc}\n--- 课程资料结束 ---\n\n"
-        f"请基于以上文档为【{topic}】设计一份分课教案，共 12 课（允许 8~16 课），"
+        f"请基于以上文档为【{topic}】设计一份分课教案，{lesson_req}，"
         f"每课独立含资源与要点。\n{tail}"
     )
 
@@ -545,7 +685,8 @@ def _mark_fallback(data: Dict[str, Any], reason: str) -> Dict[str, Any]:
     return data
 
 
-def _call_siliconflow(topic: str, config: Dict[str, Any] | None = None, document_markdown: str = "") -> Dict[str, Any]:
+def _call_siliconflow(topic: str, config: Dict[str, Any] | None = None, document_markdown: str = "",
+                      toc_count: int = 0, diagnosis: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     config = config or {}
     api_key = (config.get("cloud_api_key") or config.get("siliconflow_api_key") or os.getenv("SILICONFLOW_API_KEY", "")).strip()
     if not api_key:
@@ -572,78 +713,120 @@ def _call_siliconflow(topic: str, config: Dict[str, Any] | None = None, document
     # 注意：不再要求模型生成题目，题目由后续单独流程结合人格提示词生成
     system_content = (config or {}).get("lesson_prompt") or _LESSON_SYSTEM_PROMPT
 
-    def _request_once(extra_instruction: str = "") -> Dict[str, Any]:
-        """发送一次备课请求并解析 JSON，成功返回 dict，失败返回 {}。"""
-        user_content = _build_user_message(topic, document_markdown)
-        if extra_instruction:
-            user_content = extra_instruction + "\n\n" + user_content
+    # 累计 token 用量（首次 + 重试请求），随结果返回给上层展示
+    usage_acc = {"prompt_tokens": 0, "completion_tokens": 0}
+
+    def _request_once(user_content: str, max_tokens: int = 4096, temperature: float = 0.7,
+                       label: str = "备课") -> Dict[str, Any]:
+        """发送一次备课请求并解析 JSON，成功返回 dict，失败返回 {}。
+
+        用户消息可被任意构造（含大纲/单课展开），不再绑死 _build_user_message。
+        """
         payload = {
             "model": model,
             "messages": [
                 {"role": "system", "content": system_content},
                 {"role": "user", "content": user_content},
             ],
-            "max_tokens": 16384,
-            "temperature": 0.7,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
         }
-        # 备课不再附带 enable_search（无论用户全局设置如何），避免联网搜索拖慢备课
         logger.info(
-            "📦 备课·云端请求包: url=%s model=%s enable_search=%s max_tokens=16384 topic=%r",
-            url, model, enable_search, topic,
+            "📦 备课·[%s] 云端请求包: model=%s max_tokens=%s topic=%r toc_count=%s",
+            label, model, max_tokens, topic, toc_count,
         )
         logger.info(
-            "📦 备课·system_prompt=%d字 user_message=%d字(文档%d字)",
-            len(system_content), len(user_content), len(document_markdown),
+            "📦 备课·[%s] system_prompt=%d字 user_message=%d字",
+            label, len(system_content), len(user_content),
         )
         t0 = time.time()
         response = requests.post(url, headers=headers, json=payload, timeout=300)
         elapsed = time.time() - t0
-        logger.info("📦 备课·云端响应包: status=%s 耗时=%.1fs content-type=%s",
-                    response.status_code, elapsed, response.headers.get("Content-Type"))
+        logger.info("📦 备课·[%s] 云端响应: status=%s 耗时=%.1fs", label, response.status_code, elapsed)
         response.raise_for_status()
         result = response.json()
         content = result["choices"][0]["message"]["content"]
-        logger.info("📦 备课·响应正文: raw_content_len=%d preview=%s", len(content), content[:300])
+        usage = result.get("usage") or {}
+        usage_acc["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+        usage_acc["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+        logger.info("📦 备课·[%s] 内容: raw_len=%d preview=%s usage=%s",
+                    label, len(content), content[:200], usage)
         text = _strip_code_fence(content)
         data = _robust_json_loads(text)
         if isinstance(data, dict):
             return data
-        logger.warning("⚠️ 备课·解析结果不是 dict: %s", type(data))
+        logger.warning("⚠️ 备课·[%s] 解析结果不是 dict: %s", label, type(data))
         return {}
 
+    # ============ 两阶段生成：阶段1 拿大纲，阶段2 逐课展开 ============
     try:
-        data = _request_once()
-        if not data:
-            raise json.JSONDecodeError("首次请求未返回合法 JSON 对象", "", 0)
-        units = data.get("units", [])
-        n_units = len(units) if isinstance(units, list) else 0
-        target = _units_target(data)
-        if n_units < target:
-            # 模型经常只写部分 unit 就提前闭合 JSON（实测 12 课只输出 2 课），自动重试一次
-            logger.warning("⚠️ 备课·units不完整: 实际%d课/目标%d课，自动重试一次", n_units, target)
+        # ----- 阶段1：只要大纲（course_target/syllabus/key_points/units 标题） -----
+        outline_msg = _build_outline_message(topic, document_markdown, toc_count)
+        outline = _request_once(outline_msg, max_tokens=2048, temperature=0.7, label="阶段1·大纲")
+        if not outline:
+            raise json.JSONDecodeError("阶段1 未返回合法 JSON 对象", "", 0)
+        units_seed = outline.get("units") or []
+        # 从 syllabus 兜底提取标题（应对模型把 units 写成空但 syllabus 完整的情况）
+        if not units_seed:
+            units_seed = _extract_titles_from_syllabus(outline.get("syllabus") or "")
+        n_seed = len(units_seed) if isinstance(units_seed, list) else 0
+        target = _units_target(outline, toc_count)
+        # 如果模型在阶段1 已给出 N 课，但少于目标，按 N 来（避免硬要补齐到过多数）
+        if n_seed > 0:
+            target = min(target, max(n_seed, MIN_UNITS))
+        logger.info("✅ 阶段1·大纲完成 units_seed=%s target=%s", n_seed, target)
+
+        # ----- 阶段2：每课单独请求精简详细模块（modules 3 个、字段 30~60 字） -----
+        unit_titles = []
+        for i in range(target):
+            seed = units_seed[i] if i < n_seed and isinstance(units_seed[i], dict) else {}
+            title = str(seed.get("title") or f"第 {i + 1} 课").strip()
+            unit_titles.append({
+                "index": i,
+                "title": title,
+                "summary": str(seed.get("summary") or "").strip(),
+                "key_points": list(seed.get("key_points") or []),
+                "prerequisites": list(seed.get("prerequisites") or []),
+            })
+        # 并发批量请求每课详情（max_workers=3 避免对硅基 QPS 太高）
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        detail_results: Dict[int, Dict[str, Any]] = {}
+
+        def _fetch_one(i: int, seed: Dict[str, Any]) -> tuple:
+            msg = _build_unit_detail_message(topic, seed, document_markdown, target, diagnosis=diagnosis)
             try:
-                retry = _request_once(
-                    f"【重要更正】你上一次的输出不完整：units 只包含 {n_units} 个单元，"
-                    f"未达到硬性要求的 {target} 课。本次必须完整输出全部 {target} 课，"
-                    f"每个 unit 都含完整字段；输出结束前必须把 JSON 正确闭合，禁止只写几课就结束。"
-                )
+                d = _request_once(msg, max_tokens=2048, temperature=0.7, label=f"阶段2·第{i+1}课")
             except Exception as exc:
-                retry = {}
-                logger.error("❌ 备课·重试异常: %s: %s", type(exc).__name__, exc)
-            if retry:
-                retry_units = retry.get("units", [])
-                retry_n = len(retry_units) if isinstance(retry_units, list) else 0
-                if retry_n > n_units:
-                    data = retry
-                    n_units = retry_n
-                    logger.info("✅ 备课·重试成功 units=%s", retry_n)
-                elif retry_n == 0:
-                    logger.warning("⚠️ 备课·重试仍非 dict，保留首次结果")
-                else:
-                    logger.warning("⚠️ 备课·重试仍未补全（%d课），保留课数更多的结果", retry_n)
-            else:
-                logger.warning("⚠️ 备课·重试失败，保留首次结果（后续由 prepare_lesson 按大纲补齐）")
-        logger.info("✅ 备课·解析成功 units=%s", n_units)
+                logger.error("❌ 阶段2·第%d课异常: %s: %s", i + 1, type(exc).__name__, exc)
+                d = {}
+            return i, d
+
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            futures = [ex.submit(_fetch_one, i, s) for i, s in enumerate(unit_titles)]
+            for fut in as_completed(futures):
+                i, d = fut.result()
+                detail_results[i] = d if isinstance(d, dict) else {}
+        logger.info("✅ 阶段2·逐课展开完成 成功%d/%d课", sum(1 for v in detail_results.values() if v), target)
+
+        # 拼装最终 units：阶段1 大纲 + 阶段2 详情，缺失字段用阶段1 seed 兜底
+        units_out = []
+        for i in range(target):
+            seed = unit_titles[i]
+            detail = detail_results.get(i) or {}
+            merged = dict(seed)  # title/summary/key_points/prerequisites 来自阶段1
+            for k in ("target", "core_formulas", "gateway_questions",
+                      "contribution_to_target", "modules", "contrasts",
+                      "source_files", "quiz_preset"):
+                v = detail.get(k)
+                if v:
+                    merged[k] = v
+            units_out.append(merged)
+
+        data = dict(outline)  # 保留阶段1 的 course_target / acceptance_criteria / total_lessons / syllabus / key_points / resources
+        data["units"] = units_out
+        logger.info("✅ 备课·解析成功 units=%s", len(units_out))
+        data["_usage"] = dict(usage_acc)
+        data["_model"] = model
         return data
     except requests.exceptions.HTTPError as e:
         status = e.response.status_code if (e.response is not None) else "?"
@@ -697,7 +880,8 @@ def _call_siliconflow(topic: str, config: Dict[str, Any] | None = None, document
     return _mark_fallback(_fallback_lesson(topic, document_markdown), fail_reason)
 
 
-def _call_ollama_lesson(topic: str, config: Dict[str, Any] | None = None, document_markdown: str = "") -> Dict[str, Any]:
+def _call_ollama_lesson(topic: str, config: Dict[str, Any] | None = None, document_markdown: str = "",
+                        toc_count: int = 0, diagnosis: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """用本地 Ollama 生成分课教案（与云端共用同一 system prompt，去掉 enable_search）。"""
     config = config or {}
     base_url = (config.get("ollama_base_url") or "http://127.0.0.1:11434").rstrip("/")
@@ -706,7 +890,7 @@ def _call_ollama_lesson(topic: str, config: Dict[str, Any] | None = None, docume
         "model": model,
         "messages": [
             {"role": "system", "content": (config or {}).get("lesson_prompt") or _LESSON_SYSTEM_PROMPT},
-            {"role": "user", "content": _build_user_message(topic, document_markdown)},
+            {"role": "user", "content": _build_user_message(topic, document_markdown, toc_count)},
         ],
         "stream": False,
         # qwen3 系列默认开启 thinking：4B 模型思考会大量消耗时间/可能返回空正文，显式关闭
@@ -718,13 +902,14 @@ def _call_ollama_lesson(topic: str, config: Dict[str, Any] | None = None, docume
         },
     }
     try:
-        logger.info("📦 备课·Ollama请求包: %s/api/chat model=%s 文档%d字",
-                    base_url, model, len(document_markdown))
+        logger.info("📦 备课·Ollama请求包: %s/api/chat model=%s 文档%d字 toc_count=%s",
+                    base_url, model, len(document_markdown), toc_count)
         resp = requests.post(f"{base_url}/api/chat", json=payload, timeout=300)
         if not resp.ok:
             logger.error("❌ 备课·Ollama HTTP %s: %s", resp.status_code, resp.text[:300])
             return None
-        content = (resp.json().get("message", {}).get("content") or "").strip()
+        resp_json = resp.json()
+        content = (resp_json.get("message", {}).get("content") or "").strip()
         logger.info("📦 备课·Ollama响应: raw_content_len=%d preview=%s", len(content), content[:200])
         if not content:
             return None
@@ -736,6 +921,11 @@ def _call_ollama_lesson(topic: str, config: Dict[str, Any] | None = None, docume
         if isinstance(data, dict):
             units = data.get("units", [])
             logger.info("✅ 备课·Ollama解析成功 units=%s", len(units) if isinstance(units, list) else "N/A")
+            data["_usage"] = {
+                "prompt_tokens": int(resp_json.get("prompt_eval_count") or 0),
+                "completion_tokens": int(resp_json.get("eval_count") or 0),
+            }
+            data["_model"] = model
             return data
     except json.JSONDecodeError as exc:
         logger.error("❌ 备课·Ollama JSON解析失败: %s", exc)
@@ -882,7 +1072,9 @@ def _normalize_unit(unit: Dict[str, Any], fallback_index: int) -> Dict[str, Any]
     }
 
 
-def prepare_lesson(topic: str, config: Dict[str, Any] | None = None, document_markdown: str = "") -> Dict[str, Any]:
+def prepare_lesson(topic: str, config: Dict[str, Any] | None = None, document_markdown: str = "",
+                   doc_toc: Optional[List[Dict[str, Any]]] = None,
+                   diagnosis: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Return a lesson plan payload and gracefully fall back if external API is unavailable.
 
     Args:
@@ -892,28 +1084,37 @@ def prepare_lesson(topic: str, config: Dict[str, Any] | None = None, document_ma
                 are used instead of environment variables.
         document_markdown: Optional uploaded course document (Markdown). When provided,
                 the model must split units based on this document.
+        doc_toc: Optional PDF outline ([{title, page, level}]) of the uploaded textbook.
+                When present, units are generated to match its top-level chapter count.
+        diagnosis: Optional interactive diagnosis result from /api/prep_diagnose/finish.
+                Dict with keys known / partial / unknown (list of concept strings).
+                When present, the model is told to spend more detail on unknown concepts
+                and quickly recap known concepts.
 
     Returns:
         dict with keys: topic, syllabus, key_points, resources, quiz_preset, units
         其中 units 是分课数组，每项含 title/summary/key_points/source_files/quiz_preset。
         旧字段 syllabus/key_points/resources/quiz_preset 保留兼容。
+        _meta 内含 fallback / reason / warning / model / usage / toc_count / diagnosis。
     """
     provider = (str((config or {}).get("lesson_provider") or "cloud")).strip().lower()
-    logger.info("📦 备课·开始 provider=%s topic=%r 文档%d字", provider, topic, len(document_markdown))
+    toc_count = _count_toc_chapters(doc_toc)
+    logger.info("📦 备课·开始 provider=%s topic=%r 文档%d字 toc_count=%s",
+                provider, topic, len(document_markdown), toc_count)
     prep_warning = ""
     if provider == "ollama":
         # 本地 Ollama 备课，失败回退云端
-        data = _call_ollama_lesson(topic, config=config, document_markdown=document_markdown)
+        data = _call_ollama_lesson(topic, config=config, document_markdown=document_markdown, toc_count=toc_count, diagnosis=diagnosis)
         if not data:
             logger.warning("⚠️ 备课·Ollama 备课失败，回退云端")
             prep_warning = "本地 Ollama 不可用，已自动改用云端备课"
-            data = _call_siliconflow(topic, config=config, document_markdown=document_markdown)
+            data = _call_siliconflow(topic, config=config, document_markdown=document_markdown, toc_count=toc_count, diagnosis=diagnosis)
     else:
         # cloud / auto：云端备课；失败（返回兜底标记）时若本地 Ollama 可用则自动回退
-        data = _call_siliconflow(topic, config=config, document_markdown=document_markdown)
+        data = _call_siliconflow(topic, config=config, document_markdown=document_markdown, toc_count=toc_count, diagnosis=diagnosis)
         if data.get("_prepared_fallback"):
             logger.warning("⚠️ 备课·云端失败，尝试回退本地 Ollama")
-            local_data = _call_ollama_lesson(topic, config=config, document_markdown=document_markdown)
+            local_data = _call_ollama_lesson(topic, config=config, document_markdown=document_markdown, toc_count=toc_count, diagnosis=diagnosis)
             if local_data:
                 data = local_data
                 prep_warning = "云端备课失败，已自动改用本地 Ollama 备课"
@@ -924,6 +1125,10 @@ def prepare_lesson(topic: str, config: Dict[str, Any] | None = None, document_ma
     data.setdefault("key_points", ["基础概念", "核心原理", "实践应用"])
     data.setdefault("resources", [])
     data.setdefault("quiz_preset", [])
+
+    # 记录本次备课实际使用的模型与 token 用量（供前端预览弹窗展示）
+    model_used = data.pop("_model", "") or ""
+    usage_used = data.pop("_usage", None) or {}
 
     # 规整 units：若云端未返回则从 syllabus 兜底成单课
     raw_units = data.get("units")
@@ -943,7 +1148,7 @@ def prepare_lesson(topic: str, config: Dict[str, Any] | None = None, document_ma
 
     # 数量兜底：模型经常只输出部分 unit（如 12 课只给 2 课）就闭合 JSON。
     # 不足目标课数时，从 syllabus 的课时标题列表补齐为最简骨架课，保证预览课数完整、可逐课编辑。
-    target_units = _units_target(data)
+    target_units = _units_target(data, toc_count)
     if len(units) < target_units:
         titles = _extract_syllabus_titles(str(data.get("syllabus") or ""))
         global_kp = data.get("key_points") if isinstance(data.get("key_points"), list) else []
@@ -982,6 +1187,10 @@ def prepare_lesson(topic: str, config: Dict[str, Any] | None = None, document_ma
         "fallback": bool(data.pop("_prepared_fallback", False)),
         "reason": data.pop("_prepared_reason", ""),
         "warning": prep_warning,
+        "model": model_used,
+        "usage": usage_used,
+        "toc_count": toc_count,
+        "diagnosis": diagnosis if diagnosis else None,
     }
     return data
 
@@ -1651,3 +1860,104 @@ def _fallback_quiz(unit_content: Optional[Dict[str, Any]]) -> List[Dict[str, Any
             "answer": _lab(1),
         },
     ]
+
+
+def _strip_unit_seq_prefix(title: str) -> str:
+    """剥离「第N课 / Lesson N / Unit N / 第N讲」等序号前缀。"""
+    return re.sub(
+        r"^\s*(?:第\s*\d+\s*(?:课|讲|章|节)|lesson\s*\d+|unit\s*\d+)[、.\s:：-]*",
+        "",
+        str(title or ""),
+        flags=re.IGNORECASE,
+    ).strip()
+
+
+def generate_knowledge_graph(lesson_data: Dict[str, Any]) -> Dict[str, Any]:
+    """从备课结果（lesson_data.units）确定性生成知识图谱。
+
+    不依赖 LLM，保证任何备课来源（云端 / Ollama / 兜底模板）都能得到一致的图谱：
+    - 每个 unit 对应一个知识点节点（KG001、KG002…）；
+    - 节点概念取自 unit 的 key_points / modules.concept / target；
+    - prerequisite 边优先使用 unit.prerequisites（按标题匹配节点），
+      没有显式前置时按单元顺序串成链条（第 i 课是第 i+1 课的前置）。
+
+    lesson_data 建议字段：
+      topic: 课程主题
+      units: [ { title, summary, key_points, target, modules, prerequisites } ]
+
+    返回结构（与 knowledge_graph.py 兼容）：
+      { "nodes": [...], "edges": [...] }
+    """
+    units = lesson_data.get("units") or []
+    if not isinstance(units, list) or not units:
+        return {"nodes": [], "edges": []}
+
+    topic = str(lesson_data.get("topic") or "课程")
+    nodes: List[Dict[str, Any]] = []
+    edges: List[Dict[str, Any]] = []
+    # title -> node_id 映射，用于解析 unit.prerequisites 中的标题引用
+    title_to_id: Dict[str, str] = {}
+
+    for i, unit in enumerate(units, 1):
+        if not isinstance(unit, dict):
+            continue
+        node_id = f"KG{i:03d}"
+        title = _strip_unit_seq_prefix(unit.get("title") or f"第 {i} 课")
+        title_to_id[title] = node_id
+
+        # 收集概念：key_points > modules.concept > target
+        concepts: List[str] = []
+        for kp in (unit.get("key_points") or []):
+            k = str(kp).strip()
+            if k and k not in concepts:
+                concepts.append(k)
+        for m in (unit.get("modules") or []):
+            if isinstance(m, dict):
+                c = str(m.get("concept") or "").strip()
+                if c and c not in concepts:
+                    concepts.append(c)
+        if not concepts:
+            target = str(unit.get("target") or "").strip()
+            if target and target not in concepts:
+                concepts.append(target)
+        if not concepts:
+            concepts = [title]
+
+        nodes.append({
+            "id": node_id,
+            "name": title,
+            "description": str(unit.get("summary") or f"{topic}：{title}").strip(),
+            "prerequisites": [],
+            "concepts": concepts[:6],
+            "skills": [],
+            "tags": [topic],
+            "difficulty": round(min(0.95, 0.2 + 0.15 * (i - 1)), 2),  # 按单元顺序递增难度
+            "estimated_time": 30,
+            "related_quiz_questions": [],
+        })
+
+    # 构建 prerequisite 边
+    for i, unit in enumerate(units, 1):
+        if not isinstance(unit, dict):
+            continue
+        node_id = f"KG{i:03d}"
+        prereqs: List[str] = []
+        explicit = unit.get("prerequisites") or []
+        for ref in explicit:
+            ref = str(ref).strip()
+            target_id = title_to_id.get(ref) or title_to_id.get(_strip_unit_seq_prefix(ref))
+            if target_id and target_id != node_id:
+                prereqs.append(target_id)
+        if not prereqs and i > 1:
+            # 无显式前置时按顺序串链
+            prereqs.append(f"KG{i - 1:03d}")
+        nodes[i - 1]["prerequisites"] = prereqs
+        for p in prereqs:
+            edges.append({
+                "from": p,
+                "to": node_id,
+                "type": "prerequisite",
+                "strength": 0.9,
+            })
+
+    return {"nodes": nodes, "edges": edges}

@@ -112,6 +112,15 @@
             // 打字机渲染黑板内容：普通文本逐字 + $$公式$$（KaTeX）+ {graph:y=..} 曲线 + {line:..} 线段
             async function typeBoardContent(content, layer) {
                 content = cleanBoardContent(content);
+                // 裸 LaTeX 命令兜底：只处理未用 $ 包裹的源码命令（\times → × 等），
+                // 先保护 $...$ 公式与 {graph}/{line} 标记，避免 fixBareLatex 破坏它们
+                const fheld = [];
+                content = content.replace(/\$\$[\s\S]*?\$\$|\$[^$\n]*\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)/g,
+                    m => { fheld.push(m); return '\u0000F' + (fheld.length - 1) + '\u0000'; });
+                content = content.replace(/\{(graph|line):[^}]*\}/g,
+                    m => { fheld.push(m); return '\u0000F' + (fheld.length - 1) + '\u0000'; });
+                if (typeof fixBareLatex === 'function') content = fixBareLatex(content);
+                content = content.replace(/\u0000F(\d+)\u0000/g, (m, i) => fheld[+i] || m);
                 const tokens = tokenizeBoardContent(content);
                 let p = null;        // 当前文本段落
                 let caret = null;    // 打字光标
@@ -518,6 +527,15 @@
                             cloudApiKey.value = config.cloud_api_key || config.siliconflow_api_key || '';
                             cloudModel.value = config.cloud_model || config.siliconflow_model || '';
                             lessonSearch.checked = !!config.enable_search;
+                            const interactivePrep = document.getElementById('interactive-prep-enabled');
+                            if (interactivePrep) {
+                                interactivePrep.checked = !!config.interactive_prep_enabled;
+                                const val = document.getElementById('interactive-prep-enabled-val');
+                                if (val) val.textContent = interactivePrep.checked ? '开' : '关';
+                                interactivePrep.addEventListener('change', function() {
+                                    if (val) val.textContent = interactivePrep.checked ? '开' : '关';
+                                });
+                            }
                         }
                         if (ttsProvider) {
                             ttsProvider.value = (config.tts_provider || 'cloud').toLowerCase();
@@ -815,6 +833,10 @@
                                     cloud_api_key: cloudApiKey.value.trim(),
                                     cloud_model: cloudModel.value.trim(),
                                     enable_search: lessonSearch.checked,
+                                    interactive_prep_enabled: (function() {
+                                        const el = document.getElementById('interactive-prep-enabled');
+                                        return el ? el.checked : false;
+                                    })(),
                                     tts_provider: ttsProvider.value,
                                     tts_cloud_base_url: ttsCloudBaseUrl.value.trim(),
                                     tts_cloud_model: ttsCloudModel.value.trim(),
@@ -1061,7 +1083,18 @@ if (saveSettingsBtn) saveSettingsBtn.addEventListener('click', function() {
                     if (!_previewOriginalPlan) _previewOriginalPlan = JSON.parse(JSON.stringify(plan));
                     if (previewTitle) previewTitle.textContent = plan.topic || '课程预览';
                     const units = plan.units || [];
-                    if (previewMeta) previewMeta.textContent = '共 ' + units.length + ' 课';
+                    if (previewMeta) {
+                        // 展示课数 + 本次备课实际使用的模型 + token 用量
+                        const pm = window._previewPrepMeta || {};
+                        const usage = pm.usage || {};
+                        let metaText = '共 ' + units.length + ' 课';
+                        if (pm.model) metaText += ' ｜ 模型：' + pm.model;
+                        const pt = usage.prompt_tokens || 0;
+                        const ct = usage.completion_tokens || 0;
+                        const tt = usage.total_tokens || (pt + ct);
+                        if (tt > 0) metaText += ' ｜ 消耗 Token：' + pt + '（输入）+ ' + ct + '（输出）≈ ' + tt;
+                        previewMeta.textContent = metaText;
+                    }
 
                     let html = '';
                     // 全局核心概念

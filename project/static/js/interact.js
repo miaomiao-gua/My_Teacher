@@ -10,6 +10,7 @@
                 resource: 'think',  // 资源：思考/翻找后递出
                 lesson:   'hello',  // 课程列表：打招呼后展示
                 settings: 'listen', // 设置：倾听用户偏好
+                dashboard:'hello',  // 仪表盘：打招呼后展示
             };
             // 拉（关闭）—— 手臂收回，把窗口"拉回去"
             const VIEW_PULL_MOTION = {
@@ -78,6 +79,9 @@
                 // 5) 触发数据加载
                 if (viewName === 'lesson')   { if (typeof loadLessons === 'function') loadLessons(); if (typeof loadBoard === 'function') loadBoard(); }
                 if (viewName === 'resource') if (typeof loadResources === 'function') loadResources();
+                if (viewName === 'settings') if (typeof loadStudentProfileBox === 'function') loadStudentProfileBox();
+                if (viewName === 'exam')     if (typeof loadStudyStats === 'function') loadStudyStats();
+                if (viewName === 'dashboard') if (typeof loadDashboard === 'function') loadDashboard();
 
                 // 6) 设置面板激活时给右侧 sidebar 加 class，隐藏 chat/lesson/exam/resource tab 头部
                 const sidebar = document.getElementById('chat-sidebar');
@@ -255,6 +259,10 @@
             }
             function hideMenu() {
                 menuScreen.classList.add('hidden');
+                // Live2D 延迟初始化：菜单关闭后再创建 WebGL 上下文（initLive2D 有防重，只会执行一次）
+                if (typeof window.initLive2D === 'function') {
+                    try { window.initLive2D(); } catch (e) { console.warn('Live2D init after menu hide:', e); }
+                }
             }
 
             // 渲染首页课程卡片
@@ -287,6 +295,7 @@
                             return `
                             <div class="menu-lesson-card${cls}" data-name="${lesson.name}">
                                 <div class="m-actions">
+                                    <button class="m-export-btn" title="导出备份">⬇</button>
                                     <button class="m-rename-btn" title="重命名">✎</button>
                                     <button class="m-del-btn" title="删除课程">✕</button>
                                 </div>
@@ -311,6 +320,19 @@
                             card.addEventListener('click', function(e) {
                                 if (e.target.closest('.m-actions')) return;
                                 enterLesson(this.dataset.name);
+                            });
+                        });
+                        document.querySelectorAll('.menu-lesson-card .m-export-btn').forEach(btn => {
+                            btn.addEventListener('click', function(e) {
+                                e.stopPropagation();
+                                const name = this.closest('.menu-lesson-card').dataset.name;
+                                const url = '/api/lessons/' + encodeURIComponent(name) + '/export';
+                                const a = document.createElement('a');
+                                a.href = url;
+                                a.download = '';
+                                document.body.appendChild(a);
+                                a.click();
+                                a.remove();
                             });
                         });
                         document.querySelectorAll('.menu-lesson-card .m-del-btn').forEach(btn => {
@@ -381,6 +403,7 @@
                     body: JSON.stringify({ lesson_folder: name })
                 }).then(r => r.json()).then(data => {
                     currentLesson = name;
+                    if (typeof refreshExamPaperInfo === 'function') refreshExamPaperInfo();
                     const history = data.conversation || data.history || [];
                     if (history.length) {
                         // 性能优化：用 DocumentFragment 批量插入，避免逐条 innerHTML 触发多次重排
@@ -432,6 +455,7 @@
                 // 复用 Galgame 对话条逐段播放
                 dialogueSegments = [];
                 dialogueSegIdx = -1;
+                _previewBuf = '';
                 dialogueStreaming = true;
                 dialogueBar.style.display = 'block';
                 dialogueContent.textContent = '……';
@@ -481,11 +505,16 @@
                                 if (payload === '[DONE]') continue;
                                 try {
                                     const data = JSON.parse(payload);
+                                    // preview 帧：生成过程中的 token。不再实时刷新气泡正文——高频 DOM 写入
+                                    // 会造成"先卡顿过一遍" + 前端卡顿；内容统一由 content 帧 + 完成后的
+                                    // 逐段播放呈现（气泡保持"老师思考中"提示）。
+                                    if (data.preview && !data.done) {
+                                        _previewBuf += data.preview;   // 仅累积（备用），不写入 DOM
+                                    }
                                     if (data.content && !data.done) {
                                         const seg = data.segment !== undefined ? data.segment : 0;
                                         dialogueSegments[seg] = cleanSeg(data.content);
                                         fullText = dialogueSegments.filter(s => s).join('\n\n');
-                                        bubble.textContent = stripCodeFenceMarks(fullText);
                                         const nearBottom = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 80;
                                         if (nearBottom) conversation.scrollTop = conversation.scrollHeight;
                                     }
@@ -581,7 +610,7 @@
                     const topic = quickPrepTopic ? quickPrepTopic.value.trim() : '';
                     if (!topic) { alert('请先输入课程主题'); return; }
                     closeModal(quickPrepModal);
-                    prepareAndEnter(topic, []);
+                    startPrepare(topic, []);
                 });
                 // 回车直接提交
                 if (quickPrepTopic) {
@@ -619,7 +648,7 @@
                     if (!topic) { alert('请先输入课程主题'); return; }
                     if (!files.length) { alert('请先选择至少一个课件文件'); return; }
                     closeModal(importPrepModal);
-                    prepareAndEnter(topic, files);
+                    startPrepare(topic, files);
                 });
                 if (menuImportTopic) {
                     menuImportTopic.addEventListener('keydown', function(e) {
@@ -628,18 +657,140 @@
                 }
             }
 
-            // AI 备课并进入课程（files：可选课程资料文件数组）
-            function prepareAndEnter(topic, files) {
+            // ============ 交互式备课诊断（实验功能 · 上课界面内对话） ============
+            // 复用上课聊天界面：老师气泡提问 → 学生底部输入回答 → AI 基于上下文追问，直到摸底完成。
+            let _diagMode = null;   // {session_id, topic, files, busy, final}
+
+            async function _diagStart(topic, files) {
+                _diagMode = { session_id: null, topic: topic, files: files || [], busy: false, final: null };
+                if (typeof hideMenu === 'function') hideMenu();
+                switchView('chat');
+                if (conversation) conversation.innerHTML = '';
+                updateTopbarCourseName('🎯 课前摸底 · ' + topic);
+                messageInput.placeholder = '回答老师的问题…（Enter 发送）';
+                addBubble('👋 在正式备课前，我想先和你聊两句，看看你对「' + topic + '」的基础掌握情况～', 'teacher');
+                try {
+                    const r = await fetch('/api/prep_diagnose/open', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ topic: topic })
+                    });
+                    const data = await r.json();
+                    if (data.error) throw new Error(data.error);
+                    _diagMode.session_id = data.session_id;
+                    addBubble('💡 ' + (data.question || ''), 'teacher');
+                    messageInput.focus();
+                } catch (err) {
+                    console.error('诊断开启失败', err);
+                    alert('诊断开启失败：' + (err.message || err) + '\n将直接进入普通备课');
+                    _diagEnd();
+                    prepareAndEnter(topic, files, null);
+                }
+            }
+
+            async function _diagSendAnswer(answer) {
+                if (!_diagMode || _diagMode.busy || !_diagMode.session_id) return;
+                _diagMode.busy = true;
+                sendBtn.disabled = true;
+                try {
+                    const r = await fetch('/api/prep_diagnose/answer', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ session_id: _diagMode.session_id, answer: answer })
+                    });
+                    const data = await r.json();
+                    if (data.error) throw new Error(data.error);
+                    if (data.reply) addBubble(data.reply, 'teacher');
+                    if (data.done) {
+                        // 摸底结束：总评 + 摸底结果卡 + 开始备课按钮
+                        if (data.summary) addBubble('📋 ' + data.summary, 'teacher');
+                        _diagMode.final = { known: data.known || [], partial: data.partial || [], unknown: data.unknown || [] };
+                        _diagShowSummaryCard();
+                    } else if (data.next_question) {
+                        // 兜底：若老师回应已以问句结尾（模型可能已把追问写进 reply），不再重复追加
+                        const replyIsQuestion = /[?？]\s*$/.test(data.reply || '') || /吗[。，]?\s*$/.test(data.reply || '');
+                        if (!replyIsQuestion) {
+                            const q = data.next_question + (data.next_concept ? '\n（考察：' + data.next_concept + '）' : '');
+                            addBubble('💡 ' + q, 'teacher');
+                        }
+                        messageInput.focus();
+                    } else {
+                        // 无下一问且未 done（异常）：直接收尾
+                        _diagMode.final = { known: data.known || [], partial: data.partial || [], unknown: data.unknown || [] };
+                        _diagShowSummaryCard();
+                    }
+                } catch (err) {
+                    console.error('提交回答失败', err);
+                    alert('提交失败：' + (err.message || err));
+                } finally {
+                    _diagMode.busy = false;
+                    sendBtn.disabled = false;
+                }
+            }
+
+            function _diagShowSummaryCard() {
+                const d = _diagMode.final || {};
+                const card = document.createElement('div');
+                card.className = 'bubble teacher';
+                let html = '<div><b>📊 摸底结果</b></div>';
+                html += '<div style="margin-top:6px;">📗 已掌握（' + (d.known || []).length + '）：' + ((d.known || []).join('、') || '（无）') + '</div>';
+                html += '<div>📙 部分掌握（' + (d.partial || []).length + '）：' + ((d.partial || []).join('、') || '（无）') + '</div>';
+                html += '<div>📕 未掌握（' + (d.unknown || []).length + '）：' + ((d.unknown || []).join('、') || '（无）') + '</div>';
+                html += '<div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">';
+                html += '<button class="btn btn-primary diag-start-prep">🚀 开始备课</button>';
+                html += '<button class="btn btn-ghost diag-cancel">取消</button>';
+                html += '</div>';
+                card.innerHTML = html;
+                conversation.appendChild(card);
+                conversation.scrollTop = conversation.scrollHeight;
+                const startBtn = card.querySelector('.diag-start-prep');
+                const cancelBtn = card.querySelector('.diag-cancel');
+                if (startBtn) startBtn.addEventListener('click', function() {
+                    const t = _diagMode.topic, f = _diagMode.files, d = _diagMode.final;
+                    _diagEnd();
+                    prepareAndEnter(t, f, d);
+                });
+                if (cancelBtn) cancelBtn.addEventListener('click', function() { _diagEnd(); });
+            }
+
+            function _diagEnd() {
+                _diagMode = null;
+                updateTopbarCourseName();
+                messageInput.placeholder = '输入你的问题...';
+            }
+
+            // 入口：根据 interactive_prep_enabled 决定走诊断还是直接备课
+            function startPrepare(topic, files) {
+                fetch('/api/config').then(r => r.json()).then(cfg => {
+                    const enabled = !!cfg.interactive_prep_enabled;
+                    if (enabled) {
+                        _diagStart(topic, files || []);
+                    } else {
+                        prepareAndEnter(topic, files || [], null);
+                    }
+                }).catch(() => prepareAndEnter(topic, files || [], null));
+            }
+
+            // AI 备课并进入课程（files：可选课程资料文件数组；diagnosis：可选诊断结果）
+            function prepareAndEnter(topic, files, diagnosis) {
                 // 显示备课中状态（使用专用 loading overlay）
                 var loadingOverlay = document.getElementById('menu-loading-overlay');
                 var loadingText = document.getElementById('menu-loading-text');
                 var loadingSub = document.getElementById('menu-loading-sub');
+                var loadingModel = document.getElementById('menu-loading-model');
                 if (loadingText) loadingText.textContent = '⏳ 正在备课「' + topic + '」…';
                 if (loadingSub) {
                     loadingSub.innerHTML = files && files.length
                         ? ('正在解析 ' + files.length + ' 个课程资料文件并由 AI 拆分为单元<br>云端生成完整教案通常需要 2~5 分钟，请耐心等待')
                         : 'AI 正在生成课程大纲、知识点与随堂测验<br>云端生成完整教案通常需要 2~5 分钟，请耐心等待';
                 }
+                // 展示当前备课所用的模型（从配置读取，完成后会显示实际使用的模型+token）
+                if (loadingModel) loadingModel.textContent = '当前模型：获取中…';
+                fetch('/api/config').then(r => r.json()).then(cfg => {
+                    if (loadingModel) {
+                        var m = (cfg.lesson_provider === 'ollama' ? cfg.ollama_model : cfg.cloud_model)
+                            || cfg.cloud_model || cfg.ollama_model || '未知';
+                        loadingModel.textContent = '当前模型：' + m;
+                    }
+                }).catch(() => {});
                 if (loadingOverlay) loadingOverlay.classList.add('visible');
                 menuCreateBtn.disabled = true;
                 const originalText = menuCreateBtn.textContent;
@@ -661,10 +812,12 @@
                     files.forEach(function(f) { fd.append('files', f); });
                     fetchOptions = { method: 'POST', body: fd };
                 } else {
+                    const body = { topic: topic };
+                    if (diagnosis) body.diagnosis = diagnosis;  // 把诊断结果喂给后端
                     fetchOptions = {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ topic: topic })
+                        body: JSON.stringify(body)
                     };
                 }
 
@@ -687,6 +840,8 @@
                         }
                         _previewLessonFolder = data.lesson_folder;
                         _previewTopic = topic;
+                        // 记录本次备课实际使用的模型与 token 用量，供预览弹窗展示
+                        window._previewPrepMeta = data.prepared_meta || {};
                         showPreviewOverlay();
                         renderPreview(data.plan);
                     } else {
@@ -925,7 +1080,7 @@
                     blocks.push({ expr: inner.trim(), display: false });
                     return '\u27E6K' + (blocks.length - 1) + '\u27E7';
                 });
-                s = s.replace(/\\\(([^\\\n]*?)\\\)/g, (m, inner) => {
+                s = s.replace(/\\\(([\s\S]*?)\\\)/g, (m, inner) => {
                     blocks.push({ expr: inner.trim(), display: false });
                     return '\u27E6K' + (blocks.length - 1) + '\u27E7';
                 });
@@ -972,6 +1127,35 @@
                 return s;
             }
 
+            // 裸 LaTeX 命令兜底：模型偶尔漏写 $...$ 包裹，把 \times \cdotp 等源码直接
+            // 丢在正文里。extractLatex 提取不到时，这里把常见命令转成 Unicode 可读符号。
+            // （公式占位符已被 extractLatex 提取，本函数只处理真正泄漏的裸命令）
+            function fixBareLatex(text) {
+                if (!text) return '';
+                let s = String(text);
+                s = s.replace(/\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, '($1)/($2)');
+                s = s.replace(/\\sqrt\s*\{([^{}]*)\}/g, '√($1)');
+                s = s.replace(/\\text\s*\{([^{}]*)\}/g, '$1');
+                s = s.replace(/\\mathrm\s*\{([^{}]*)\}/g, '$1');
+                const cmds = {
+                    '\\times': '×', '\\cdotp': '·', '\\cdot': '·', '\\div': '÷', '\\pm': '±', '\\mp': '∓',
+                    '\\Delta': 'Δ', '\\delta': 'δ', '\\nabla': '∇',
+                    '\\rightarrow': '→', '\\Rightarrow': '⇒', '\\leftarrow': '←', '\\Leftarrow': '⇐',
+                    '\\infty': '∞', '\\approx': '≈', '\\leq': '≤', '\\geq': '≥', '\\neq': '≠', '\\equiv': '≡',
+                    '\\sum': '∑', '\\int': '∫', '\\prod': '∏', '\\sqrt': '√',
+                    '\\alpha': 'α', '\\beta': 'β', '\\gamma': 'γ', '\\theta': 'θ', '\\pi': 'π', '\\mu': 'μ',
+                    '\\sigma': 'σ', '\\omega': 'ω', '\\lambda': 'λ', '\\phi': 'φ', '\\xi': 'ξ', '\\eta': 'η',
+                    '\\kappa': 'κ', '\\tau': 'τ', '\\rho': 'ρ', '\\zeta': 'ζ', '\\epsilon': 'ε'
+                };
+                s = s.replace(/\\([a-zA-Z]+)/g, m => cmds[m] || m);
+                // 数学转义 \_ \^ \{ \} \\ → 去掉反斜杠
+                s = s.replace(/\\([_{}\^\\])/g, '$1');
+                // 下标/上标花括号形式平铺后清理花括号
+                s = s.replace(/_\{([^}]*)\}/g, '_$1').replace(/\^\{([^}]*)\}/g, '^$1');
+                s = s.replace(/[{}]/g, '');
+                return s;
+            }
+
             function renderMarkdown(text) {
                 if (!text) return '';
                 // 1) 先清分段符/标签（cleanSeg 内部已保护 LaTeX 公式）
@@ -980,7 +1164,7 @@
                 // 4) marked → DOMPurify → 还原 KaTeX（KaTeX 输出可信，最后注入）
                 const cleaned = cleanSeg(text);
                 const extracted = extractLatex(cleaned);
-                const fixed = fixMarkdownPunct(extracted.text);
+                const fixed = fixMarkdownPunct(fixBareLatex(extracted.text));
                 let html = marked.parse(fixed);
                 // 禁用删除线/水平线标签：模型可能输出 <del>/<s>/<strike> 或 --- 渲染成 <hr>，
                 // 显示为"奇怪的中划线/横线"，一律清除（内容文字本身会保留在 DOM 里）
@@ -1055,6 +1239,9 @@
             // Auto-resize textarea
             messageInput.addEventListener('input', autoResizeMessageInput);
 
+            // 真流式预览缓冲（模型生成时逐 token 累积，仅备用，不写入 DOM）
+            let _previewBuf = '';
+
             function sendMessage() {
                 const text = messageInput.value.trim();
                 const attachments = getPendingAttachments();
@@ -1065,6 +1252,15 @@
                     handleSlashCommand(slashMatch[1].toLowerCase(), slashMatch[2].trim());
                     messageInput.value = '';
                     messageInput.style.height = 'auto';
+                    return;
+                }
+                // 课前摸底模式：输入直接作为回答发给诊断接口（复用上课聊天界面）
+                if (_diagMode && _diagMode.session_id) {
+                    messageInput.value = '';
+                    messageInput.style.height = 'auto';
+                    if (!text) return;
+                    addBubble(text, 'user');
+                    _diagSendAnswer(text);
                     return;
                 }
                 // 未选择课程时提示
@@ -1081,6 +1277,7 @@
                 // 重置 Galgame 对话条（并停止上一轮的语音）
                 if (typeof stopTeacherAudio === 'function') stopTeacherAudio();
                 _pendingWholeAudio = null;
+                _previewBuf = '';              // 真流式预览缓冲（仅累积备用，不写 DOM）
                 dialogueSegments = [];
                 dialogueSegIdx = -1;
                 dialogueStreaming = true;
@@ -1207,6 +1404,12 @@
                                     }
                                     try {
                                         const data = JSON.parse(payload);
+                                        // preview 帧：生成过程中的 token。不再实时刷新正文——高频 DOM 写入
+                                        // 会造成"先卡顿过一遍" + 前端卡顿；内容统一由 content 帧 + 完成后
+                                        // 的逐段播放呈现（对话条保持"思考中"动画）。
+                                        if (data.preview && !data.done) {
+                                            _previewBuf += data.preview;   // 仅累积（备用），不写入 DOM
+                                        }
                                         // 按 segment 分组存储（分段展示，流式中不实时滚动，结束后逐段播放）
                                         if (data.content && !data.done) {
                                             const seg = data.segment !== undefined ? data.segment : 0;
@@ -1544,7 +1747,7 @@
                         addBubble('/next —— 进入下一课', 'teacher');
                         addBubble('/board —— 显示黑板', 'teacher');
                         addBubble('/image [编号] —— 打开当前单元图片库', 'teacher');
-                        addBubble('/terminal [语言] [代码] —— 打开终端弹窗并执行代码（语言: python/javascript/shell/powershell，可交互）', 'teacher');
+                        addBubble('/terminal [语言] [代码] —— 打开终端弹窗并执行代码（语言: python/javascript/ruby/perl/php/lua/r/shell/powershell，可交互）', 'teacher');
                         addBubble('/action <动作名> —— 播放模型动作（/action list 查看全部，自定义动作可在设置中添加）', 'teacher');
                         addBubble('/emotion <表情名> —— 强制显示表情（happy/sad/angry/think/surprised/neutral）', 'teacher');
                         addBubble('/param <参数名>=<数值> [..] [时长ms] —— 直接调整模型参数/关节（/param list 查看，/param reset 恢复）', 'teacher');
@@ -1835,7 +2038,7 @@
             });
 
             function examTypeLabel(type) {
-                return { single: '单选', multiple: '多选', boolean: '判断', fill: '填空' }[type] || (type || '单选');
+                return { single: '单选', multiple: '多选', boolean: '判断', fill: '填空', essay: '简答' }[type] || (type || '单选');
             }
 
             function renderExamQuestions(questions) {
@@ -1847,6 +2050,19 @@
                             <div class="q-fill">
                                 <input type="text" class="fill-input" placeholder="请输入你的答案…"
                                     style="width:85%; padding:8px 12px; border:1px solid var(--border); border-radius:8px; background:var(--bg-card); color:var(--text-primary); font-size:14px;">
+                            </div>`;
+                    } else if (type === 'essay') {
+                        answerInput = `
+                            <div class="q-essay">
+                                <textarea class="essay-input" rows="4" placeholder="请输入你的作答…"
+                                    style="width:85%; padding:8px 12px; border:1px solid var(--border); border-radius:8px; background:var(--bg-card); color:var(--text-primary); font-size:14px; resize:vertical;"></textarea>
+                            </div>`;
+                    } else if (type === 'boolean') {
+                        // 判断题：渲染"对/错"选项（答案以中文语义提交，后端按"对/错"比对）
+                        answerInput = `
+                            <div class="q-options">
+                                <label><input type="radio" name="q${idx}" value="对"> 对</label>
+                                <label><input type="radio" name="q${idx}" value="错"> 错</label>
                             </div>`;
                     } else if (q.options && q.options.length) {
                         answerInput = `
@@ -1879,6 +2095,9 @@
                     if (type === 'fill') {
                         const fillInput = qDiv.querySelector('.fill-input');
                         answers[idx] = fillInput ? fillInput.value.trim() : '';
+                    } else if (type === 'essay') {
+                        const essayInput = qDiv.querySelector('.essay-input');
+                        answers[idx] = essayInput ? essayInput.value.trim() : '';
                     } else if (type === 'multiple') {
                         answers[idx] = Array.from(inputs).map(i => i.value).join(',');
                     } else {
@@ -1901,6 +2120,199 @@
                     }
                     alert('得分: ' + (data.score || 0) + ' / ' + (data.total || 0));
                 }).catch(err => alert('提交失败: ' + err.message));
+            });
+
+            // —— 期末测验：上传标准试卷 → 按原卷测验 → 按标准答案批改 ——
+            const examPaperUpload = document.getElementById('exam-paper-upload');
+            const examPaperUploadBtn = document.getElementById('exam-paper-upload-btn');
+            const examPaperInfo = document.getElementById('exam-paper-info');
+            const examFinalBtn = document.getElementById('exam-final-btn');
+
+            function refreshExamPaperInfo() {
+                if (!currentLesson || !examPaperInfo) return;
+                fetch('/api/lesson/' + encodeURIComponent(currentLesson) + '/exam-paper')
+                    .then(r => r.json()).then(data => {
+                        if (data.ok && data.count > 0) {
+                            examPaperInfo.innerHTML = '✅ 已上传标准试卷 <b>' + (data.source || '') + '</b>（' + data.count + ' 题）。课程讲解已围绕试卷展开，可点击"开始期末测验"。';
+                            examFinalBtn.disabled = false;
+                        } else {
+                            examPaperInfo.innerHTML = '未上传试卷。支持 .txt/.md/.json/.pdf/.docx（每题含题干与"答案："行）。上传后课程讲解将围绕这份试卷展开，学习完可开始期末测验。';
+                            examFinalBtn.disabled = true;
+                        }
+                    }).catch(() => {});
+            }
+
+            examPaperUploadBtn.addEventListener('click', function() {
+                if (!examPaperUpload.files.length) { alert('请先选择试卷文件'); return; }
+                if (!currentLesson) { alert('请先进入课程'); return; }
+                const fd = new FormData();
+                fd.append('file', examPaperUpload.files[0]);
+                examPaperUploadBtn.textContent = '上传中...';
+                examPaperUploadBtn.disabled = true;
+                fetch('/api/lesson/' + encodeURIComponent(currentLesson) + '/exam-paper', { method: 'POST', body: fd })
+                    .then(r => r.json()).then(data => {
+                        examPaperUploadBtn.textContent = '上传试卷';
+                        examPaperUploadBtn.disabled = false;
+                        if (data.ok) {
+                            alert('上传成功：识别出 ' + data.count + ' 题。课程讲解将围绕这份试卷展开，随时可开始期末测验。');
+                            refreshExamPaperInfo();
+                        } else {
+                            alert(data.message || '解析失败，请检查格式');
+                            if (data.format_hint) console.log('[试卷格式说明]\n' + data.format_hint);
+                        }
+                    }).catch(err => {
+                        examPaperUploadBtn.textContent = '上传试卷';
+                        examPaperUploadBtn.disabled = false;
+                        alert('上传失败: ' + err.message);
+                    });
+            });
+
+            examFinalBtn.addEventListener('click', function() {
+                examFinalBtn.textContent = '加载中...';
+                examFinalBtn.disabled = true;
+                fetch('/api/exam/generate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode: 'final' })
+                }).then(r => r.json()).then(data => {
+                    examFinalBtn.textContent = '开始期末测验';
+                    examFinalBtn.disabled = false;
+                    if (data.questions && data.questions.length) {
+                        renderExamQuestions(data.questions);
+                        examSubmitBtn.style.display = 'inline-block';
+                        examList.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    } else {
+                        alert(data.message || '获取试卷失败');
+                    }
+                }).catch(err => {
+                    examFinalBtn.textContent = '开始期末测验';
+                    examFinalBtn.disabled = false;
+                    alert('失败: ' + err.message);
+                });
+            });
+
+            // —— 学习统计：正确率趋势 / 错题本 / 薄弱知识点 ——
+            function loadStudyStats() {
+                if (!currentLesson) return;
+                fetch('/api/progress?lesson_folder=' + encodeURIComponent(currentLesson))
+                    .then(r => r.json())
+                    .then(data => {
+                        const stats = data.stats || {};
+                        const qc = document.getElementById('stat-quiz-count');
+                        const avg = document.getElementById('stat-avg-score');
+                        const last = document.getElementById('stat-last-score');
+                        const wc = document.getElementById('stat-wrong-count');
+                        const ca = document.getElementById('stat-code-attempts');
+                        if (qc) qc.textContent = stats.quiz_count || 0;
+                        if (avg) avg.textContent = stats.avg_score != null ? stats.avg_score : '–';
+                        if (last) last.textContent = stats.last_score != null ? stats.last_score : '–';
+                        if (wc) wc.textContent = stats.wrong_book_count || 0;
+                        if (ca) ca.textContent = stats.code_attempts || 0;
+
+                        // 正确率趋势（最近 10 次，横向条形）
+                        const trendEl = document.getElementById('stat-score-trend');
+                        if (trendEl) {
+                            const hist = stats.score_history || [];
+                            if (hist.length) {
+                                const maxW = 100;
+                                trendEl.innerHTML = '<div style="font-size:12px; color:var(--text-muted); margin-bottom:4px;">📈 最近成绩趋势：</div>' +
+                                    hist.slice(-10).map(r => {
+                                        const w = Math.max(4, Math.round(r.score / 100 * maxW));
+                                        return '<div style="display:flex; align-items:center; gap:6px; margin-bottom:3px;">' +
+                                            '<span style="flex:0 0 40px; color:var(--text-muted); font-size:11px;">' + r.score + '分</span>' +
+                                            '<span class="trend-bar" style="width:' + w + 'px;"></span>' +
+                                            '<span style="font-size:10px; color:var(--text-dim);">' + (r.timestamp || '').slice(5, 16) + '</span></div>';
+                                    }).join('');
+                            } else {
+                                trendEl.innerHTML = '<span style="color:var(--text-dim);">还没有测验记录，去「随堂测验」生成一题试试吧。</span>';
+                            }
+                        }
+
+                        // 薄弱知识点
+                        const weakEl = document.getElementById('stat-weak-topics');
+                        if (weakEl) {
+                            const weak = stats.weak_topics || [];
+                            weakEl.innerHTML = weak.length
+                                ? '<span style="color:var(--text-muted);">🎯 薄弱知识点：</span>' + weak.map(t => '<span style="color:var(--gold);">' + _escHtml(t) + '</span>').join('、')
+                                : '';
+                        }
+
+                        // 错题本
+                        const bookEl = document.getElementById('stat-wrong-book');
+                        if (bookEl) {
+                            const book = stats.wrong_book || [];
+                            if (book.length) {
+                                bookEl.innerHTML = book.map(w => {
+                                    const typeName = { single: '单选', multiple: '多选', boolean: '判断', fill: '填空', essay: '简答' }[w.type] || w.type;
+                                    return '<div class="wrong-item">' +
+                                        '<div class="wrong-q">[' + typeName + '] ' + _escHtml(w.question) +
+                                        (w.wrong_count > 1 ? ' <span style="color:#e74c3c; font-size:11px;">✗' + w.wrong_count + '次</span>' : '') + '</div>' +
+                                        '<div class="wrong-ans">你的答案：' + _escHtml(String(w.student_answer || '（未作答）')) + '</div>' +
+                                        '<div class="wrong-correct">正确答案：' + _escHtml(String(w.correct_answer || '')) + '</div>' +
+                                        (w.explanation ? '<div style="color:var(--text-muted);">💡 ' + _escHtml(w.explanation) + '</div>' : '') +
+                                        '</div>';
+                                }).join('');
+                            } else {
+                                bookEl.innerHTML = '<span style="color:var(--text-dim);">暂无错题，继续保持！</span>';
+                            }
+                        }
+                    })
+                    .catch(function(err) {
+                        const bookEl = document.getElementById('stat-wrong-book');
+                        if (bookEl) bookEl.innerHTML = '<span style="color:var(--text-muted);">统计加载失败：' + _escHtml(err.message) + '</span>';
+                    });
+            }
+
+            const statRefreshBtn = document.getElementById('stat-refresh-btn');
+            if (statRefreshBtn) statRefreshBtn.addEventListener('click', loadStudyStats);
+
+            // —— 历史对话回顾：按单元加载归档对话 + 导出 Markdown ——
+            function loadHistoryReview() {
+                const listEl = document.getElementById('history-list');
+                if (!listEl || !currentLesson) return;
+                listEl.innerHTML = '<span style="color:var(--text-muted);">正在加载…</span>';
+                fetch('/api/lesson/' + encodeURIComponent(currentLesson) + '/history')
+                    .then(r => r.json())
+                    .then(data => {
+                        const units = data.units || [];
+                        if (!units.length) {
+                            listEl.innerHTML = '<span style="color:var(--text-dim);">还没有对话记录。学习后可在测验面板回顾每个单元的聊天。</span>';
+                            return;
+                        }
+                        listEl.innerHTML = units.map(u => {
+                            const msgs = u.conversation || [];
+                            // 折叠面板：每单元一个 summary，展开显示逐条对话
+                            const preview = msgs.slice(0, 3).map(m => {
+                                const who = m.role === 'user' ? '👤 学生' : '👩‍🏫 老师';
+                                return '<div style="margin:2px 0;">' + who + '：' + _escHtml(String(m.content || '').slice(0, 60)) + '</div>';
+                            }).join('');
+                            return '<details style="border:1px solid var(--border-subtle); border-radius:8px; padding:8px 10px; margin-bottom:8px; background:rgba(0,0,0,0.15);">' +
+                                '<summary style="cursor:pointer; font-weight:600; color:var(--gold);">' +
+                                '📚 ' + _escHtml(u.title) + '（' + msgs.length + ' 条' + (u.archived ? ' · 已归档' : ' · 当前') + '）</summary>' +
+                                '<div style="margin-top:6px; max-height:260px; overflow-y:auto;">' +
+                                msgs.map(m => {
+                                    const who = m.role === 'user' ? '👤 学生' : '👩‍🏫 老师';
+                                    const text = m.role === 'assistant' ? cleanSeg(String(m.content || '')) : String(m.content || '');
+                                    return '<div style="margin:4px 0; padding:4px 6px; border-radius:6px; background:' +
+                                        (m.role === 'user' ? 'rgba(76,175,80,0.12);' : 'rgba(64,122,255,0.10);') + '">' +
+                                        '<span style="color:var(--text-dim); font-size:11px;">' + who + '</span> ' +
+                                        renderMarkdown(text.length > 200 ? text.slice(0, 200) + '…' : text) +
+                                        '</div>';
+                                }).join('') +
+                                '</div></details>';
+                        }).join('');
+                    })
+                    .catch(err => {
+                        listEl.innerHTML = '<span style="color:var(--text-muted);">加载失败：' + _escHtml(err.message) + '</span>';
+                    });
+            }
+
+            const historyRefreshBtn = document.getElementById('history-refresh-btn');
+            const historyExportBtn = document.getElementById('history-export-btn');
+            if (historyRefreshBtn) historyRefreshBtn.addEventListener('click', loadHistoryReview);
+            if (historyExportBtn) historyExportBtn.addEventListener('click', function() {
+                if (!currentLesson) { alert('请先进入课程'); return; }
+                window.open('/api/lesson/' + encodeURIComponent(currentLesson) + '/history/export', '_blank');
             });
 
             // ============================
@@ -2039,10 +2451,48 @@
                 customPrompt('请输入课程主题，AI 将自动备课：\n\n例如：初中物理牛顿定律 / Python 入门 / Alevel 数学 M1P1')
                     .then(function(topic) {
                         if (topic && topic.trim()) {
-                            prepareAndEnter(topic.trim());
+                            startPrepare(topic.trim());
                         }
                     });
             });
+
+            // 课程备份导入：选择 zip → 上传到 /api/lessons/import
+            const importLessonBtn = document.getElementById('import-lesson-btn');
+            const importLessonFile = document.getElementById('import-lesson-file');
+            if (importLessonBtn && importLessonFile) {
+                importLessonBtn.addEventListener('click', function() {
+                    importLessonFile.value = '';
+                    importLessonFile.click();
+                });
+                importLessonFile.addEventListener('change', function() {
+                    const file = this.files && this.files[0];
+                    if (!file) return;
+                    if (file.name.slice(-4).toLowerCase() !== '.zip') {
+                        alert('请选择 .zip 备份文件');
+                        return;
+                    }
+                    importLessonBtn.disabled = true;
+                    importLessonBtn.textContent = '⏳ 导入中...';
+                    const fd = new FormData();
+                    fd.append('file', file);
+                    fetch('/api/lessons/import', { method: 'POST', body: fd })
+                        .then(r => r.json())
+                        .then(data => {
+                            if (data.error) {
+                                alert('导入失败: ' + data.error);
+                            } else {
+                                alert('导入成功：课程「' + data.folder + '」（共 ' + data.imported_files + ' 个文件）');
+                                loadLessons();
+                                if (typeof renderMenuLessons === 'function') renderMenuLessons();
+                            }
+                        })
+                        .catch(err => alert('导入失败: ' + err.message))
+                        .finally(() => {
+                            importLessonBtn.disabled = false;
+                            importLessonBtn.textContent = '📥 导入备份';
+                        });
+                });
+            }
 
             // ============================
             // 9.5 板书功能（Canvas 投影法识别文字区域 + 角色指向）
@@ -2695,7 +3145,7 @@
                 if (opts.stdout)  appendTerminal(opts.stdout, 'term-stdout');
                 if (opts.stderr)  appendTerminal(opts.stderr, 'term-stderr');
                 if (!opts.code && !opts.stdout && !opts.stderr) {
-                    appendTerminal('交互式终端已就绪。直接在下方输入命令（Enter 运行），变量和状态会保留。', 'term-info');
+                    appendTerminal('终端已就绪。在下方输入代码，按 Enter 或 ▶ 运行；运行记录会自动提供给 AI。', 'term-info');
                 }
 
                 // 1) 模型原地伸手配合终端拉起（不下蹲、不位移，避免"模型沉下去"的观感）

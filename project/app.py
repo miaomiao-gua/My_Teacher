@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import random
+import secrets
 import re
 import shutil
 import subprocess
@@ -13,6 +14,7 @@ import tempfile
 import threading
 import time
 import traceback
+import urllib.parse
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -34,29 +36,66 @@ from file_utils import (
     convert_document_to_markdown,
     download_resource,
     ensure_lesson_dir,
+    extract_pdf_toc,
     load_course_context,
     load_unit_context,
+    pdf_ocr_available,
     save_metadata,
     sanitize_topic,
+    set_ocr_enabled,
     unit_dir,
+    _read_pdf_text,
 )
 from lesson_prep import (
     _fallback_quiz,
     _is_meaningful_question,
     _normalize_unit,
+    _robust_json_loads,
     _strip_thinking_lead,
+    generate_knowledge_graph,
     prepare_lesson,
     generate_quiz_with_model,
     generate_quiz_with_ollama,
 )
+# V4 自适应教学模块
+from learner_model import (
+    add_assessment_record,
+    add_error_record,
+    get_learner as lm_get_learner,
+    save_learner as lm_save_learner,
+    update_knowledge_state as lm_update_knowledge_state,
+)
+from knowledge_graph import save_knowledge_graph as kg_save_graph
+from learning_evaluation import generate_insights as eval_insights
+from learning_evaluation import get_gain_report as eval_gain_report
+from learning_evaluation import get_progress_curve as eval_progress_curve
+from pedagogical_engine import record_answer_result as ped_record_answer
+from pedagogical_engine import run_diagnosis as ped_diagnosis
+from pedagogical_engine import plan_next_lesson as ped_plan_next
 
 app = Flask(__name__)
 
+# 开发期改模板（index.html）即时生效：每次请求检查模板 mtime（一次 stat，开销可忽略）
+app.config["TEMPLATES_AUTO_RELOAD"] = True
+
+# 开启 GZip/Brotli 响应压缩（pip install flask-compress；未安装则静默跳过）
+try:
+    from flask_compress import Compress
+    Compress(app)
+except ImportError:
+    print("[compress] flask-compress 未安装，跳过压缩优化", flush=True)
+
 @app.after_request
 def no_cache_headers(response):
-    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-    response.headers['Pragma'] = 'no-cache'
-    response.headers['Expires'] = '0'
+    # 仅对 API 响应禁用缓存（保证数据实时性）；
+    # /static/* 等静态资源走浏览器长缓存，避免每次刷新重复下载 pl2d.js 等大文件。
+    # 注意必须直接赋值（而非 setdefault）：Flask 静态文件默认会带 Cache-Control: no-cache。
+    if request.path.startswith("/api/"):
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+    else:
+        response.headers['Cache-Control'] = 'public, max-age=604800'
     return response
 
 
@@ -315,11 +354,18 @@ def default_config() -> Dict[str, Any]:
         "vision_base_url": "",
         "vision_api_key": "",
         "vision_model": "",
+        # PDF OCR（扫描版教材文字识别，本地 easyocr 可用时自动生效）
+        "ocr_enabled": True,
+        "ocr_engine": "easyocr",
+        "ocr_langs": "ch_sim,en",
+        # 实验功能：交互式备课——开始备课时先弹一个多轮诊断问答，了解学生掌握度
+        # 再生成针对性教案。需要后端 /api/prep_diagnose 支持。
+        "interactive_prep_enabled": False,
         "auto_play_tts": False,
         "voice_enabled": False,
         "assistant_name": "AI 老师",                  # 用户可改成自己想要的老师名
         # 内置人设 prompt —— 用户可自由改写
-        "personality_prompt": "你是一位温柔、专业、耐心的 AI 学习导师。请以启发式提问方式指导学生：先解释概念，再给出生活化的例子，最后用一两个小问题确认理解。遇到学生答错时不要直接给答案，而是再换一种方式重讲一遍。保持亲切的口吻，称呼学生『你』，并适度使用 emoji 让对话更生动。",
+        "personality_prompt": "你是一位温柔、专业、耐心的 AI 学习导师。请以启发式提问方式指导学生：先解释概念，再给出生活化的例子，最后用一两个小问题确认理解。遇到学生答错时不要直接给答案，而是再换一种方式重讲一遍。保持亲切的口吻，称呼学生『你』，并适度使用 emoji 让对话更生动。\n\n【联想相似课程概念】讲到新概念时，如果学生可能已学过类似/对偶/对比的概念（比如 C++ 的 cout<< 与 Python 的 print()、Java 的 try-catch 与 Python 的 try-except），可以自然地用一句'这就像你之前学过的 X'做类比，让学生更易记忆；类比不要太频繁（每节课最多 1~2 次），且只在相似性高的地方用，不要硬凑。",
         # 备课（分课教案生成）system 提示词 —— 用户可在设置面板修改；下面是 v3 内置默认
         # （阶段一备课思考链 4 阶段升级版：课程级目标 + 每单元 3 维度设计 + 易混淆概念对比）
         "lesson_prompt": (
@@ -648,6 +694,53 @@ def save_conversation(lesson_folder: str, conversation: List[Dict[str, str]]) ->
         return
     ensure_lesson_files(lesson_folder)
     _atomic_write_json(lesson_path(lesson_folder, "conversation.json"), conversation)
+
+
+def _archive_conversation(lesson_folder: str, unit_index: int, conversation: List[Dict[str, str]]) -> None:
+    """把指定单元的对话归档到 history/unit_<N>.json，供历史回顾与导出。"""
+    if not lesson_folder or not conversation:
+        return
+    history_dir = LESSONS_DIR / lesson_folder / "history"
+    try:
+        history_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(history_dir / f"unit_{unit_index}.json", conversation)
+    except Exception as exc:
+        print(f"[history] 归档第 {unit_index + 1} 单元对话失败: {exc}", flush=True)
+
+
+def _load_archived_conversations(lesson_folder: str) -> Dict[str, List[Dict[str, str]]]:
+    """读取该课程全部已归档单元对话：{unit_index_str: [messages]}。"""
+    out: Dict[str, List[Dict[str, str]]] = {}
+    history_dir = LESSONS_DIR / lesson_folder / "history"
+    if not history_dir.exists():
+        return out
+    for p in sorted(history_dir.glob("unit_*.json"), key=lambda x: x.name):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                out[p.stem] = data
+        except Exception:
+            continue
+    return out
+
+
+def _conversation_to_markdown(conversation: List[Dict[str, str]]) -> str:
+    """把对话记录转成 Markdown 文本（供导出）。"""
+    lines: List[str] = []
+    for m in conversation:
+        role = m.get("role")
+        content = str(m.get("content") or "").strip()
+        if not content:
+            continue
+        if content.startswith("[终端执行记录]"):
+            continue
+        ts = m.get("timestamp", "")
+        ts_str = f"（{ts}）" if ts else ""
+        if role == "user":
+            lines.append(f"## 👤 学生{ts_str}\n\n{content}\n")
+        elif role == "assistant":
+            lines.append(f"## 👩‍🏫 老师{ts_str}\n\n{content}\n")
+    return "\n".join(lines)
 
 
 def load_progress(lesson_folder: str | None) -> Dict[str, Any]:
@@ -1017,7 +1110,233 @@ def _build_student_profile(lesson_folder: str, units: List[Dict[str, Any]], curr
     return "\n".join(lines)
 
 
+# ==================== 单元级学生画像蒸馏（可迭代） ====================
+# 每一课/单元学习结束后，从本单元对话蒸馏学生的性格/爱好/喜欢的授课方式等画像，
+# 持久化到 student_profile.json；下一单元系统提示词注入最新画像（增量更新，可迭代）。
+
+_PROFILE_FIELDS = ["性格特点", "兴趣爱好", "喜欢的授课方式", "知识薄弱点", "学习节奏", "沟通偏好"]
+
+
+def _student_profile_path(lesson_folder: str) -> Path:
+    return lesson_path(lesson_folder, "student_profile.json")
+
+
+def _load_student_profile(lesson_folder: str) -> Dict[str, Any]:
+    try:
+        p = _student_profile_path(lesson_folder)
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {"units": {}, "merged": {}}
+
+
+def _save_student_profile(lesson_folder: str, data: Dict[str, Any]) -> None:
+    _atomic_write_json(_student_profile_path(lesson_folder), data)
+
+
+def _distill_llm_call(system: str, user: str) -> str:
+    """画像蒸馏专用 LLM 调用：本地 Ollama 优先，失败/关闭回退云端（大输出配额）。"""
+    if not user.strip():
+        return ""
+    cfg = load_config()
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    # 1) 本地 Ollama
+    if cfg.get("enable_local_ollama", True):
+        base_url = (cfg.get("ollama_base_url") or "http://127.0.0.1:11434").rstrip("/")
+        model = (cfg.get("ollama_model") or "qwen2.5:7b").strip()
+        try:
+            resp = requests.post(
+                f"{base_url}/api/chat",
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "stream": False,
+                    "think": False,
+                    "options": {
+                        "temperature": 0.3,
+                        "num_ctx": int(cfg.get("ollama_num_ctx", 16384) or 16384),
+                        "num_predict": 2000,
+                    },
+                },
+                timeout=120,
+            )
+            if resp.ok:
+                content = (resp.json().get("message", {}).get("content") or "").strip()
+                if content:
+                    return content
+            print(f"[profile] ollama HTTP {resp.status_code}: {resp.text[:200]}", flush=True)
+        except Exception as exc:
+            print(f"[profile] ollama 异常: {exc}", flush=True)
+    # 2) 云端 OpenAI 兼容 API（chat_* 优先，回退 cloud_*）
+    chat_key = (cfg.get("chat_api_key") or "").strip()
+    chat_model = (cfg.get("chat_model") or "").strip()
+    chat_base = (cfg.get("chat_base_url") or "").rstrip("/").strip()
+    if chat_key and chat_model and chat_base:
+        key, model, base_url = chat_key, chat_model, chat_base
+    else:
+        key = (cfg.get("cloud_api_key") or cfg.get("siliconflow_api_key") or "").strip()
+        if not key:
+            return ""
+        model = (cfg.get("cloud_model") or cfg.get("siliconflow_model") or "deepseek-ai/DeepSeek-V3").strip()
+        base_url = (cfg.get("cloud_base_url") or "https://api.siliconflow.cn/v1").rstrip("/")
+    url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
+    payload: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.3,
+        "max_tokens": 1500,
+    }
+    if bool(cfg.get("enable_search", False)):
+        payload["enable_search"] = True
+    try:
+        print(f"[AI-REQUEST] 画像蒸馏 → 云端: {url} | model: {model}", flush=True)
+        resp = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=120,
+        )
+        if resp.ok:
+            content = resp.json().get("choices", [{}])[0].get("message", {}).get("content") or ""
+            return str(content).strip()
+        print(f"[profile] 云端 HTTP {resp.status_code}: {resp.text[:200]}", flush=True)
+    except Exception as exc:
+        print(f"[profile] 云端异常: {exc}", flush=True)
+    return ""
+
+
+def _distill_student_profile(lesson_folder: str, unit_index: int, conv: Optional[List[Dict[str, str]]] = None) -> bool:
+    """对指定单元蒸馏学生画像（增量更新），成功返回 True。
+
+    把本单元有意义的学生发言（+已有画像）交给 LLM，输出合并后的结构化画像，
+    写回 student_profile.json 的 units[unit_index] 与 merged，并清空 prompt 缓存。
+    """
+    if conv is None:
+        try:
+            conv = load_conversation(lesson_folder)
+        except Exception:
+            conv = []
+    meaningful: List[str] = []
+    for m in conv:
+        if m.get("role") != "user":
+            continue
+        s = str(m.get("content") or "").strip()
+        # 过滤系统注入与终端执行记录等非真实学生发言
+        if not s or s.startswith("（") or s.startswith("[终端执行记录]") or s.startswith("["):
+            continue
+        meaningful.append(s)
+    if not meaningful:
+        return False
+
+    profile_data = _load_student_profile(lesson_folder)
+    units_profile = profile_data.get("units") or {}
+    if not isinstance(units_profile, dict):
+        units_profile = {}
+    unit_info = units_profile.get(str(unit_index)) or {}
+    old_profile = unit_info.get("profile") or profile_data.get("merged") or {}
+    if not isinstance(old_profile, dict):
+        old_profile = {}
+
+    transcript = "\n".join(f"- {s[:200]}" for s in meaningful[-15:])
+    system = (
+        "你是一名教学观察分析师，从师生对话中提炼学生画像，帮助老师个性化教学。"
+        "只输出一个 JSON 对象，不要 Markdown 代码围栏，不要任何额外解释。"
+    )
+    user = (
+        "请根据以下对话记录提炼学生的画像，字段包含且仅包含："
+        f"「{'、'.join(_PROFILE_FIELDS)}」。\n"
+        f"输出格式：{{\"性格特点\": [\"...\"], \"兴趣爱好\": [\"...\"], \"喜欢的授课方式\": [\"...\"], "
+        f"\"知识薄弱点\": [\"...\"], \"学习节奏\": \"...\", \"沟通偏好\": \"...\"}}\n"
+        "若对话中无明显信息，对应字段填空数组/空字符串。\n\n"
+    )
+    if old_profile:
+        user += (
+            "已有画像（请在此基础上增量更新：保留仍然成立的信息、修正过时信息、补充新发现，"
+            "不要重复收集已确认的信息）：\n"
+            f"{json.dumps(old_profile, ensure_ascii=False, indent=2)}\n\n"
+        )
+    user += f"本次对话记录：\n{transcript}"
+
+    text = _distill_llm_call(system, user)
+    if not text:
+        print("[profile] 蒸馏调用无返回，跳过", flush=True)
+        return False
+    try:
+        new_profile = _robust_json_loads(text)
+    except Exception as exc:
+        print(f"[profile] 画像解析失败: {exc}", flush=True)
+        return False
+    if not isinstance(new_profile, dict):
+        return False
+    # 合并：新画像字段为空时保留旧值（增量更新）
+    merged: Dict[str, Any] = dict(old_profile)
+    for k, v in new_profile.items():
+        if v in (None, "", [], {}):
+            continue
+        merged[k] = v
+
+    metadata = load_lesson_metadata(lesson_folder)
+    units = metadata.get("units") or []
+    title = ""
+    if 0 <= unit_index < len(units):
+        title = str(units[unit_index].get("title") or f"第{unit_index + 1}课")
+    units_profile[str(unit_index)] = {
+        "title": title,
+        "profile": merged,
+        "distilled_at": now_iso(),
+        "turns": len(meaningful),
+    }
+    profile_data["units"] = units_profile
+    profile_data["merged"] = merged
+    profile_data["updated_at"] = now_iso()
+    _save_student_profile(lesson_folder, profile_data)
+    _PROMPT_CACHE.clear()  # 画像已更新，立即让下次对话生效
+    print(f"[profile] 第 {unit_index + 1} 单元画像蒸馏完成，字段: {list(merged.keys())}", flush=True)
+    return True
+
+
+def _format_distilled_profile(profile: Dict[str, Any], units: List[Dict[str, Any]], current_unit: int) -> str:
+    """把已蒸馏画像格式化为系统提示词注入段落。"""
+    lines = ["【学生画像（个性化教学参考，源自历史对话蒸馏，随学习迭代更新）】"]
+    for k in _PROFILE_FIELDS:
+        v = profile.get(k)
+        if not v:
+            continue
+        if isinstance(v, list):
+            v = "、".join(str(x) for x in v if str(x).strip())
+        v = str(v).strip()
+        if v:
+            lines.append(f"- {k}：{v}")
+    if len(lines) == 1:
+        return ""
+    lines.append("- 要求：根据画像提供个性化教学，延续学生偏好的授课方式与沟通风格；发现新特点时自然融入，不要机械套用、不要主动向学生复述画像内容。")
+    return "\n".join(lines)
+
+
+# build_system_prompt 结果缓存：同一课程 60s 内复用，避免每条消息都全量读盘拼接 prompt
+# （切单元/改配置后最多 60s 延迟生效，换取每条消息 50-200ms 的 IO/CPU 节省）
+_PROMPT_CACHE: Dict[str, tuple] = {}
+_PROMPT_CACHE_TTL = 60.0
+
+
 def build_system_prompt(lesson_folder: str | None = None) -> str:
+    key = lesson_folder or ""
+    now = time.time()
+    hit = _PROMPT_CACHE.get(key)
+    if hit and (now - hit[0]) < _PROMPT_CACHE_TTL:
+        return hit[1]
+    result = _build_system_prompt_impl(lesson_folder)
+    _PROMPT_CACHE[key] = (time.time(), result)
+    return result
+
+
+def _build_system_prompt_impl(lesson_folder: str | None = None) -> str:
     metadata = load_lesson_metadata(lesson_folder)
     cfg = load_config()
     assistant_name = (
@@ -1133,9 +1452,12 @@ def build_system_prompt(lesson_folder: str | None = None) -> str:
     course_overview = "\n".join(course_overview_lines)
 
     parts = [header, f"【课程背景】\n你正在教授课程「{topic}」，整体共 {total_units} 课。"]
-    # 跨章蒸馏记忆：从已完成对话提炼学生画像，保持人格/教学风格连贯（仅新课程结构注入）
+    # 学生画像注入：优先使用已蒸馏的结构化画像（单元级、可迭代）；无画像时回退统计式跨章画像
     try:
-        _profile = _build_student_profile(lesson_folder, units, current_unit)
+        _distilled = _load_student_profile(lesson_folder).get("merged") or {}
+        _profile = _format_distilled_profile(_distilled, units, current_unit) if _distilled else ""
+        if not _profile:
+            _profile = _build_student_profile(lesson_folder, units, current_unit)
         if _profile:
             parts.append(_profile)
     except Exception:
@@ -1324,6 +1646,22 @@ def build_system_prompt(lesson_folder: str | None = None) -> str:
         ])
     parts.append("\n".join(teach_guide))
 
+    # 注入标准试卷（若课程已上传）：教学讲解覆盖试卷知识点，课程目标导向"答对试卷"
+    try:
+        _exam_paper = load_exam_paper(lesson_folder)
+        _exam_qs = _exam_paper.get("questions") or []
+        if _exam_qs:
+            _type_cn = {"single": "单选", "multiple": "多选", "boolean": "判断", "fill": "填空", "essay": "简答"}
+            _paper_lines = [
+                "【期末标准试卷（课程结束时将以此卷测验）】",
+                "以下题目是期末测验的原题，请把它们的知识点融入教学讲解、示例与练习，学生最终必须能答对这份试卷。",
+            ]
+            for i, q in enumerate(_exam_qs):
+                _paper_lines.append(f"{i + 1}. [{_type_cn.get(str(q.get('type')), '题')}] {str(q.get('question') or '')}（标准答案：{str(q.get('answer') or '')}）")
+            parts.append("\n".join(_paper_lines))
+    except Exception:
+        pass
+
     return "\n\n".join(parts)
 
 
@@ -1349,7 +1687,9 @@ def _compact_history(history, budget=_CONTEXT_HISTORY_BUDGET, per_msg=_CONTEXT_M
     - 只保留最近 last_n 轮；
     - 单条消息超过 per_msg 字符时截断（保留开头，附压缩说明）；
     - 从最新往旧累积，总长超过 budget 后丢弃更旧消息（至少保留最新一条）。
-    - 每条消息前置补时间戳（如 [时间 22:35]），模型可感知对话时间线。
+    - 注意：不再给历史消息补时间戳前缀。此前补的「[时间 xx:xx]」会被模型
+      当作格式复述进正文，造成"回复里出现时间戳"的 bug；
+      当前时间已由系统提示词注入，模型无需从历史里读取时间线。
     系统提示词（含教案+资料）本身较大，本地小模型（如 qwen3:4b）上下文有限，
     此预算保证 messages 总量可控，避免超限导致的超时/截断/报错。
     """
@@ -1363,9 +1703,6 @@ def _compact_history(history, budget=_CONTEXT_HISTORY_BUDGET, per_msg=_CONTEXT_M
         if role not in {"user", "assistant"} or not content:
             continue
         content = str(content)
-        stamp = _timestamp_label(entry)
-        if stamp:
-            content = f"[时间 {stamp}] {content}"
         orig_len = len(content)
         if orig_len > per_msg:
             content = content[:per_msg] + f"\n（本条原文 {orig_len} 字过长，已压缩至 {per_msg} 字）"
@@ -1419,6 +1756,9 @@ def _strip_thinking_residue(text: str) -> str:
     text = re.sub(r"(?:^|\n|\\c)\s*\[think\][\s\S]*?(?=\\c|\n\s*\n|\Z)", "\n", text)
     # 单独闭合/开始标签（含 [think] / [/think] 裸标记）
     text = re.sub(r"</?think>|<\|/?thinking\|>|\[/?think(?:ing)?\]", "", text, flags=re.IGNORECASE)
+    # 剥离模型复述的时间戳前缀（[时间 22:35]）——历史消息曾带该前缀注入，
+    # 模型偶尔会原样复述，导致正文出现时间戳
+    text = re.sub(r"(?:^|\n)\s*\[时间\s+\d{1,2}:\d{2}\]\s*", "\n", text)
     return text.strip()
 
 
@@ -1608,6 +1948,148 @@ def cloud_llm_reply(prompt: str, lesson_folder: str | None = None, history: List
     except Exception as exc:
         print(f"[AI-REQUEST] 云端请求异常: {type(exc).__name__}: {exc}", flush=True)
         return ""
+
+
+def cloud_llm_reply_stream(prompt: str, lesson_folder: str | None = None, history: List[Dict[str, str]] | None = None, long_mode: bool = False):
+    """流式版本：yield 每个 token（供 api_chat 真流式预览）。
+
+    配置选择逻辑与 cloud_llm_reply 保持一致（chat_* 优先，回退 cloud_*）。
+    失败/未配置时 yield 空（上层会回退到备用通道或兜底文案）。
+    """
+    cfg = load_config()
+    chat_key = (cfg.get("chat_api_key") or "").strip()
+    chat_model = (cfg.get("chat_model") or "").strip()
+    chat_base = (cfg.get("chat_base_url") or "").rstrip("/").strip()
+
+    if chat_key and chat_model and chat_base:
+        key = chat_key
+        model = chat_model
+        base_url = chat_base
+        enable_search = bool(cfg.get("chat_enable_search", False))
+    else:
+        key = (cfg.get("cloud_api_key") or cfg.get("siliconflow_api_key") or "").strip()
+        if not key:
+            return
+        model = (cfg.get("cloud_model") or cfg.get("siliconflow_model") or "deepseek-ai/DeepSeek-V3").strip()
+        base_url = (cfg.get("cloud_base_url") or "https://api.siliconflow.cn/v1").rstrip("/")
+        enable_search = bool(cfg.get("chat_enable_search", False))
+
+    url = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
+    messages = _build_chat_messages(prompt, lesson_folder, history)
+    base_tokens = int(cfg.get("chat_max_tokens", 600) or 600)
+    payload: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 3000 if long_mode else base_tokens,
+    }
+    if enable_search:
+        payload["enable_search"] = True
+
+    try:
+        print(f"[AI-REQUEST] 对话请求(流式) → 云端: {url} | model: {model}", flush=True)
+        with requests.post(
+            url,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={**payload, "stream": True},
+            timeout=120,
+            stream=True,
+        ) as resp:
+            resp.raise_for_status()
+            # 强制 UTF-8：部分 API 响应头无 charset 时 requests 默认按 ISO-8859-1
+            # 解码，UTF-8 中文会变成 mojibake（如“看起来”→ççèµ·æ¥）
+            resp.encoding = "utf-8"
+            for raw in resp.iter_lines(decode_unicode=True):
+                if not raw or not raw.startswith("data:"):
+                    continue
+                data = raw[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    j = json.loads(data)
+                    delta = (j.get("choices") or [{}])[0].get("delta") or {}
+                    chunk = delta.get("content") or ""
+                    if chunk:
+                        yield chunk
+                except (ValueError, json.JSONDecodeError, IndexError):
+                    continue
+    except Exception as exc:
+        print(f"[STREAM] 云端流式异常: {type(exc).__name__}: {exc}", flush=True)
+
+
+def local_ollama_reply_stream(prompt: str, lesson_folder: str | None = None, history: List[Dict[str, str]] | None = None, long_mode: bool = False):
+    """流式版本：yield 每个 token（Ollama /api/chat NDJSON 格式）。
+
+    配置选择/模型名容错逻辑与 local_ollama_reply 保持一致。
+    失败/未配置时 yield 空（上层回退备用通道）。
+    """
+    cfg = load_config()
+    base_url = (cfg.get("ollama_base_url") or "http://127.0.0.1:11434").rstrip("/")
+    model = (cfg.get("ollama_model") or "qwen2.5:7b").strip()
+    if not cfg.get("enable_local_ollama", True):
+        return
+
+    # 模型名容错：自动匹配 Ollama 实际可用模型（与 local_ollama_reply 相同）
+    try:
+        tags_resp = requests.get(f"{base_url}/api/tags", timeout=8)
+        if tags_resp.ok:
+            available = [m.get("name", "") for m in (tags_resp.json().get("models") or [])]
+            if available:
+                normalized = {n.lower(): n for n in available}
+                if model.lower() not in normalized:
+                    for fallback in ["qwen3", "qwen2.5", "qwen2.5vl", "qwen2.5-coder"]:
+                        match = next(
+                            (n for key, n in normalized.items() if key.startswith(fallback + ":")),
+                            None,
+                        )
+                        if match:
+                            print(f"[ollama] 模型 '{model}' 不存在，自动改用 '{match}'", flush=True)
+                            model = match
+                            break
+                else:
+                    model = normalized[model.lower()]
+    except Exception as exc:
+        print(f"[ollama] 获取模型列表失败: {exc}", flush=True)
+
+    messages = _build_chat_messages(prompt, lesson_folder, history)
+    base_predict = int(cfg.get("ollama_num_predict", 600) or 600)
+    options: Dict[str, Any] = {
+        "temperature": float(cfg.get("ollama_temperature", 0.7) or 0.7),
+        "num_ctx": int(cfg.get("ollama_num_ctx", 16384) or 16384),
+        "num_predict": 2500 if long_mode else base_predict,
+    }
+
+    try:
+        print(f"[AI-REQUEST] 对话请求(流式) → Ollama: {base_url}/api/chat | model: {model}", flush=True)
+        with requests.post(
+            f"{base_url}/api/chat",
+            json={
+                "model": model,
+                "messages": messages,
+                "stream": True,
+                "think": False,
+                "options": options,
+            },
+            timeout=120,
+            stream=True,
+        ) as resp:
+            resp.raise_for_status()
+            # 强制 UTF-8：Ollama 响应可能无 charset，requests 会默认按 ISO-8859-1 解码导致中文乱码
+            resp.encoding = "utf-8"
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                try:
+                    j = json.loads(line)
+                    chunk = (j.get("message") or {}).get("content") or j.get("response") or ""
+                    if chunk:
+                        yield chunk
+                    if j.get("done"):
+                        break
+                except (ValueError, json.JSONDecodeError):
+                    continue
+    except Exception as exc:
+        print(f"[ollama] 流式异常: {exc}", flush=True)
 
 
 def direct_llm_reply(message: str, system: str = "") -> str:
@@ -1938,6 +2420,13 @@ def api_upload_file():
             content = data[:50 * 1024].decode("utf-8", errors="replace")
         except Exception:
             content = ""
+    elif ext == ".pdf":
+        # PDF 附件：提取前 20 页文本随消息发给模型（扫描版自动走 OCR 兜底）
+        try:
+            pdf_text = _read_pdf_text(str(file_path), 1, 20)
+            content = pdf_text[:50 * 1024]
+        except Exception:
+            content = ""
     print(f"[upload_file] 已保存 {safe} → {file_path.name} ({len(data)} bytes, type={att_type})", flush=True)
     return jsonify({
         "ok": True,
@@ -2014,7 +2503,9 @@ def favicon():
 
 @app.route("/api/config", methods=["GET"])
 def api_config_get():
-    return jsonify(load_config())
+    cfg = load_config()
+    cfg["ocr_available"] = pdf_ocr_available()
+    return jsonify(cfg)
 
 
 # ============================
@@ -2038,7 +2529,7 @@ _BOOL_FIELDS = {
     "enable_local_ollama", "auto_play_tts", "voice_enabled",
     "tts_enabled", "tts_cloud_enabled", "vision_enabled",
     "enable_search", "chat_enable_search", "segment_enabled",
-    "portrait_float_enabled",
+    "portrait_float_enabled", "ocr_enabled", "interactive_prep_enabled",
 }
 
 
@@ -2096,6 +2587,8 @@ def api_config_set():
         # 校验失败不落盘，返回中文错误（前端自动保存时展示到状态条）
         return jsonify({"status": "error", "errors": errors}), 400
     config = save_config(payload)
+    # 同步 OCR 总开关（运行时生效，无需重启）
+    set_ocr_enabled(bool(config.get("ocr_enabled", True)))
     return jsonify({"status": "ok", "config": config})
 
 
@@ -2804,7 +3297,7 @@ def api_reset_model():
 
 # ============== 终端：代码执行与结果记录 ==============
 
-# 语言 → 解释器命令映射（仅使用本机可用解释器）
+# 语言 → 解释器命令映射（仅使用本机可用解释器；扩展语言缺失时后端会给出友好提示）
 _EXEC_LANG_MAP = {
     "python": [sys.executable, "-c"],
     "python3": [sys.executable, "-c"],
@@ -2815,10 +3308,30 @@ _EXEC_LANG_MAP = {
     "js": ["node", "-e"],
     "javascript": ["node", "-e"],
     "node": ["node", "-e"],
+    # —— 扩展脚本语言（单次执行；需本机已安装对应解释器）——
+    "ruby": ["ruby", "-e"],
+    "rb": ["ruby", "-e"],
+    "perl": ["perl", "-e"],
+    "pl": ["perl", "-e"],
+    "php": ["php", "-r"],
+    "lua": ["lua", "-e"],
+    "r": ["Rscript", "-e"],
+    "rscript": ["Rscript", "-e"],
 }
 _EXEC_MAX_CODE = 20000      # 单次代码长度上限
 _EXEC_TIMEOUT = 15          # 执行超时（秒）
 _EXEC_MAX_OUTPUT = 20000    # 单次输出截断上限
+
+# 语言别名 → 展示名（解释器缺失提示用）
+_EXEC_LANG_DISPLAY = {
+    "python": "Python", "python3": "Python", "py": "Python",
+    "javascript": "JavaScript (Node)", "js": "JavaScript (Node)", "node": "JavaScript (Node)",
+    "shell": "CMD", "sh": "CMD", "powershell": "PowerShell",
+    "ruby": "Ruby", "rb": "Ruby",
+    "perl": "Perl", "pl": "Perl",
+    "php": "PHP", "lua": "Lua",
+    "r": "R", "rscript": "R",
+}
 
 
 @app.route("/api/execute_code", methods=["POST"])
@@ -2838,6 +3351,10 @@ def api_execute_code():
         cmd = _EXEC_LANG_MAP.get(language)
         if not cmd:
             return jsonify(ok=False, error=f"不支持的代码语言: {language}（支持 {', '.join(sorted(set(_EXEC_LANG_MAP)))}）")
+        # 解释器可用性检测：缺失时给出友好提示（而非"不是内部或外部命令"）
+        exe_name = cmd[0]
+        if exe_name not in ("cmd", "powershell") and shutil.which(exe_name) is None:
+            return jsonify(ok=False, error=f"未检测到 {_EXEC_LANG_DISPLAY.get(language, exe_name)} 解释器（{exe_name}），请先安装后重试")
 
         # 在临时目录运行，隔离代码产生的文件；编码统一 utf-8 容错
         workdir = tempfile.mkdtemp(prefix="myteacher_term_")
@@ -3059,6 +3576,30 @@ class _PySessionRepl:
         return buf.getvalue(), False
 
 
+# 危险命令拦截：课程终端只允许无害操作，杜绝删库/格式化/关机等破坏性命令
+_DANGEROUS_PATTERNS = [
+    # 删除类：rm/del/erase/unlink + 递归/强制/静默 标志
+    re.compile(r"(^|[;&|]\s*)(rm|del|erase|unlink|rd|rmdir)(\s|$).*(-rf|-r|-f|/s|/q|/f)", re.I),
+    # 纯删除命令（无标志但有明确的目标，如 `del *.py`、`rm -rf` 已覆盖，此处兜底 `rmdir 目录`）
+    re.compile(r"(^|[;&|]\s*)(rm|del|erase|unlink)(\s|$).*(\.\*|\*|/s\b|/q\b|-rf\b|-r\b|-f\b)", re.I),
+    # 格式化 / 分区 / 磁盘操作
+    re.compile(r"(^|[;&|]\s*)format\s+[a-zA-Z]:", re.I),
+    re.compile(r"(^|[;&|]\s*)(mkfs|fdisk|diskpart|format|low level format)(\b|\s|$)", re.I),
+    # 关机 / 重启
+    re.compile(r"(^|[;&|]\s*)(shutdown|reboot|init\s+0|init\s+6)(\s|$)", re.I),
+    # 系统级破坏：注册表删除、启动项、dd 覆盖磁盘、清空回收站等
+    re.compile(r"(^|[;&|]\s*)reg\s+(delete|del)\b", re.I),
+    re.compile(r"(^|[;&|]\s*)dd\s+if=.*of=\s*[a-zA-Z]:", re.I),
+    re.compile(r"(^|[;&|]\s*)clear\s+recyclebin\b", re.I),
+    re.compile(r"(^|[;&|]\s*)Remove-Item\b.*(-Recurse|-Force)", re.I),
+    # 危险的 sudo 包裹（sudo rm / sudo mkfs 等）
+    re.compile(r"(^|[;&|]\s*)sudo\s+(rm|del|mkfs|fdisk|dd|shutdown|reboot|format)(\s|$)", re.I),
+]
+
+# 幂等拦截：命中危险模式时返回的提示信息
+_DANGEROUS_MSG = "⛔ 已拦截危险命令（课程终端禁止删除/格式化/关机等破坏性操作）"
+
+
 class TerminalSession:
     """交互式终端会话：持久工作目录 + 持久解释器状态。
 
@@ -3156,8 +3697,29 @@ class TerminalSession:
             return self._ensure_py().run(cmd)
         if lang == "javascript":
             return self._run_node(cmd), False
+        # 其他脚本语言（ruby / perl / php / lua / r）：单次执行，沿用会话 cwd
+        if lang not in ("shell", "sh", "powershell"):
+            entry = _EXEC_LANG_MAP.get(lang)
+            if not entry:
+                return f"不支持的语言: {lang}\n", False
+            exe_name = entry[0]
+            if shutil.which(exe_name) is None:
+                return f"⛔ 未检测到 {_EXEC_LANG_DISPLAY.get(lang, exe_name)} 解释器（{exe_name}），请先安装后重试\n", False
+            try:
+                result = subprocess.run(
+                    entry + [cmd],
+                    capture_output=True, text=True, timeout=_EXEC_TIMEOUT,
+                    cwd=str(self.cwd), encoding="utf-8", errors="replace",
+                )
+                return (result.stdout or "") + (result.stderr or ""), False
+            except subprocess.TimeoutExpired:
+                return f"执行超时（{_EXEC_TIMEOUT} 秒）\n", False
         # shell / powershell：单次执行，会话内维护 cwd（且不允许跳出课程目录）
         stripped = cmd.strip()
+        # 危险命令拦截：命中即拒绝执行（不交给 shell）
+        for pat in _DANGEROUS_PATTERNS:
+            if pat.search(stripped):
+                return f"{_DANGEROUS_MSG}：{stripped[:80]}\n", False
         if stripped.lower().startswith("cd"):
             cd_arg = stripped[2:].strip()
             # cmd 的 `cd /d X` 写法
@@ -3496,6 +4058,397 @@ def api_lesson_rename(lesson_folder: str):
     return jsonify({"status": "ok", "renamed": lesson_folder, "new_name": final})
 
 
+def _validate_lesson_folder(lesson_folder: str) -> Optional[Path]:
+    """校验课程目录名合法性，返回解析后的路径；非法返回 None。"""
+    if not lesson_folder or "/" in lesson_folder or "\\" in lesson_folder or ".." in lesson_folder:
+        return None
+    target = LESSONS_DIR / lesson_folder
+    try:
+        resolved = target.resolve()
+        if not str(resolved).startswith(str(LESSONS_DIR.resolve())):
+            return None
+    except Exception:
+        return None
+    return resolved
+
+
+@app.route("/api/lessons/<path:lesson_folder>/export", methods=["GET"])
+def api_lesson_export(lesson_folder: str):
+    """导出课程为 zip 备份（含教案、对话、进度、画像、资料等全部文件）。"""
+    target = _validate_lesson_folder(lesson_folder)
+    if target is None:
+        return jsonify({"error": "非法的课程名"}), 400
+    if not target.exists() or not target.is_dir():
+        return jsonify({"error": "课程不存在"}), 404
+
+    # 排除运行时临时产物：node_modules（若课件里误装了依赖）、__pycache__
+    EXCLUDE_SUBDIRS = {"node_modules", "__pycache__", ".venv"}
+    # 顶层目录名：用课程文件夹名包裹，保证导入时能识别唯一目录
+    top = target.name
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for file_path in sorted(target.rglob("*")):
+            if file_path.is_dir():
+                continue
+            if any(part in EXCLUDE_SUBDIRS for part in file_path.relative_to(target).parts):
+                continue
+            try:
+                zf.write(file_path, f"{top}/{file_path.relative_to(target).as_posix()}")
+            except OSError:
+                continue
+    buffer.seek(0)
+    safe_name = sanitize_topic(lesson_folder) or "lesson"
+    filename = urllib.parse.quote(f"{safe_name}_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
+    return Response(
+        buffer.getvalue(),
+        mimetype="application/zip",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+    )
+
+
+@app.route("/api/lessons/import", methods=["POST"])
+def api_lesson_import():
+    """从 zip 备份导入课程。校验路径穿越，自动处理目录名冲突。"""
+    if "file" not in request.files:
+        return jsonify({"error": "缺少备份文件（file 字段）"}), 400
+    file = request.files["file"]
+    if not file or not file.filename:
+        return jsonify({"error": "文件为空"}), 400
+    if not (file.filename.lower().endswith(".zip")):
+        return jsonify({"error": "仅支持 .zip 备份文件"}), 400
+    try:
+        zf = zipfile.ZipFile(file.stream)
+    except zipfile.BadZipFile:
+        return jsonify({"error": "不是有效的 zip 文件"}), 400
+    except Exception as exc:
+        return jsonify({"error": f"读取失败：{exc}"}), 400
+
+    # 顶层目录名（备份 zip 内第一条目所属目录），用于冲突时改名
+    names = zf.namelist()
+    if not names:
+        return jsonify({"error": "备份文件为空"}), 400
+    top_level = names[0].split("/", 1)[0]
+    if not top_level or any(c in top_level for c in "/\\"):
+        top_level = f"imported_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    # 安全解压：拒绝绝对路径 / .. 穿越
+    base = LESSONS_DIR.resolve()
+    dest = LESSONS_DIR / top_level
+    suffix = 1
+    while dest.exists():
+        dest = LESSONS_DIR / f"{top_level}_{suffix}"
+        suffix += 1
+    imported = 0
+    try:
+        for info in zf.infolist():
+            fname = info.filename
+            if fname.startswith("/") or ".." in fname.split("/"):
+                return jsonify({"error": f"备份包含非法路径：{fname}"}), 400
+            rel = Path(*fname.split("/"))
+            out_path = (dest / rel).resolve()
+            if not str(out_path).startswith(str(base)) or out_path == dest:
+                continue
+            if info.is_dir():
+                out_path.mkdir(parents=True, exist_ok=True)
+                continue
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info) as src, open(out_path, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            imported += 1
+    except Exception as exc:
+        shutil.rmtree(dest, ignore_errors=True)
+        return jsonify({"error": f"解压失败：{exc}"}), 500
+    finally:
+        zf.close()
+    return jsonify({"status": "ok", "folder": dest.name, "imported_files": imported})
+
+
+# ============================
+# 交互式备课诊断（实验功能）：
+# 1) /api/prep_diagnose/open      —— 根据主题生成 4-6 个诊断问题（首轮），返回 questions
+# 2) /api/prep_diagnose/answer    —— 学生回答一轮问题，更新已掌握/未掌握清单，返回下一轮或 done
+# 3) /api/prep_diagnose/finish    —— 合并最终诊断结论 known_points / unknown_points
+# ============================
+_DIAGNOSIS_STATE: Dict[str, Dict[str, Any]] = {}
+
+
+def _diagnosis_get_lesson_provider_config() -> Dict[str, Any]:
+    """从当前 config 读取用于诊断问答的 provider / 模型信息，复用云端/对话配置。"""
+    cfg = load_config()
+    # 诊断对话语义与备课接近，优先用 lesson_provider；其没有时回退 chat_provider
+    provider = (cfg.get("lesson_provider") or cfg.get("chat_provider") or "auto").strip().lower()
+    if provider == "ollama":
+        base_url = (cfg.get("ollama_base_url") or "http://127.0.0.1:11434").rstrip("/")
+        return {
+            "provider": "ollama",
+            "base_url": base_url,
+            "model": (cfg.get("ollama_model") or "qwen3:8b").strip(),
+            "api_key": "",
+        }
+    # 云端 / auto 默认走 cloud_*
+    base_url = (cfg.get("cloud_base_url") or "https://api.siliconflow.cn/v1").rstrip("/")
+    return {
+        "provider": "cloud",
+        "base_url": base_url,
+        "model": (cfg.get("cloud_model") or "deepseek-ai/DeepSeek-V3").strip(),
+        "api_key": (cfg.get("cloud_api_key") or cfg.get("siliconflow_api_key") or "").strip(),
+    }
+
+
+def _diagnosis_get_fallback_config() -> Dict[str, Any]:
+    """fallback 配置：当主 provider 不可用时切换到这里。"""
+    cfg = load_config()
+    base_url = (cfg.get("cloud_base_url") or "https://api.siliconflow.cn/v1").rstrip("/")
+    api_key = (cfg.get("cloud_api_key") or cfg.get("siliconflow_api_key") or "").strip()
+    return {
+        "provider": "cloud",
+        "base_url": base_url,
+        "model": (cfg.get("cloud_model") or "deepseek-ai/DeepSeek-V3").strip(),
+        "api_key": api_key,
+    }
+
+
+def _diagnosis_call_llm(messages: List[Dict[str, str]], max_tokens: int = 1024, temperature: float = 0.5) -> Optional[str]:
+    """调用当前 provider 跑一次诊断问答，返回模型回复文本，失败返回 None。
+    主 provider 不可用（如本地 ollama 未启动）时，自动 fallback 到云端。
+    """
+    pc = _diagnosis_get_lesson_provider_config()
+    primary_err: Optional[str] = None
+    if pc["provider"] == "ollama":
+        try:
+            payload = {
+                "model": pc["model"],
+                "messages": messages,
+                "stream": False,
+                "think": False,
+                "options": {"temperature": temperature, "num_predict": max_tokens},
+            }
+            r = requests.post(f"{pc['base_url']}/api/chat", json=payload, timeout=20)
+            if r.ok:
+                text = (r.json().get("message", {}).get("content") or "").strip()
+                if text:
+                    return text
+                primary_err = "Ollama 返回空内容"
+            else:
+                primary_err = f"Ollama HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as exc:
+            primary_err = f"{type(exc).__name__}: {exc}"
+        # 失败：fallback 到云端
+        app.logger.warning("诊断·主路径 Ollama 不可用，自动 fallback 到云端 (%s)", primary_err)
+        pc = _diagnosis_get_fallback_config()
+    # 云端（OpenAI-compatible chat completions）
+    try:
+        if not pc.get("api_key"):
+            app.logger.error("诊断·云端 API Key 未配置 (primary_err=%s)", primary_err)
+            return None
+        url = f"{pc['base_url']}/chat/completions"
+        if pc["base_url"].endswith("/chat/completions"):
+            url = pc["base_url"]
+        payload = {
+            "model": pc["model"],
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        r = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {pc['api_key']}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=120,
+        )
+        if not r.ok:
+            app.logger.error("诊断·云端 HTTP %s: %s (primary_err=%s)", r.status_code, r.text[:300], primary_err)
+            return None
+        return (r.json()["choices"][0]["message"]["content"] or "").strip() or None
+    except Exception as exc:
+        app.logger.error("诊断·LLM 调用异常: %s: %s", type(exc).__name__, exc)
+        return None
+
+
+_DIAGNOSIS_OPEN_PROMPT = (
+    "你是一位经验丰富的老师，正在以对话的方式给学生做课前摸底。\n"
+    "针对【主题】，给出第一个开场问题：问该主题最基础、最关键的一个前置概念。\n"
+    "要求：问题简短自然（10~30 字），像老师课堂上随口发问，学生能用一两句话回答。\n\n"
+    "严格按 JSON 输出，禁止解释：\n"
+    '{"question": "第一个问题", "concept": "被考察的概念名"}'
+)
+
+
+_DIAGNOSIS_CONVO_PROMPT = (
+    "你是一位经验丰富的老师，正在以对话的方式给学生做课前摸底。\n"
+    "你要像真人老师一样自然交流：先回应学生上一轮的回答，再顺着上下文提出下一个问题，"
+    "一步步摸清学生对【主题】各核心方面的掌握情况。\n\n"
+    "【主题】\n{topic}\n\n"
+    "【对话记录】（老师与学生的历史问答）\n{history}\n\n"
+    "【本轮的最后一个学生回答】\n{answer}\n\n"
+    "现在请完成：\n"
+    "1. status：判断学生这轮回答的掌握程度（known=已掌握 / partial=部分掌握 / unknown=未掌握 / skip=跳过）\n"
+    "2. reply：一句简短的自然回应（≤30 字），只针对学生这轮的回答给出肯定、纠正或简单补充；"
+    "【绝对禁止】在 reply 中夹带任何问题或追问——所有追问一律只放在 next_question 字段里。\n"
+    "3. 决定下一步：\n"
+    "   - 若还需了解其他方面 → 给出 next_question（承接上下文的下一个问题，≤35 字）与 next_concept（该问题考察的概念名）\n"
+    "   - 若已了解足够（已覆盖该主题 4~6 个核心方面，或信息已充分）→ done=true，并给 summary（1~2 句总结学生整体水平）\n"
+    "4. known/partial/unknown：根据整个对话，把已确认的概念分别列出（只有明确确认才列入，不要重复）\n\n"
+    "严格按 JSON 输出，禁止多余文字：\n"
+    "{\n"
+    '  "status": "known|partial|unknown|skip",\n'
+    '  "reply": "老师对这次回答的回应",\n'
+    '  "next_question": "下一个问题（done 时为空）",\n'
+    '  "next_concept": "下一问概念（done 时为空）",\n'
+    '  "done": false,\n'
+    '  "summary": "总评（done 时填写，否则为空）",\n'
+    '  "known": ["概念"],\n'
+    '  "partial": ["概念"],\n'
+    '  "unknown": ["概念"]\n'
+    "}"
+)
+
+
+@app.route("/api/prep_diagnose/open", methods=["POST"])
+def api_prep_diagnose_open():
+    """开启诊断：生成对话式摸底的第一问。"""
+    payload = request.get_json(silent=True) or {}
+    topic = str(payload.get("topic") or "").strip()
+    if not topic:
+        return jsonify({"error": "topic 必填"}), 400
+    messages = [
+        {"role": "system", "content": _DIAGNOSIS_OPEN_PROMPT},
+        {"role": "user", "content": f"【主题】{topic}"},
+    ]
+    text = _diagnosis_call_llm(messages, max_tokens=300)
+    if not text:
+        return jsonify({"error": "诊断生成失败，请重试"}), 500
+    data = _robust_json_loads(text) if "_robust_json_loads" in globals() else json.loads(text)
+    if not isinstance(data, dict):
+        return jsonify({"error": "诊断问题格式错误", "raw": text[:500]}), 500
+    question = str(data.get("question") or "").strip()
+    concept = str(data.get("concept") or "").strip()
+    if not question:
+        return jsonify({"error": "诊断问题为空", "raw": text[:500]}), 500
+    # 分配 session id，状态保存到内存（一次诊断会话）
+    sid = secrets.token_urlsafe(16)
+    _DIAGNOSIS_STATE[sid] = {
+        "topic": topic,
+        "conversation": [],       # 每轮: {"q", "a", "status", "reply"}
+        "known": [],              # list of concept
+        "partial": [],
+        "unknown": [],
+        "rounds": 0,              # 已答轮数
+        "max_rounds": 6,          # 对话轮数上限，防止无限对话
+        "last_question": question,
+        "last_concept": concept,
+    }
+    return jsonify({"session_id": sid, "question": question, "concept": concept, "topic": topic})
+
+
+@app.route("/api/prep_diagnose/answer", methods=["POST"])
+def api_prep_diagnose_answer():
+    """对话式诊断：学生回答一轮，AI 基于完整对话历史生成回应 + 下一问（或结束）。"""
+    payload = request.get_json(silent=True) or {}
+    sid = str(payload.get("session_id") or "").strip()
+    answer = str(payload.get("answer") or "").strip()
+    state = _DIAGNOSIS_STATE.get(sid)
+    if not state:
+        return jsonify({"error": "session 已失效，请重新开启诊断"}), 400
+    if not answer:
+        return jsonify({"error": "answer 必填"}), 400
+    # 组装对话历史（老师的问题 + 学生的回答 + 历史评估）
+    history_lines = []
+    for turn in state["conversation"]:
+        history_lines.append(f"老师：{turn['q']}")
+        status_map = {"known": "已掌握", "partial": "部分掌握", "unknown": "未掌握", "skip": "跳过"}
+        history_lines.append(f"学生：{turn['a']}（我的判断：{status_map.get(turn['status'], turn['status'])})")
+    history_text = "\n".join(history_lines) or "（暂无，这是第一轮）"
+    sys_prompt = (_DIAGNOSIS_CONVO_PROMPT
+                  .replace("{topic}", state["topic"])
+                  .replace("{history}", history_text)
+                  .replace("{answer}", answer))
+    messages = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": answer},
+    ]
+    text = _diagnosis_call_llm(messages, max_tokens=700)
+    if not text:
+        return jsonify({"error": "评估失败，请重试"}), 500
+    try:
+        result = _robust_json_loads(text)
+    except Exception:
+        result = {}
+    if not isinstance(result, dict):
+        result = {}
+    status = str(result.get("status") or "unknown").strip().lower()
+    if status not in ("known", "partial", "unknown", "skip"):
+        status = "unknown"
+    reply = str(result.get("reply") or "").strip()
+    summary = str(result.get("summary") or "").strip()
+    next_q = str(result.get("next_question") or "").strip()
+    next_concept = str(result.get("next_concept") or "").strip()
+    done = bool(result.get("done") is True) or bool(str(result.get("done")).lower() == "true")
+    # 记录本轮
+    state["conversation"].append({
+        "q": state.get("last_question") or "",
+        "a": answer,
+        "status": status,
+        "reply": reply,
+    })
+    state["rounds"] += 1
+    # 合并概念清单（去重）
+    for bucket, items in (("known", result.get("known")), ("partial", result.get("partial")), ("unknown", result.get("unknown"))):
+        if isinstance(items, list):
+            for c in items:
+                c = str(c).strip()
+                if not c:
+                    continue
+                for b in (state["known"], state["partial"], state["unknown"]):
+                    if c in b:
+                        b.remove(c)
+                if c not in state[bucket]:
+                    state[bucket].append(c)
+    # 轮数硬限制：到上限强制结束
+    if not done and state["rounds"] >= state.get("max_rounds", 6):
+        done = True
+        if not summary:
+            summary = "对话已覆盖足够多的问题，摸底到此为止。"
+    # 下一问
+    if done:
+        next_q = ""
+        next_concept = ""
+    else:
+        state["last_question"] = next_q
+        state["last_concept"] = next_concept
+    return jsonify({
+        "status": status,
+        "reply": reply,
+        "next_question": next_q,
+        "next_concept": next_concept,
+        "done": done,
+        "summary": summary,
+        "known": state["known"],
+        "partial": state["partial"],
+        "unknown": state["unknown"],
+        "rounds": state["rounds"],
+        "max_rounds": state.get("max_rounds", 6),
+    })
+
+
+@app.route("/api/prep_diagnose/finish", methods=["POST"])
+def api_prep_diagnose_finish():
+    """结束诊断：合并所有轮的评估，返回结构化结论（known/partial/unknown），并清理 session。"""
+    payload = request.get_json(silent=True) or {}
+    sid = str(payload.get("session_id") or "").strip()
+    state = _DIAGNOSIS_STATE.pop(sid, None) if sid else None
+    if not state:
+        return jsonify({"error": "session 不存在或已结束"}), 400
+    return jsonify({
+        "topic": state["topic"],
+        "known": state["known"],
+        "partial": state["partial"],
+        "unknown": state["unknown"],
+        "total": state.get("rounds", 0),
+        "answered": state.get("rounds", 0),
+    })
+
+
 @app.route("/api/prepare_lesson", methods=["POST"])
 def api_prepare_lesson():
     """AI 备课预览（不保存到磁盘，用户确认后再保存）。
@@ -3512,6 +4465,7 @@ def api_prepare_lesson():
         if not topic:
             return jsonify({"error": "topic is required"}), 400
         md_parts: List[str] = []
+        pdf_files: List[Dict[str, Any]] = []   # 暂存上传的整本 PDF：只提目录，正文按需
         for f in request.files.getlist("files"):
             if not f or not f.filename:
                 continue
@@ -3523,20 +4477,41 @@ def api_prepare_lesson():
             tmp_path = Path(tempfile.gettempdir()) / f"lesson_prep_{int(time.time() * 1000)}_{safe}"
             try:
                 f.save(str(tmp_path))
-                md = convert_document_to_markdown(tmp_path)
+                if ext == ".pdf":
+                    # 整本教材 PDF：只提取目录（快），正文等课程应用时按单元按需提取对应章节
+                    toc = extract_pdf_toc(tmp_path)
+                    pdf_files.append({"name": safe, "path": str(tmp_path), "toc": toc})
+                    if toc:
+                        toc_text = "\n".join(
+                            f"{'  ' * (it.get('level') or 0)}{it.get('title')}（第 {it.get('page')} 页）"
+                            for it in toc
+                        )
+                    else:
+                        toc_text = "（该 PDF 无书签目录，课程应用时将按页顺序分段读取）"
+                    md_parts.append(
+                        f"# 课程资料（整本教材）：{safe}\n\n"
+                        f"## 本书目录\n{toc_text}\n\n"
+                        "（完整正文将在课程应用时按单元按需提取对应章节）"
+                    )
+                else:
+                    md = convert_document_to_markdown(tmp_path)
+                    if md and "无法自动提取" not in md and "无法直接读取" not in md:
+                        md_parts.append(f"# 课程资料：{safe}\n\n{md}")
+                    else:
+                        md_parts.append(f"## 文件 {safe}\n\n{md}")
+                    try:
+                        tmp_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
             except Exception as exc:
-                md = f"## 文件 {safe}\n\n读取失败：{exc}"
-            finally:
+                md_parts.append(f"## 文件 {safe}\n\n读取失败：{exc}")
                 try:
                     tmp_path.unlink(missing_ok=True)
                 except Exception:
                     pass
-            if md and "无法自动提取" not in md and "无法直接读取" not in md:
-                md_parts.append(f"# 课程资料：{safe}\n\n{md}")
-            else:
-                md_parts.append(f"## 文件 {safe}\n\n{md}")
         if md_parts:
             doc_markdown = "\n\n---\n\n".join(md_parts)
+        ACTIVE_LESSON["preview_pdf_files"] = pdf_files
     else:
         payload = request.get_json(silent=True) or {}
         topic = (payload.get("topic") or "").strip()
@@ -3550,8 +4525,18 @@ def api_prepare_lesson():
     if payload.get("tts_cloud_voice"):
         cfg["tts_cloud_voice"] = payload["tts_cloud_voice"]
 
-    lesson_plan = prepare_lesson(topic, config=cfg, document_markdown=doc_markdown)
-    # 备课来源元信息（是否兜底模板 / 降级说明），从教案中摘出单独返回
+    # 整本教材 PDF 的目录（若有），用于指导 AI 按目录章节数生成单元
+    doc_toc = []
+    if ACTIVE_LESSON.get("preview_pdf_files"):
+        doc_toc = ACTIVE_LESSON["preview_pdf_files"][0].get("toc") or []
+
+    # 交互式备课诊断结论（来自 /api/prep_diagnose/finish）
+    diagnosis = payload.get("diagnosis") if isinstance(payload, dict) else None
+    if not isinstance(diagnosis, dict):
+        diagnosis = None
+
+    lesson_plan = prepare_lesson(topic, config=cfg, document_markdown=doc_markdown, doc_toc=doc_toc, diagnosis=diagnosis)
+    # 备课来源元信息（是否兜底模板 / 降级说明 / 使用模型 / token 用量），从教案中摘出单独返回
     prep_meta = {}
     if isinstance(lesson_plan, dict):
         prep_meta = lesson_plan.pop("_meta", {}) or {}
@@ -3574,7 +4559,72 @@ def api_prepare_lesson():
         payload.get("tts_cloud_voice") or cfg.get("tts_cloud_voice") or ""
     ).strip()
 
-    return jsonify({"lesson_folder": lesson_folder, "plan": lesson_plan, "prepared_meta": prep_meta})
+    return jsonify({
+        "lesson_folder": lesson_folder,
+        "plan": lesson_plan,
+        "prepared_meta": prep_meta,
+        "doc_toc": doc_toc,
+        "ocr_available": pdf_ocr_available(),
+    })
+
+
+def _match_pdf_toc_to_units(units, toc):
+    """把 PDF 目录条目与单元标题做宽松匹配，返回每个匹配单元的章节页码范围。
+
+    返回 [{unit_index, start_page, end_page}]；end_page 为下一匹配章起始页-1，
+    末章为 None（表示读到文档末页）。匹配失败返回空列表。
+    匹配策略：优先顶层章节（level 0），其次任意层级；同一起始页只保留第一个单元。
+    """
+
+    def norm(s):
+        s = re.sub(
+            r"^(第\s*\d+\s*[课讲节章]|lesson\s*\d+|unit\s*\d+|chapter\s*\d+|chapter\s*[ivxlcdm]+)\s*[:：、.\-\s]*",
+            "", str(s or ""), flags=re.I,
+        )
+        s = re.sub(r"[^\w\u4e00-\u9fa5]+", "", s)
+        return s.lower()
+
+    if not units or not toc:
+        return []
+    norm_toc = [
+        {"norm": norm(it.get("title")), "page": int(it.get("page") or 0),
+         "level": int(it.get("level") or 0)}
+        for it in toc if it.get("page")
+    ]
+    if not norm_toc:
+        return []
+
+    def _match_unit(utitle):
+        """返回匹配到的目录条目（优先顶层章节），无匹配返回 None。"""
+        best, best_level = None, None
+        for t in norm_toc:
+            if not t["norm"]:
+                continue
+            hit = t["norm"] == utitle or t["norm"] in utitle or utitle in t["norm"]
+            if not hit:
+                continue
+            # 顶层章节（level 0）优先；同层级取更长的标题（更精确）
+            if best is None or t["level"] < best_level or (t["level"] == best_level and len(t["norm"]) > len(best["norm"])):
+                best, best_level = t, t["level"]
+        return best
+
+    matched = []
+    seen_pages = set()
+    for ui, u in enumerate(units):
+        utitle = norm(u.get("title", ""))
+        if not utitle:
+            continue
+        best = _match_unit(utitle)
+        if best and best["page"] not in seen_pages:
+            seen_pages.add(best["page"])
+            matched.append({"unit_index": ui, "start_page": best["page"]})
+    if not matched:
+        return []
+    matched.sort(key=lambda r: r["start_page"])
+    for i, r in enumerate(matched):
+        nxt = matched[i + 1]["start_page"] if i + 1 < len(matched) else None
+        r["end_page"] = (nxt - 1) if nxt else None
+    return matched
 
 
 @app.route("/api/apply_lesson", methods=["POST"])
@@ -3614,6 +4664,58 @@ def api_apply_lesson():
         except Exception as exc:
             print(f"[apply_lesson] 保存 source_document.md 失败: {exc}", flush=True)
     units = plan_to_save.get("units", [])
+
+    # V4.1：整本教材 PDF —— 保存原文件 + 目录，按单元匹配章节"按需提取"正文到 section_N
+    #（备课预览阶段只提取了目录，正文在这里才按章节落地，避免整本解析等待）
+    try:
+        pdf_files = ACTIVE_LESSON.get("preview_pdf_files") or []
+        if pdf_files and units:
+            pdf_info = pdf_files[0]
+            pdf_src = Path(pdf_info.get("path") or "")
+            if pdf_src.exists() and pdf_src.is_file():
+                pdf_name = pdf_info.get("name") or "source_document.pdf"
+                pdf_target = lesson_dir / pdf_name
+                try:
+                    pdf_target.write_bytes(pdf_src.read_bytes())
+                except Exception:
+                    pdf_target = lesson_dir / "source_document.pdf"
+                    pdf_target.write_bytes(pdf_src.read_bytes())
+                toc = pdf_info.get("toc") or []
+                try:
+                    (lesson_dir / "pdf_toc.json").write_text(
+                        json.dumps({"source": pdf_name, "toc": toc}, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    pass
+                print(f"[apply_lesson] 教材已保存: {pdf_name}（目录 {len(toc)} 条），按单元按需提取章节…", flush=True)
+                matches = _match_pdf_toc_to_units(units, toc)
+                if matches:
+                    for m in matches:
+                        try:
+                            sec_dir = unit_dir(lesson_folder, m["unit_index"])
+                            sec_dir.mkdir(parents=True, exist_ok=True)
+                            chap_text = convert_document_to_markdown(
+                                str(pdf_target), start_page=m["start_page"], end_page=m["end_page"]
+                            )
+                            if chap_text.strip():
+                                page_desc = f"{m['start_page']}-{m['end_page']}" if m["end_page"] else f"{m['start_page']}-末"
+                                (sec_dir / "source_document.md").write_text(
+                                    f"# 第 {m['unit_index'] + 1} 课（教材第 {page_desc} 页）\n\n{chap_text}",
+                                    encoding="utf-8",
+                                )
+                                print(f"[apply_lesson] 单元{m['unit_index'] + 1} 已提取教材页 {page_desc}（{len(chap_text)} 字符）", flush=True)
+                        except Exception as exc:
+                            print(f"[apply_lesson] 单元{m['unit_index'] + 1} 章节提取失败: {exc}", flush=True)
+                else:
+                    print("[apply_lesson] PDF 目录与单元标题无匹配，正文按需提取跳过（讲解将回退课程级 source_document.md）", flush=True)
+                try:
+                    pdf_src.unlink(missing_ok=True)
+                except Exception:
+                    pass
+    except Exception as exc:
+        print(f"[apply_lesson] 整本教材 PDF 处理失败: {exc}", flush=True)
+
     # 删除/编辑单元后，旧 current_unit / completed_units / welcomed_units 等索引需要重新映射到新 units
     old_units = (ACTIVE_LESSON.get("metadata") or {}).get("units") or []
     old_progress = load_progress(lesson_folder)
@@ -3696,6 +4798,15 @@ def api_apply_lesson():
     except Exception as exc:
         print(f"[apply_lesson] 写入 syllabus.json 失败: {exc}", flush=True)
 
+    # V4：备课同时生成知识图谱（写入 lessons/{course}/knowledge_graph.json）
+    try:
+        kg_graph = generate_knowledge_graph(plan_to_save)
+        if kg_graph.get("nodes"):
+            kg_save_graph(lesson_folder, kg_graph)
+            print(f"[apply_lesson] 知识图谱已生成: {len(kg_graph['nodes'])} 节点 / {len(kg_graph['edges'])} 边", flush=True)
+    except Exception as exc:
+        print(f"[apply_lesson] 生成知识图谱失败: {exc}", flush=True)
+
     # 写入进度文件
     save_progress(lesson_folder, initial_progress)
 
@@ -3703,6 +4814,7 @@ def api_apply_lesson():
     ACTIVE_LESSON["preview_plan"] = None
     ACTIVE_LESSON["preview_topic"] = None
     ACTIVE_LESSON["preview_doc_markdown"] = None
+    ACTIVE_LESSON["preview_pdf_files"] = None
     ACTIVE_LESSON["preview_assistant_name"] = None
     ACTIVE_LESSON["preview_personality_prompt"] = None
     ACTIVE_LESSON["preview_tts_voice"] = None
@@ -3764,6 +4876,22 @@ def _merge_regen_plan(edited_plan: dict, ai_plan: dict) -> dict:
             if au.get(f) and not u.get(f):
                 u[f] = au[f]
     return merged
+
+
+def _regen_exam_suffix() -> str:
+    """重新备课时注入标准试卷（若当前课程已上传）：教案讲解必须覆盖试卷知识点。"""
+    try:
+        paper = load_exam_paper(ACTIVE_LESSON.get("folder"))
+        qs = paper.get("questions") or []
+        if not qs:
+            return ""
+        _type_cn = {"single": "单选", "multiple": "多选", "boolean": "判断", "fill": "填空", "essay": "简答"}
+        lines = ["\n6. 课程存在一份期末标准试卷（课程结束时要以此卷测验），整个教案的讲解、示例、练习都要覆盖这些题目考察的知识点，并在全局 key_points 与各单元内容中显式体现。试卷如下："]
+        for i, q in enumerate(qs):
+            lines.append(f"{i + 1}. [{_type_cn.get(str(q.get('type')), '题')}] {str(q.get('question') or '')}（标准答案：{str(q.get('answer') or '')}）")
+        return "\n".join(lines)
+    except Exception:
+        return ""
 
 
 @app.route("/api/regenerate_lesson", methods=["POST"])
@@ -3857,6 +4985,7 @@ def api_regenerate_lesson():
                     "4. 每个 unit 的 modules 3-6 个，每个含 concept/example/anchor/interaction/action；"
                     "key_points 至少 3 个；source_files 尽量给真实链接（找不到真实链接不要编造）。\n"
                     "5. 全局 key_points 至少 4 个；resources 至少 3 个高质量链接。"
+                    + _regen_exam_suffix()
                 ),
             },
             {
@@ -4053,6 +5182,287 @@ def _judge_fill_answer_semantically(student_ans: str, expected: str, question: s
             return True
 
     return False
+
+
+# ==================== 标准试卷：上传 / 解析 / 读取 ====================
+
+_EXAM_PAPER_FORMAT_HINT = (
+    "推荐格式（题目与标准答案一起）：\n"
+    "1. Python 中 print() 的作用是？\n"
+    "A. 打印输出  B. 定义变量\n"
+    "答案：A\n\n"
+    "2.（多选）以下哪些是合法标识符？\n"
+    "A. _abc  B. 1abc  C. x_y\n"
+    "答案：A,C\n\n"
+    "【判断题】3. 元组可以修改。\n"
+    "答案：错\n\n"
+    "【简答题】4. 简述列表与元组的区别。\n"
+    "答案：列表可变，元组不可变。\n\n"
+    "也支持 JSON：[\"question\":\"...\",\"answer\":\"...\",\"type\":\"single|multiple|boolean|fill|essay\",\"options\":[...]]"
+)
+
+_EXAM_QUESTION_TYPE_HINTS = {
+    "单选": "single", "选择题": "single",
+    "多选": "multiple",
+    "判断": "boolean", "判断题": "boolean",
+    "填空": "fill", "填空题": "fill",
+    "简答": "essay", "问答": "essay", "简答题": "essay", "论述": "essay",
+    "名词解释": "essay", "计算": "essay", "解答": "essay",
+}
+
+
+def _exam_type_from_label(label: str) -> Optional[str]:
+    if not label:
+        return None
+    for k, v in _EXAM_QUESTION_TYPE_HINTS.items():
+        if k in label:
+            return v
+    return None
+
+
+def _finalize_exam_question(q: Dict[str, Any]) -> None:
+    """收尾归一化：推断题型（多选/判断/简答/填空）。"""
+    q["question"] = (q.get("question") or "").strip()
+    q["answer"] = (q.get("answer") or "").strip()
+    q["explanation"] = (q.get("explanation") or "").strip()
+    q["options"] = [o for o in q.get("options", []) if (o.get("text") or "").strip() or (o.get("label") or "").strip()]
+    if not q.get("type"):
+        q["type"] = "single"
+    ans = q["answer"].upper()
+    if q["type"] == "single" and re.match(r"^[A-H](?:\s*[,，、;；]\s*[A-H])+$", ans):
+        q["type"] = "multiple"
+    if q["type"] == "single" and not q["options"] and re.match(r"^[对错正确错误√×TtFf]$", ans):
+        q["type"] = "boolean"
+    if q["type"] == "boolean" and not q["options"]:
+        # 判断题补默认"对/错"选项（答案保持中文语义，供批改比对）
+        q["options"] = [{"label": "A", "text": "对"}, {"label": "B", "text": "错"}]
+    if q["type"] == "single" and not q["options"] and len(q["answer"]) >= 8:
+        q["type"] = "essay"
+    if not q["options"] and not q["answer"]:
+        q["type"] = "fill"
+
+
+def _exam_question_usable(q: Dict[str, Any]) -> bool:
+    return bool((q.get("question") or "").strip()) and bool((q.get("answer") or "").strip())
+
+
+def parse_exam_paper_text(text: str) -> List[Dict[str, Any]]:
+    """从试卷文本解析题目列表（题干/选项/答案/解析）。
+
+    支持常见结构：
+      - 1. 题干 / A. 选项 / 答案：X / 解析：...
+      - 【单选题】【多选题】【判断题】【填空题】【简答题】题号 题干
+      - JSON 数组或 {"questions": [...]}（自动识别）
+    """
+    if not text or not text.strip():
+        return []
+    stripped = text.strip()
+    if stripped.startswith("[") or stripped.startswith("{"):
+        try:
+            return _normalize_exam_paper_json(json.loads(stripped))
+        except Exception:
+            pass  # 非 JSON，继续文本解析
+
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    question_re = re.compile(r"^(?:第\s*)?(\d+)\s*[.、)）:：]\s*(.*)$")
+    option_re = re.compile(r"^([A-H])\s*[.、)）]\s*(.*)$")
+    combined_type_re = re.compile(r"^[【\[]\s*([^】\]]+)[】\]]\s*(?:第\s*)?(\d+)\s*[.、)）:：]\s*(.*)$")
+    answer_re = re.compile(r"^(?:参考|标准)?答案\s*[:：]\s*(.*)$")
+    explanation_re = re.compile(r"^解析\s*[:：]\s*(.*)$")
+
+    questions: List[Dict[str, Any]] = []
+    cur: Optional[Dict[str, Any]] = None
+    pending_type: Optional[str] = None
+
+    def _start_question(stem: str, qtype: Optional[str] = None) -> Dict[str, Any]:
+        nonlocal cur
+        if cur is not None:
+            _finalize_exam_question(cur)
+            if _exam_question_usable(cur):
+                questions.append(cur)
+        cur = {
+            "type": qtype or pending_type or "single",
+            "question": stem.strip(),
+            "options": [],
+            "answer": "",
+            "explanation": "",
+        }
+
+    for ln in lines:
+        # 题型标记 + 题号同行："【多选题】2. 题干"
+        m_comb = combined_type_re.match(ln)
+        if m_comb:
+            _start_question(m_comb.group(3), _exam_type_from_label(m_comb.group(1)) or pending_type)
+            pending_type = None
+            continue
+        # 题型标记整行：【单选题】 / 【多选题】
+        m_type = re.match(r"^[【\[]\s*([^】\]]+)[】\]]\s*$", ln)
+        if m_type:
+            t = _exam_type_from_label(m_type.group(1))
+            if t:
+                pending_type = t
+            continue
+
+        m_ans = answer_re.match(ln)
+        if m_ans:
+            if cur is not None:
+                cur["answer"] = (m_ans.group(1) or "").strip()
+            continue
+        m_exp = explanation_re.match(ln)
+        if m_exp:
+            if cur is not None:
+                cur["explanation"] = (m_exp.group(1) or "").strip()
+            continue
+
+        m_opt = option_re.match(ln)
+        if m_opt:
+            if cur is None:
+                _start_question("")
+            # 支持一行多选项："A. xx B. yy C. zz"
+            opts = []
+            matches = list(re.finditer(r"([A-H])\s*[.、)）]\s*", ln))
+            for i, mo in enumerate(matches):
+                start = mo.end()
+                end = matches[i + 1].start() if i + 1 < len(matches) else len(ln)
+                opts.append({"label": mo.group(1), "text": ln[start:end].strip()})
+            cur["options"].extend(opts)
+            continue
+
+        m_q = question_re.match(ln)
+        if m_q:
+            _start_question(m_q.group(2))
+            pending_type = None
+            continue
+
+        # 普通行：续行归属（题干换行 / 选项文本换行）
+        if cur is not None:
+            if cur["options"] and len(ln) < 60:
+                cur["options"][-1]["text"] += ln
+            else:
+                cur["question"] = (cur["question"] + " " if cur["question"] else "") + ln
+
+    if cur is not None:
+        _finalize_exam_question(cur)
+        if _exam_question_usable(cur):
+            questions.append(cur)
+    return questions
+
+
+def _normalize_exam_paper_json(raw: Any) -> List[Dict[str, Any]]:
+    """JSON 试卷归一化：支持数组或 {questions:[...]}，中英文字段兼容。"""
+    items = raw if isinstance(raw, list) else (raw or {}).get("questions") or []
+    out: List[Dict[str, Any]] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        t_raw = str(it.get("type") or it.get("question_type") or "single").strip()
+        q = {
+            "type": _map_exam_type(t_raw),
+            "question": str(it.get("question") or it.get("题干") or "").strip(),
+            "answer": str(it.get("answer") or it.get("标准答案") or it.get("答案") or "").strip(),
+            "explanation": str(it.get("explanation") or it.get("解析") or "").strip(),
+            "options": [],
+        }
+        opts = it.get("options") or it.get("选项")
+        if isinstance(opts, list):
+            for o in opts:
+                if isinstance(o, dict):
+                    q["options"].append({"label": str(o.get("label") or o.get("key") or ""), "text": str(o.get("text") or o.get("value") or "")})
+                else:
+                    q["options"].append({"label": "", "text": str(o)})
+        elif isinstance(opts, dict):
+            for k, v in opts.items():
+                q["options"].append({"label": k, "text": str(v)})
+        _finalize_exam_question(q)
+        if _exam_question_usable(q):
+            out.append(q)
+    return out
+
+
+def _map_exam_type(t: str) -> str:
+    t = (t or "").strip().lower()
+    if t in ("single", "单选", "单选题", "choice", "选择题"):
+        return "single"
+    if t in ("multiple", "多选", "多选题"):
+        return "multiple"
+    if t in ("boolean", "bool", "判断", "判断题", "true/false"):
+        return "boolean"
+    if t in ("fill", "填空", "填空题", "blank"):
+        return "fill"
+    if t in ("essay", "简答", "简答题", "问答", "论述", "主观", "subjective"):
+        return "essay"
+    return "single"
+
+
+def load_exam_paper(lesson_folder: str | None) -> Dict[str, Any]:
+    """读取课程的标准试卷（exam/exam_paper.json）。"""
+    if not lesson_folder:
+        return {}
+    try:
+        p = ensure_lesson_dir(lesson_folder) / "exam" / "exam_paper.json"
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[exam_paper] 读取失败: {exc}", flush=True)
+    return {}
+
+
+@app.route("/api/lesson/<path:lesson_folder>/exam-paper", methods=["GET", "POST"])
+def api_exam_paper(lesson_folder: str):
+    """标准试卷管理：GET 查看 / POST 上传解析。"""
+    if request.method == "GET":
+        paper = load_exam_paper(lesson_folder)
+        return jsonify({"ok": True, "count": len(paper.get("questions") or []), "source": paper.get("source", ""), "questions": paper.get("questions", [])})
+
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify({"ok": False, "message": "未收到文件"}), 400
+    safe = secure_filename(f.filename) or "exam_paper"
+    ext = Path(safe).suffix.lower()
+    data = f.read(10 * 1024 * 1024 + 1)
+    if len(data) > 10 * 1024 * 1024:
+        return jsonify({"ok": False, "message": "文件过大，最大支持 10MB"}), 400
+    text = ""
+    if ext in (".txt", ".md", ".json"):
+        text = data.decode("utf-8", errors="replace")
+    elif ext in (".pdf", ".docx", ".doc", ".pptx", ".ppt"):
+        tmp = Path(tempfile.gettempdir()) / f"exam_{int(time.time() * 1000)}{ext}"
+        try:
+            tmp.write_bytes(data)
+            text = convert_document_to_markdown(tmp)
+        except Exception as exc:
+            return jsonify({"ok": False, "message": f"文档解析失败: {exc}"}), 400
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+    else:
+        return jsonify({"ok": False, "message": f"不支持的文件类型 {ext or '未知'}，支持 .txt/.md/.json/.pdf/.docx/.ppt"}), 400
+    if not text.strip():
+        return jsonify({"ok": False, "message": "未能从文件中提取文本内容"}), 400
+    try:
+        questions = parse_exam_paper_text(text)
+    except Exception as exc:
+        return jsonify({"ok": False, "message": f"解析失败: {exc}"}), 400
+    if not questions:
+        return jsonify({
+            "ok": False,
+            "message": "未识别出题目。请确保每题包含题干与'答案：'行（参考下方格式），或使用 JSON 格式。",
+            "format_hint": _EXAM_PAPER_FORMAT_HINT,
+        }), 400
+    exam_dir = ensure_lesson_dir(lesson_folder) / "exam"
+    exam_dir.mkdir(parents=True, exist_ok=True)
+    (exam_dir / "exam_paper.json").write_text(
+        json.dumps({"source": safe, "count": len(questions), "questions": questions}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    try:
+        (exam_dir / safe).write_bytes(data)
+    except Exception:
+        pass
+    print(f"[exam_paper] 课程 {lesson_folder} 上传试卷 {safe}: {len(questions)} 题", flush=True)
+    return jsonify({"ok": True, "count": len(questions), "questions": questions, "format_hint": _EXAM_PAPER_FORMAT_HINT})
 
 
 def _char_similarity(a: str, b: str) -> float:
@@ -4874,6 +6284,11 @@ _TERM_LANG_MAP = {
     "bash": "shell", "sh": "shell", "shell": "shell", "powershell": "powershell",
     "js": "javascript", "node": "javascript", "javascript": "javascript",
     "py": "python", "python": "python",
+    "rb": "ruby", "ruby": "ruby",
+    "pl": "perl", "perl": "perl",
+    "php": "php",
+    "lua": "lua",
+    "r": "r", "rscript": "r",
 }
 
 
@@ -5156,6 +6571,45 @@ def api_chat():
 
     ACTIVE_LESSON["folder"] = lesson_folder
 
+    # V4：多 Agent 意图分发（关键词路由；Tutor / 无法识别时回退主聊天流程）
+    try:
+        from agents import route_message
+        _routed = route_message(message, lesson_folder=lesson_folder, learner_id="001")
+    except Exception as _v4_exc:
+        print(f"[v4] Agent 路由异常，回退主流程: {_v4_exc}", flush=True)
+        _routed = None
+
+    if _routed and not _routed.get("fallback_to_chat") and _routed.get("reply"):
+        _agent_reply = str(_routed["reply"]).strip()
+        _agent_name = str(_routed.get("agent") or "agent")
+
+        def _agent_stream(_reply: str, _name: str):
+            _segs = [s.strip() for s in re.split(r"\n\s*\n", _reply) if s.strip()] or [_reply]
+            for _s_idx, _seg in enumerate(_segs):
+                yield f"data: {json.dumps({'content': _seg, 'done': False, 'segment': _s_idx})}\n\n"
+            _audio = local_tts_audio(_tts_safe_text(_reply)[:500]) if _reply else None
+            _done: Dict[str, Any] = {
+                "content": _reply,
+                "done": True,
+                "audio_url": _audio,
+                "segment_count": len(_segs),
+                "v4_agent": _name,
+            }
+            yield f"data: {json.dumps(_done)}\n\n"
+
+        # 存档 Agent 对话（与主流程格式一致）
+        try:
+            _conv = load_conversation(lesson_folder)
+            _conv.append({"role": "user", "content": message, "timestamp": now_iso()})
+            _conv.append({"role": "assistant", "content": _agent_reply, "timestamp": now_iso()})
+            save_conversation(lesson_folder, _conv)
+            ACTIVE_LESSON["conversation"] = _conv
+        except Exception as _v4_conv_exc:
+            print(f"[v4] Agent 对话存档失败: {_v4_conv_exc}", flush=True)
+
+        print(f"[v4] Agent 接管: {_agent_name}（fallback_to_chat=False）", flush=True)
+        return Response(stream_with_context(_agent_stream(_agent_reply, _agent_name)), mimetype="text/event-stream")
+
     def generate():
         # 本地 Ollama 与云端都失败时的兜底：改为明确的故障提示，
         # 不再用"示例回复"占位文本（避免误导用户以为是模型思考/示例）。
@@ -5216,30 +6670,42 @@ def api_chat():
         #   ollama → 只用本地
         #   cloud / openai_compatible（旧配置兼容）→ 只用云端
         #   force_cloud（斜杠指令强制）→ 云端优先，失败回退本地
+        #
+        # 真流式：模型边生成边把每个 token 作为 preview 帧推给前端（首字 1~3s 内可见），
+        # 同时缓冲全文；生成完成后继续走下方原有解析/分段/工具调用管线（行为不变）。
         chat_cfg = load_config()
         chat_provider = (chat_cfg.get("chat_provider") or "auto").strip().lower()
         if force_cloud:
-            generated_answer = (
-                cloud_llm_reply(effective_message, lesson_folder, history=history, long_mode=long_mode)
-                or local_ollama_reply(effective_message, lesson_folder, history=history, long_mode=long_mode)
-                or fallback_answer
-            )
+            provider_chain = ("cloud", "ollama")
         elif chat_provider in ("cloud", "openai_compatible"):
-            generated_answer = (
-                cloud_llm_reply(effective_message, lesson_folder, history=history, long_mode=long_mode)
-                or fallback_answer
-            )
+            provider_chain = ("cloud",)
         elif chat_provider == "ollama":
-            generated_answer = (
-                local_ollama_reply(effective_message, lesson_folder, history=history, long_mode=long_mode)
-                or fallback_answer
-            )
+            provider_chain = ("ollama",)
         else:  # auto
-            generated_answer = (
-                local_ollama_reply(effective_message, lesson_folder, history=history, long_mode=long_mode)
-                or cloud_llm_reply(effective_message, lesson_folder, history=history, long_mode=long_mode)
-                or fallback_answer
-            )
+            provider_chain = ("ollama", "cloud")
+
+        buffered_pieces: List[str] = []
+        for _provider in provider_chain:
+            if _provider == "cloud":
+                _stream_iter = cloud_llm_reply_stream(
+                    effective_message, lesson_folder, history=history, long_mode=long_mode
+                )
+            else:
+                _stream_iter = local_ollama_reply_stream(
+                    effective_message, lesson_folder, history=history, long_mode=long_mode
+                )
+            got_piece = False
+            for _piece in _stream_iter:
+                got_piece = True
+                buffered_pieces.append(_piece)
+                yield f"data: {json.dumps({'preview': _piece, 'done': False})}\n\n"
+            if got_piece:
+                break  # 主用通道已有产出，不再尝试备用通道
+        # 与旧的 local_ollama_reply 行为一致：剥离思考残留/独白后作为最终全文
+        generated_answer = (
+            _strip_thinking_lead(_strip_thinking_residue("".join(buffered_pieces).strip()))
+            or fallback_answer
+        )
 
         # 解析工具调用标记：支持一次回复输出多个工具（黑板+终端+图片可同时出现）。
         # 此前 extract_tool_call 只取第一个，模型同时输出 show_board+show_terminal 时
@@ -5447,8 +6913,8 @@ def api_chat():
                 display_content = strip_emotion_tags(accumulator)
                 payload = {"content": display_content, "done": False, "segment": seg_idx}
                 yield f"data: {json.dumps(payload)}\n\n"
-                # 流式节流：原 30ms/帧 × 88 帧 = 2.6s 纯睡眠，降低到 8ms 体感无差、首字延迟大幅减少
-                time.sleep(0.008)
+                # 去掉后端人为节流：前端已有 MIN_RENDER_INTERVAL=50ms DOM 节流，
+                # 后端不再 sleep（原 8ms/帧，500 字 ≈ 4s 纯延迟）
 
         # 存档时去掉分段标记（默认 \c，配置可改；兼容单/多反斜杠 + c 的旧历史），
         # 并剥离所有情绪标签（内嵌多标签时 extract_emotion_call 只清掉第一个）
@@ -5473,6 +6939,27 @@ def api_chat():
         save_progress(lesson_folder, progress)
         ACTIVE_LESSON["conversation"] = conversation
         ACTIVE_LESSON["progress"] = load_progress(lesson_folder)
+
+        # 单元内画像节流蒸馏：每满 5 轮师生互动且距上次蒸馏 >10 分钟，后台异步更新画像（可迭代）
+        try:
+            _cur_unit = int(progress.get("current_unit", 0) or 0)
+            _profile_data = _load_student_profile(lesson_folder)
+            _unit_info = (_profile_data.get("units") or {}).get(str(_cur_unit)) or {}
+            _last_ts = str(_unit_info.get("distilled_at") or "")
+            _too_recent = False
+            if _last_ts:
+                try:
+                    _too_recent = (datetime.now() - datetime.fromisoformat(_last_ts)).total_seconds() < 600
+                except Exception:
+                    _too_recent = False
+            if not _too_recent and len(conversation) >= 10:
+                threading.Thread(
+                    target=_distill_student_profile,
+                    args=(lesson_folder, _cur_unit, conversation),
+                    daemon=True,
+                ).start()
+        except Exception as _exc:
+            print(f"[profile] 对话后蒸馏触发失败: {_exc}", flush=True)
 
         done_payload: Dict[str, Any] = {"content": clean_answer_stored, "done": True, "audio_url": audio_url, "segment_count": len(segments)}
         if live2d_action:
@@ -5501,6 +6988,20 @@ def api_progress():
     metadata = load_lesson_metadata(lesson_folder)
     units = metadata.get("units") or []
     progress = load_progress(lesson_folder)
+    score_history = progress.get("score_history") or []
+    if not isinstance(score_history, list):
+        score_history = []
+    wrong_book = progress.get("wrong_book") or []
+    if not isinstance(wrong_book, list):
+        wrong_book = []
+    # 学习统计：平均分 / 总测验次数 / 最近一次 / 错题总数 / 高频薄弱知识点
+    avg_score = round(sum(r.get("score", 0) for r in score_history) / len(score_history)) if score_history else 0
+    wrong_freq: Dict[str, int] = {}
+    for w in wrong_book:
+        _q = str(w.get("question") or "")[:24]
+        if _q:
+            wrong_freq[_q] = wrong_freq.get(_q, 0) + int(w.get("wrong_count") or 1)
+    weak_topics = [q for q, _ in sorted(wrong_freq.items(), key=lambda kv: -kv[1])[:5]]
     return jsonify({
         "lesson_folder": lesson_folder,
         "current_unit": int(progress.get("current_unit", 0) or 0),
@@ -5508,6 +7009,20 @@ def api_progress():
         "total_units": len(units),
         "units": [{"title": u.get("title", f"第 {i + 1} 课"), "summary": u.get("summary", "")} for i, u in enumerate(units)],
         "has_units": bool(units),
+        "stats": {
+            "quiz_count": len(score_history),
+            "avg_score": avg_score,
+            "last_score": score_history[-1].get("score", 0) if score_history else 0,
+            "final_count": len(progress.get("final_scores") or []),
+            "final_latest": progress.get("final_latest") or {},
+            "score_history": score_history[-20:],
+            "wrong_book_count": len(wrong_book),
+            "wrong_book": wrong_book[-50:],
+            "weak_topics": weak_topics,
+            "code_attempts": int(progress.get("code_attempts", 0) or 0),
+            "started_at": progress.get("started_at", ""),
+            "last_access": progress.get("last_access", ""),
+        },
     })
 
 
@@ -5580,6 +7095,24 @@ def api_exam_generate():
 
     lesson_folder = ACTIVE_LESSON.get("folder")
     metadata = load_lesson_metadata(lesson_folder) if lesson_folder else {}
+
+    # 期末测验模式：直接使用已上传的标准试卷原题（提交时按标准答案批改）
+    mode = str(payload.get("mode") or "").strip().lower()
+    if mode == "final":
+        paper = load_exam_paper(lesson_folder)
+        questions = paper.get("questions") or []
+        if not questions:
+            return jsonify({"ok": False, "message": "尚未上传标准试卷，请先在测验面板上传试卷后再开始期末测验"}), 400
+        ACTIVE_LESSON["last_exam"] = questions  # 保留标准答案供 submit 批改
+        ACTIVE_LESSON["last_exam_mode"] = "final"
+        safe_questions = []
+        for q in questions:
+            safe = {"question": q.get("question", ""), "type": q.get("type", "single")}
+            if q.get("type") in ("single", "multiple", "boolean"):
+                safe["options"] = q.get("options", [])
+            safe_questions.append(safe)
+        return jsonify({"questions": safe_questions, "total": len(safe_questions), "mode": "final", "source": paper.get("source", "")})
+
     cfg = load_config()
     personality_prompt = (
         metadata.get("personality_prompt")
@@ -5695,6 +7228,7 @@ def api_exam_generate():
         questions = _normalize_quiz_questions(questions)
 
     ACTIVE_LESSON["last_exam"] = questions
+    ACTIVE_LESSON["last_exam_mode"] = "normal"
     # 不把 answer 暴露给前端，避免作弊；同时隐藏 fill 题的答案
     safe_questions = []
     for q in questions:
@@ -5709,6 +7243,9 @@ def api_exam_generate():
 def api_exam_submit():
     payload = request.get_json(silent=True) or {}
     answers = payload.get("answers", [])
+    # 兼容对象形式（前端以 {0:答案,1:答案} 提交）：转成有序列表
+    if isinstance(answers, dict):
+        answers = [answers.get(str(i), "") for i in range(len(answers))]
     # 始终使用服务端缓存的题目（含正确答案），不信任前端传入的 questions
     questions = ACTIVE_LESSON.get("last_exam") or payload.get("questions") or []
 
@@ -5723,6 +7260,12 @@ def api_exam_submit():
 
         if q_type == "fill":
             # 填空题：模型语义评判（非严格答案匹配）
+            if ans and _judge_fill_answer_semantically(ans, expected, q.get("question", "")):
+                correct += 1
+            else:
+                wrong_indices.append(idx)
+        elif q_type == "essay":
+            # 简答题：基于标准答案的语义/关键词评判（复用语义评判器）
             if ans and _judge_fill_answer_semantically(ans, expected, q.get("question", "")):
                 correct += 1
             else:
@@ -5747,9 +7290,69 @@ def api_exam_submit():
     if ACTIVE_LESSON.get("folder"):
         progress = load_progress(ACTIVE_LESSON["folder"])
         progress.setdefault("completed_quizzes", [])
-        progress["score_history"] = progress.get("score_history", []) + [{"score": score, "timestamp": now_iso(), "total": total, "correct": correct}]
-        progress["completed_quizzes"] = list(dict.fromkeys(progress["completed_quizzes"] + ["quiz_1"]))
+        record = {"score": score, "timestamp": now_iso(), "total": total, "correct": correct}
+        if ACTIVE_LESSON.get("last_exam_mode") == "final":
+            # 期末测验成绩单独沉淀（final_scores），供复盘与掌握度分析
+            progress["final_scores"] = progress.get("final_scores", []) + [record]
+            progress["final_latest"] = record
+        else:
+            progress["score_history"] = progress.get("score_history", []) + [record]
+            progress["completed_quizzes"] = list(dict.fromkeys(progress["completed_quizzes"] + ["quiz_1"]))
+
+        # 错题本沉淀：每题去重合并（同一题干多次答错，累加出错次数并保留最新答案/解析）
+        if wrong_indices:
+            wrong_book = progress.get("wrong_book") or []
+            if not isinstance(wrong_book, list):
+                wrong_book = []
+            _unit_idx = int(progress.get("current_unit", 0) or 0)
+            for idx in wrong_indices:
+                if 0 <= idx < len(questions):
+                    q = questions[idx]
+                    entry = {
+                        "question": q.get("question", ""),
+                        "type": q.get("type", "single"),
+                        "student_answer": answers[idx] if idx < len(answers) else "",
+                        "correct_answer": q.get("answer", ""),
+                        "explanation": q.get("explanation", ""),
+                        "unit": _unit_idx,
+                        "last_wrong_at": now_iso(),
+                    }
+                    hit = next((w for w in wrong_book if w.get("question") == entry["question"]), None)
+                    if hit:
+                        hit.update({k: v for k, v in entry.items() if k != "question"})
+                        hit["wrong_count"] = int(hit.get("wrong_count") or 0) + 1
+                    else:
+                        entry["wrong_count"] = 1
+                        entry["first_wrong_at"] = now_iso()
+                        wrong_book.append(entry)
+            progress["wrong_book"] = wrong_book[-200:]  # 只保留最近 200 条，避免无限膨胀
         save_progress(ACTIVE_LESSON["folder"], progress)
+
+        # V4 学习评估闭环：同步学生数字孪生（测验记录 + 知识点掌握度 + 错题 + 答题连击）
+        try:
+            from pedagogical_engine import record_answer_result as _ped_streak
+            from learner_model import add_assessment_record as _lm_assess
+            from learner_model import add_error_record as _lm_error
+            _learner_id = "001"
+            _unit_idx = int(progress.get("current_unit", 0) or 0)
+            _concept_id = f"KG{_unit_idx + 1:03d}"
+            _lm_assess(_learner_id, {
+                "score": score,
+                "concepts": [_concept_id],
+                "total": total,
+                "correct": correct,
+            })
+            for _idx in wrong_indices:
+                if 0 <= _idx < len(questions):
+                    _q = questions[_idx]
+                    _lm_error(
+                        _learner_id, _concept_id,
+                        f"{str(_q.get('question') or '')[:60]}（正确答案：{_q.get('answer') or ''}）",
+                    )
+            _ped_streak(_learner_id, correct == total, _concept_id)
+            print(f"[v4] 学生孪生已同步: learner={_learner_id} concept={_concept_id} score={score}", flush=True)
+        except Exception as _v4_exc:
+            print(f"[v4] 测验孪生同步失败: {_v4_exc}", flush=True)
 
     message = f"答对 {correct}/{total} 题" if total else "未生成题目"
     if score == 100:
@@ -5796,12 +7399,23 @@ def api_lesson_next_unit():
     progress = load_progress(folder)
     cur = int(progress.get("current_unit", 0) or 0)
     if cur < len(units) - 1:
+        # 单元结束时蒸馏当前单元的学生画像（后台线程，不阻塞进入下一单元）
+        try:
+            _conv_snapshot = load_conversation(folder)
+            threading.Thread(
+                target=_distill_student_profile,
+                args=(folder, cur, _conv_snapshot),
+                daemon=True,
+            ).start()
+        except Exception as _exc:
+            print(f"[profile] 单元切换触发蒸馏失败: {_exc}", flush=True)
         progress["current_unit"] = cur + 1
         progress.setdefault("completed_units", [])
         if cur not in progress["completed_units"]:
             progress["completed_units"].append(cur)
         save_progress(folder, progress)
-        # 清空对话历史，实现单元间对话隔离
+        # 归档当前单元对话（供历史回顾/导出），再清空实现单元间对话隔离
+        _archive_conversation(folder, cur, load_conversation(folder))
         save_conversation(folder, [])
         ACTIVE_LESSON["conversation"] = []
         return jsonify({
@@ -5814,6 +7428,100 @@ def api_lesson_next_unit():
         return jsonify({"success": False, "message": "已是最后一课"})
     else:
         return jsonify({"success": False, "message": "无效的进度"})
+
+
+@app.route("/api/profile/distill", methods=["POST"])
+def api_profile_distill():
+    """手动触发当前单元学生画像蒸馏（同步等待结果，供前端按钮调用）。"""
+    payload = request.get_json(silent=True) or {}
+    folder = payload.get("folder") or ACTIVE_LESSON.get("folder")
+    if not folder:
+        return jsonify({"error": "未选择课程"}), 400
+    progress = load_progress(folder)
+    unit_index = int(payload.get("unit_index", progress.get("current_unit", 0) or 0))
+    try:
+        conv = load_conversation(folder)
+    except Exception:
+        conv = []
+    ok = _distill_student_profile(folder, unit_index, conv)
+    data = _load_student_profile(folder)
+    return jsonify({"success": ok, "distilled": ok, "profile": data.get("merged") or {}, "units": data.get("units") or {}})
+
+
+@app.route("/api/profile", methods=["GET"])
+def api_profile_get():
+    """查看当前课程已蒸馏的学生画像（按单元 + 合并画像）。"""
+    folder = request.args.get("folder") or ACTIVE_LESSON.get("folder")
+    if not folder:
+        return jsonify({"error": "未选择课程"}), 400
+    data = _load_student_profile(folder)
+    return jsonify({"profile": data.get("merged") or {}, "units": data.get("units") or {}, "updated_at": data.get("updated_at") or ""})
+
+
+@app.route("/api/lesson/<path:lesson_folder>/history", methods=["GET"])
+def api_lesson_history(lesson_folder: str):
+    """历史对话回顾：返回全部已归档单元对话 + 当前单元对话。"""
+    archived = _load_archived_conversations(lesson_folder)
+    current = load_conversation(lesson_folder)
+    metadata = load_lesson_metadata(lesson_folder)
+    units = metadata.get("units") or []
+    unit_titles = {}
+    for i, u in enumerate(units):
+        unit_titles[str(i)] = str(u.get("title") or f"第 {i + 1} 课")
+    units_out = []
+    for key in sorted(archived.keys(), key=lambda k: int(k.replace("unit_", "") or 0)):
+        idx = key.replace("unit_", "")
+        units_out.append({
+            "unit_index": int(idx or 0),
+            "title": unit_titles.get(idx, f"第 {int(idx or 0) + 1} 课"),
+            "conversation": archived[key],
+            "archived": True,
+        })
+    if current:
+        cur = int(load_progress(lesson_folder).get("current_unit", 0) or 0)
+        units_out.append({
+            "unit_index": cur,
+            "title": unit_titles.get(str(cur), f"第 {cur + 1} 课"),
+            "conversation": current,
+            "archived": False,
+        })
+    return jsonify({"units": units_out, "count": len(units_out)})
+
+
+@app.route("/api/lesson/<path:lesson_folder>/history/export", methods=["GET"])
+def api_lesson_history_export(lesson_folder: str):
+    """导出全部对话为 Markdown（含历史归档单元 + 当前单元）。"""
+    archived = _load_archived_conversations(lesson_folder)
+    current = load_conversation(lesson_folder)
+    metadata = load_lesson_metadata(lesson_folder)
+    topic = (metadata.get("topic") or lesson_folder).strip()
+    units = metadata.get("units") or []
+
+    blocks: List[str] = [f"# 《{topic}》对话记录", f"\n> 导出时间：{now_iso()}\n"]
+
+    def _unit_title(idx: int) -> str:
+        if 0 <= idx < len(units):
+            return str(units[idx].get("title") or f"第 {idx + 1} 课")
+        return f"第 {idx + 1} 课"
+
+    for key in sorted(archived.keys(), key=lambda k: int(k.replace("unit_", "") or 0)):
+        idx = int(key.replace("unit_", "") or 0)
+        md = _conversation_to_markdown(archived[key])
+        if md:
+            blocks.append(f"\n---\n\n## 📚 单元回顾：{_unit_title(idx)}\n\n{md}")
+    if current:
+        cur = int(load_progress(lesson_folder).get("current_unit", 0) or 0)
+        md = _conversation_to_markdown(current)
+        if md:
+            blocks.append(f"\n---\n\n## 📖 当前单元：{_unit_title(cur)}\n\n{md}")
+
+    content = "\n".join(blocks)
+    fname = f"对话记录_{lesson_folder}.md"
+    return Response(
+        content,
+        mimetype="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{urllib.parse.quote(fname)}"},
+    )
 
 
 @app.route("/api/unit/welcome", methods=["POST"])
@@ -5857,19 +7565,31 @@ def api_unit_welcome():
     )
 
     def generate():
+        # 真流式：与 /api/chat 一致，按 chat_provider 决定 provider_chain，
+        # 模型边生成边把每个 token 作为 preview 帧推给前端（首字可见），同时缓冲全文。
         chat_cfg = load_config()
         chat_provider = (chat_cfg.get("chat_provider") or "auto").strip().lower()
         if chat_provider in ("cloud", "openai_compatible"):
-            answer = cloud_llm_reply(user_msg, lesson_folder, history=[])
+            provider_chain = ("cloud",)
         elif chat_provider == "ollama":
-            answer = local_ollama_reply(user_msg, lesson_folder, history=[])
+            provider_chain = ("ollama",)
         else:  # auto：本地优先，失败回退云端
-            answer = (
-                local_ollama_reply(user_msg, lesson_folder, history=[])
-                or cloud_llm_reply(user_msg, lesson_folder, history=[])
-            )
-        answer = (answer or "").strip()
-        answer = _strip_thinking_lead(_strip_thinking_residue(answer))
+            provider_chain = ("ollama", "cloud")
+
+        buffered_pieces: List[str] = []
+        for _provider in provider_chain:
+            if _provider == "cloud":
+                _stream_iter = cloud_llm_reply_stream(user_msg, lesson_folder, history=[])
+            else:
+                _stream_iter = local_ollama_reply_stream(user_msg, lesson_folder, history=[])
+            got_piece = False
+            for _piece in _stream_iter:
+                got_piece = True
+                buffered_pieces.append(_piece)
+                yield f"data: {json.dumps({'preview': _piece, 'done': False})}\n\n"
+            if got_piece:
+                break  # 主用通道已有产出，不再尝试备用通道
+        answer = _strip_thinking_lead(_strip_thinking_residue("".join(buffered_pieces).strip()))
         # 清除分段符 \c（welcome 链路按空行分段，不消费 \c；先保护 LaTeX 再剥离，
         # 避免 \c 泄漏到气泡和对话历史存档）
         _CLEAN_HOLD.clear()
@@ -5884,7 +7604,7 @@ def api_unit_welcome():
         segments = [s.strip() for s in segments if s.strip()] or [answer]
         for seg_idx, segment in enumerate(segments):
             yield f"data: {json.dumps({'content': segment, 'done': False, 'segment': seg_idx})}\n\n"
-            time.sleep(0.25)
+            time.sleep(0.05)   # 原 250ms/段，整体偏慢，降到 50ms 仍保留逐段节奏
 
         # 写入对话历史（作为该单元第一条消息）并标记已欢迎
         conversation = load_conversation(lesson_folder)
@@ -5966,7 +7686,125 @@ def api_switch_lesson():
     )
 
 
+# ---------------------------------------------------------------------------
+# V4 自适应教学系统 API（/api/v4/* 前缀，避免与现有路由冲突）
+# ---------------------------------------------------------------------------
+def _v4_learner_id() -> str:
+    """单机应用默认学生 001；可通过 learner_id 参数（query / json）覆盖。"""
+    lid = request.args.get("learner_id", "")
+    if request.is_json:
+        payload = request.get_json(silent=True) or {}
+        lid = str(payload.get("learner_id") or lid)
+    return (str(lid).strip() or "001")
+
+
+@app.route("/api/v4/learner/<path:learner_id>/progress", methods=["GET"])
+def api_v4_learner_progress(learner_id: str):
+    """获取学生学习进度曲线（测验分数序列 + 知识点平均掌握度）。"""
+    try:
+        curve = eval_progress_curve(learner_id)
+        return jsonify(curve)
+    except Exception as exc:
+        return jsonify({"error": f"进度曲线获取失败: {exc}"}), 500
+
+
+@app.route("/api/v4/learner/<path:learner_id>/gain_report", methods=["GET"])
+def api_v4_learner_gain_report(learner_id: str):
+    """获取学习增益报告（前测/后测/增益/效率/ROI）。"""
+    try:
+        time_spent = request.args.get("time_spent")
+        effort = request.args.get("effort", 1.0)
+        report = eval_gain_report(
+            learner_id,
+            time_spent_hours=float(time_spent) if time_spent else None,
+            effort=float(effort or 1.0),
+        )
+        return jsonify(report)
+    except Exception as exc:
+        return jsonify({"error": f"增益报告生成失败: {exc}"}), 500
+
+
+@app.route("/api/v4/learner/<path:learner_id>/insights", methods=["GET"])
+def api_v4_learner_insights(learner_id: str):
+    """获取 AI 生成的学习洞察。"""
+    try:
+        return jsonify(eval_insights(learner_id))
+    except Exception as exc:
+        return jsonify({"error": f"学习洞察生成失败: {exc}"}), 500
+
+
+@app.route("/api/v4/learner/<path:learner_id>/diagnosis", methods=["GET"])
+def api_v4_learner_diagnosis(learner_id: str):
+    """获取诊断报告（薄弱点 / 错题汇总 / 建议）。"""
+    try:
+        lesson_folder = request.args.get("lesson_folder") or ACTIVE_LESSON.get("folder")
+        return jsonify(ped_diagnosis(learner_id, lesson_folder))
+    except Exception as exc:
+        return jsonify({"error": f"诊断失败: {exc}"}), 500
+
+
+@app.route("/api/v4/learner/<path:learner_id>/record_answer", methods=["POST"])
+def api_v4_learner_record_answer(learner_id: str):
+    """记录一次答题结果（更新连击 + 掌握度），供前端对话/测验闭环调用。"""
+    payload = request.get_json(silent=True) or {}
+    is_correct = bool(payload.get("is_correct", False))
+    concept_id = (payload.get("concept_id") or "").strip()
+    try:
+        if concept_id:
+            lm_update_knowledge_state(learner_id, concept_id, 1.0 if is_correct else 0.0)
+        streak = ped_record_answer(learner_id, is_correct, concept_id or None)
+        return jsonify({"status": "ok", "streak": streak})
+    except Exception as exc:
+        return jsonify({"error": f"答题记录失败: {exc}"}), 500
+
+
+@app.route("/api/v4/dashboard", methods=["GET"])
+def api_v4_dashboard():
+    """学习仪表盘聚合数据：知识掌握度 + 推荐下一步 + 诊断 + 进度曲线 + 错题本。"""
+    lesson_folder = request.args.get("lesson_folder") or ACTIVE_LESSON.get("folder")
+    learner_id = _v4_learner_id()
+    try:
+        from knowledge_graph import load_knowledge_graph as _kg_load
+        graph = _kg_load(lesson_folder)
+        learner = lm_get_learner(learner_id, create=True)
+        ks = learner.get("knowledge_state", {}) or {}
+        nodes = []
+        for n in graph.get("nodes", []):
+            cid = n.get("id")
+            nodes.append({**n, "mastery": round(float(ks.get(cid, 0) or 0), 4)})
+        # 无图谱时回退：直接展示学生档案中已记录的知识点掌握度
+        if not nodes and ks:
+            nodes = [{"id": cid, "name": cid, "mastery": round(float(v or 0), 4)}
+                     for cid, v in ks.items() if (v or 0) > 0]
+        plan = ped_plan_next(learner_id, lesson_folder)
+        diagnosis = ped_diagnosis(learner_id, lesson_folder)
+        curve = eval_progress_curve(learner_id)
+        return jsonify({
+            "learner_id": learner_id,
+            "lesson_folder": lesson_folder,
+            "knowledge_state": nodes,
+            "recommended": plan.get("recommended"),
+            "recommend_reason": plan.get("reason"),
+            "diagnosis": diagnosis,
+            "progress_curve": curve,
+            "behavior": learner.get("learning_behavior", {}),
+            "error_memory": (learner.get("error_memory") or [])[-50:],
+            "has_kg": bool(graph.get("nodes")),
+        })
+    except Exception as exc:
+        return jsonify({"error": f"仪表盘数据获取失败: {exc}"}), 500
+
+
 if __name__ == "__main__":
+    # 启动时同步 OCR 总开关（config.json 的 ocr_enabled）
+    try:
+        set_ocr_enabled(bool(load_config().get("ocr_enabled", True)))
+    except Exception:
+        pass
     # use_reloader=False：Windows 下 debug 自动重载器不稳定，改代码时进程会悄悄退出，
     # 导致前端 "Failed to fetch"。改用显式重启：改完代码由开发侧重启服务。
-    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)
+    # debug=False：启用 GZip/静态缓存优化（werkzeug 的 debug 调试器会破坏 flask-compress 的压缩）。
+    # 如需开发期错误详情，可用环境变量开启：FLASK_DEBUG=1 python app.py
+    import os
+    _flask_debug = os.environ.get("FLASK_DEBUG", "0") == "1"
+    app.run(host="0.0.0.0", port=5000, debug=_flask_debug, use_reloader=False)

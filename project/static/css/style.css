@@ -735,14 +735,43 @@
             user-select: none;
         }
         #terminal-overlay.dragging .terminal-overlay-head { cursor: grabbing; }
-        #terminal-overlay .terminal-overlay-head .terminal-dot {
-            display: inline-block;
-            width: 9px; height: 9px;
+        /* 头部标题组：交通灯点 + 图标 + 标题 + REPL 徽标 */
+        #terminal-overlay .terminal-head-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 0;
+        }
+        #terminal-overlay .terminal-dots {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            margin-right: 2px;
+        }
+        #terminal-overlay .terminal-dot {
+            width: 10px; height: 10px;
             border-radius: 50%;
-            background: #5dca8a;
-            box-shadow: 0 0 6px #5dca8a;
-            margin-right: 6px;
+            display: inline-block;
             vertical-align: middle;
+            box-shadow: inset 0 0 2px rgba(0,0,0,0.35);
+        }
+        #terminal-overlay .terminal-dot.t-red    { background: #ff5f57; }
+        #terminal-overlay .terminal-dot.t-yellow { background: #febc2e; }
+        #terminal-overlay .terminal-dot.t-green  { background: #28c840; }
+        #terminal-overlay .terminal-icon {
+            font-size: 15px;
+            color: #7fb8e8;
+            line-height: 1;
+        }
+        #terminal-overlay .terminal-tag {
+            font-size: 11px;
+            letter-spacing: 0.04em;
+            padding: 2px 8px;
+            border-radius: 20px;
+            color: #9fd6b4;
+            background: rgba(40, 200, 64, 0.1);
+            border: 1px solid rgba(40, 200, 64, 0.28);
+            white-space: nowrap;
         }
         #terminal-overlay .terminal-close {
             width: 26px; height: 26px;
@@ -752,6 +781,7 @@
             color: var(--text-dim);
             cursor: pointer;
             font-size: 13px;
+            transition: background 0.18s ease, color 0.18s ease;
         }
         #terminal-overlay .terminal-close:hover {
             background: rgba(200,90,90,0.3);
@@ -764,9 +794,12 @@
             overflow-x: hidden;
             font-family: var(--font-mono);
             font-size: 13px;
-            line-height: 1.6;
+            line-height: 1.65;
             color: #c8e0f0;
-            background: rgba(0, 0, 0, 0.35);
+            background:
+                linear-gradient(180deg, rgba(70, 110, 160, 0.08), rgba(0, 0, 0, 0) 90px),
+                repeating-linear-gradient(0deg, rgba(255,255,255,0.012) 0, rgba(255,255,255,0.012) 1px, transparent 1px, transparent 22px),
+                rgba(4, 8, 14, 0.55);
             border-radius: 8px;
             border: 1px solid rgba(120, 180, 220, 0.18);
             padding: 12px 14px;
@@ -779,15 +812,31 @@
         #terminal-overlay .terminal-output::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.04); border-radius: 4px; }
         #terminal-overlay .terminal-output::-webkit-scrollbar-thumb { background: rgba(212, 163, 115, 0.35); border-radius: 4px; }
         #terminal-overlay .terminal-output::-webkit-scrollbar-thumb:hover { background: rgba(212, 163, 115, 0.6); }
+        /* 输出行：命令回显带浅色底纹，让"输入/输出"一眼可分 */
         #terminal-overlay .terminal-output .term-line {
-            margin-bottom: 2px;
+            margin-bottom: 1px;
+            border-radius: 3px;
+            padding: 0 4px;
+            transition: background 0.15s ease;
         }
+        #terminal-overlay .terminal-output .term-line:hover { background: rgba(255, 255, 255, 0.035); }
         #terminal-overlay .terminal-output .term-line.term-stdout { color: #d6e8f5; }
-        #terminal-overlay .terminal-output .term-line.term-stderr { color: #ff9b9b; }
-        #terminal-overlay .terminal-output .term-line.term-info  { color: #88b8d8; font-style: italic; }
+        #terminal-overlay .terminal-output .term-line.term-stderr {
+            color: #ff9b9b;
+            border-left: 2px solid rgba(255, 99, 99, 0.55);
+            background: rgba(255, 90, 90, 0.06);
+            padding-left: 8px;
+        }
+        #terminal-overlay .terminal-output .term-line.term-info  {
+            color: #88b8d8;
+            font-style: italic;
+        }
         #terminal-overlay .terminal-output .term-prompt {
             color: #5dca8a;
             margin-right: 4px;
+            background: rgba(93, 202, 138, 0.08);
+            padding-left: 8px;
+            border-left: 2px solid rgba(93, 202, 138, 0.5);
         }
         /* 终端输入行：语言选择 + 代码输入 + 运行按钮 */
         #terminal-overlay .terminal-input-row {
@@ -795,19 +844,42 @@
             align-items: center;
             gap: 8px;
             margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(120, 180, 220, 0.12);
             flex-shrink: 0;
         }
         #terminal-overlay #terminal-lang {
             flex: 0 0 auto;
-            min-width: 112px;
-            padding: 6px 8px;
+            min-width: 158px;
+            padding: 6px 28px 6px 10px;
             border-radius: 6px;
             border: 1px solid rgba(212, 163, 115, 0.25);
-            background: rgba(16, 24, 34, 0.95);
+            background: rgba(16, 24, 34, 0.95)
+                url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%23d4ab4f' stroke-width='1.5' stroke-linecap='round'/></svg>")
+                no-repeat right 10px center;
             color: #d6e8f5;
             font-size: 12px;
             outline: none;
             cursor: pointer;
+            appearance: none;
+            -webkit-appearance: none;
+            transition: border-color 0.18s ease, box-shadow 0.18s ease;
+        }
+        #terminal-overlay #terminal-lang:hover {
+            border-color: rgba(212, 163, 115, 0.45);
+            background-color: rgba(22, 32, 44, 0.98);
+        }
+        /* 下拉展开面板（原生弹出层，多数浏览器生效） */
+        #terminal-overlay #terminal-lang optgroup {
+            color: #88b8d8;
+            font-style: normal;
+            font-size: 11px;
+            background: #101820;
+        }
+        #terminal-overlay #terminal-lang option {
+            color: #d6e8f5;
+            background: #101820;
+            font-size: 12px;
         }
         /* 多行代码输入框：Enter 提交、Ctrl+Enter 换行；内容变多时自动增高（JS 控制，最高 150px） */
         #terminal-overlay #terminal-input {
@@ -829,6 +901,7 @@
             white-space: pre-wrap;
             word-break: break-word;
             scrollbar-width: thin;
+            transition: border-color 0.18s ease, box-shadow 0.18s ease;
         }
         #terminal-overlay #terminal-input:focus {
             border-color: rgba(212, 163, 115, 0.55);
@@ -836,20 +909,27 @@
         }
         #terminal-overlay #terminal-run {
             flex: 0 0 auto;
-            padding: 6px 14px;
+            padding: 6px 16px;
             border: none;
             border-radius: 6px;
-            background: linear-gradient(135deg, #c8a04a, #a5792e);
+            background: linear-gradient(135deg, #d4ab4f, #a5792e);
             color: #1a1206;
             font-weight: 600;
             font-size: 13px;
             cursor: pointer;
             white-space: nowrap;
+            box-shadow: 0 2px 8px rgba(200, 160, 74, 0.25);
+            transition: filter 0.18s ease, box-shadow 0.18s ease, transform 0.1s ease;
         }
-        #terminal-overlay #terminal-run:hover { filter: brightness(1.12); }
+        #terminal-overlay #terminal-run:hover {
+            filter: brightness(1.12);
+            box-shadow: 0 3px 12px rgba(200, 160, 74, 0.4);
+        }
+        #terminal-overlay #terminal-run:active { transform: translateY(1px); }
         #terminal-overlay #terminal-run:disabled {
             opacity: 0.5;
             cursor: not-allowed;
+            box-shadow: none;
         }
 
         /* ========== 图片面板（当前单元图片库） ========== */
@@ -1278,6 +1358,47 @@
             background: rgba(var(--accent-rgb), 0.22);
             border-color: var(--border-accent);
         }
+        /* 学习统计卡片：数据块 + 错题条目 */
+        .view-content .stat-chip {
+            flex: 0 0 calc(20% - 8px);
+            min-width: 72px;
+            background: rgba(0, 0, 0, 0.25);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-sm);
+            padding: 10px 8px;
+            text-align: center;
+            line-height: 1.4;
+        }
+        .view-content .stat-chip strong {
+            font-size: 20px;
+            color: var(--gold);
+            font-family: var(--font-serif);
+        }
+        .view-content .stat-chip span {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+        .view-content .wrong-item {
+            padding: 8px 10px;
+            border: 1px solid var(--border-subtle);
+            border-left: 3px solid #e74c3c;
+            border-radius: var(--radius-sm);
+            margin-bottom: 6px;
+            background: rgba(0, 0, 0, 0.18);
+            font-size: 12.5px;
+            line-height: 1.6;
+        }
+        .view-content .wrong-item .wrong-q { font-weight: 600; color: var(--text-primary); }
+        .view-content .wrong-item .wrong-ans { color: var(--text-muted); }
+        .view-content .wrong-item .wrong-correct { color: #4caf50; }
+        .view-content #stat-score-trend .trend-bar {
+            display: inline-block;
+            height: 8px;
+            background: linear-gradient(90deg, rgba(var(--accent-rgb), 0.45), rgba(var(--accent-rgb), 0.9));
+            border-radius: 4px;
+            vertical-align: middle;
+            margin-right: 4px;
+        }
         .view-content .card input,
         .view-content .card select {
             background: rgba(0, 0, 0, 0.3);
@@ -1579,8 +1700,21 @@
             display: none;
             animation: sectionFade 0.25s ease;
         }
+        /* 内容区纵向排列，激活的 section 撑满剩余高度 → 各 tab 面板底部对齐 */
+        #view-settings .view-content-body {
+            display: flex;
+            flex-direction: column;
+        }
         .settings-section.active {
             display: block;
+            flex: 1 0 auto;
+        }
+        /* 各 section 内容底部对齐：card 之间间距统一 */
+        .settings-section.active > .card {
+            margin-bottom: 12px;
+        }
+        .settings-section.active > .card:last-child {
+            margin-bottom: 0;
         }
         /* ===== 字号：应用到右侧聊天面板和设置面板 ===== */
         .chat-sidebar,
@@ -1948,6 +2082,13 @@
             text-align: center;
             max-width: 320px;
             line-height: 1.6;
+        }
+        .menu-loading-model {
+            font-size: 12px;
+            color: var(--text-dim);
+            margin-top: 10px;
+            letter-spacing: 0.04em;
+            text-align: center;
         }
         .menu-loading-progress {
             width: 180px;
@@ -3106,3 +3247,99 @@
             margin-bottom: -40px;
             z-index: 5;
         }
+
+        /* ============================================================
+           V4 学习仪表盘（dashboard）
+           ============================================================ */
+        #view-dashboard .dashboard-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        #view-dashboard .dashboard-header h3 { margin: 0; }
+        #view-dashboard .dashboard-header-meta {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        #view-dashboard .dash-meta {
+            font-size: 12px;
+            color: var(--text-muted, #9a8a78);
+            max-width: 180px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        #view-dashboard .dash-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        @media (max-width: 640px) {
+            #view-dashboard .dash-grid { grid-template-columns: 1fr; }
+        }
+        #view-dashboard .dash-card { padding: 12px; }
+        #view-dashboard .dash-card h4 {
+            margin: 0 0 10px 0;
+            font-size: 13px;
+            color: var(--text-primary, #f2e6d8);
+        }
+        #view-dashboard .dash-card canvas {
+            display: block;
+            margin: 0 auto;
+            border-radius: 8px;
+        }
+        #view-dashboard .dash-body { font-size: 13px; line-height: 1.8; }
+        #view-dashboard .dash-empty {
+            font-size: 12px;
+            color: var(--text-dim, #6b5d4f);
+            padding: 8px 2px;
+        }
+        #view-dashboard .dash-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 4px 0;
+            border-bottom: 1px dashed rgba(150, 150, 160, 0.12);
+            font-size: 13px;
+        }
+        #view-dashboard .dash-item:last-child { border-bottom: none; }
+        #view-dashboard .dash-item-label { color: var(--text-muted, #9a8a78); }
+        #view-dashboard .dash-item-value { font-weight: 600; color: var(--text-primary, #f2e6d8); }
+        #view-dashboard .dash-reason {
+            margin-top: 6px;
+            font-size: 12px;
+            color: var(--text-muted, #9a8a78);
+            line-height: 1.6;
+        }
+        #view-dashboard .dash-wrong-item {
+            display: flex;
+            gap: 8px;
+            padding: 5px 0;
+            border-bottom: 1px dashed rgba(150, 150, 160, 0.12);
+            font-size: 12px;
+        }
+        #view-dashboard .dash-wrong-item:last-child { border-bottom: none; }
+        #view-dashboard .dash-wrong-concept {
+            flex-shrink: 0;
+            color: #ff8fa3;
+            font-weight: 600;
+        }
+        #view-dashboard .dash-wrong-text {
+            color: var(--text-muted, #9a8a78);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        #view-dashboard .dash-insight-item {
+            padding: 5px 0;
+            border-bottom: 1px dashed rgba(150, 150, 160, 0.12);
+            font-size: 12.5px;
+            color: var(--text-primary, #f2e6d8);
+            line-height: 1.7;
+        }
+        #view-dashboard .dash-insight-item:last-child { border-bottom: none; }
