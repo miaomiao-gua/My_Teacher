@@ -115,6 +115,13 @@ def test_framing_rules() -> None:
     check("清单行不再用 innerHTML 拼模型名（名字里可能有特殊字符）",
           "nm.innerHTML" not in core and "top.textContent" in core)
     check("清单行标出模型在硬盘哪儿（title）", "row.title = m.dir" in core)
+    # 踩过的坑：modelRow 是模块级函数，而「关掉弹层」的函数定义在 openPicker 里 ——
+    # 直接引用它会在点击时抛 ReferenceError（表现是弹一句「换形象没成功：boxRemove is not defined」），
+    # 于是「能换形象」整个功能是坏的，而静态测试当时全绿。所以这条断言必须留着。
+    check("清单行用的是传进来的关闭函数（不跨作用域乱引用）",
+          "function modelRow(m, cur, onPick, close)" in core and "close();" in core)
+    check("清单行的关闭动作不再直接调 openPicker 里的局部函数",
+          not re.search(r"\bboxRemove\s*\(\s*\)\s*;", core))
 
 
 # ---------------------------------------------------------------------------

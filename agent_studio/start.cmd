@@ -1,33 +1,45 @@
-@echo off
-chcp 65001 >nul
-cd /d "%~dp0"
-title AI æ•™å­¦ Agent å·¥ä½œå°ï¼ˆç«¯å£ 5001ï¼‰
-
-echo ============================================================
-echo   AI æ•™å­¦ Agent å·¥ä½œå°
-echo   å¯åŠ¨åŽæµè§ˆå™¨æ‰“å¼€ï¼š http://127.0.0.1:5001/
-echo   å…³é—­è¿™ä¸ªé»‘çª—å£ = åœæ­¢æœåŠ¡
-echo ============================================================
-echo.
-
-py -3.14 -c "import fastapi, uvicorn" >nul 2>&1
-if not errorlevel 1 (
-    echo [å¯åŠ¨] ä½¿ç”¨ py -3.14
-    py -3.14 run.py --port 5001
-    goto :end
-)
-
-set PYEXE=%LOCALAPPDATA%\Programs\Python\Python314\python.exe
-if exist "%PYEXE%" (
-    echo [å¯åŠ¨] ä½¿ç”¨ %PYEXE%
-    "%PYEXE%" run.py --port 5001
-    goto :end
-)
-
-echo [é”™è¯¯] æ‰¾ä¸åˆ°è£…å¥½ä¾èµ–çš„ Python 3.14ã€‚
-echo        è¯·å…ˆæ‰§è¡Œï¼š py -3.14 -m pip install fastapi uvicorn httpx pydantic python-dotenv
-
-:end
-echo.
-echo æœåŠ¡å·²åœæ­¢ã€‚æŒ‰ä»»æ„é”®å…³é—­çª—å£ã€‚
-pause >nul
+@echo off
+cd /d "%~dp0"
+title AI ½ÌÑ§ Agent ¹¤×÷Ì¨£¨¶Ë¿Ú 5001£©
+
+REM ===========================================================================
+REM  Ë«»÷ÎÒÆô¶¯¹¤×÷Ì¨¡£½çÃæ£º http://127.0.0.1:5001/
+REM  ¹ØµôÕâ¸öºÚ´°¿Ú = Í£Ö¹·þÎñ¡£
+REM
+REM  ×¢Òâ£ºcmd ¶Ô¡¸´øÖÐÎÄµÄÀ¨ºÅ¿é¡¹ºÍ LF »»ÐÐ¼«ÈÝÒ×½âÎö´í£¨Êµ²â±¨¹ý
+REM  `'Teacher' ²»ÊÇÄÚ²¿»òÍâ²¿ÃüÁî`£©£¬ËùÒÔÕâÀïÖ»ÓÃ±êÇ©Ìø×ª£¬ÎÄ¼þ´æ³É CRLF¡£
+REM ===========================================================================
+
+echo ============================================================
+echo   AI ½ÌÑ§ Agent ¹¤×÷Ì¨
+echo   Æô¶¯ºóä¯ÀÀÆ÷´ò¿ª£º http://127.0.0.1:5001/
+echo   ¹ØµôÕâ¸öºÚ´°¿Ú = Í£Ö¹·þÎñ
+echo ============================================================
+echo.
+
+set PYEXE=
+py -3.14 -c "import fastapi, uvicorn" >nul 2>&1
+if not errorlevel 1 set PYEXE=py -3.14
+if defined PYEXE goto run
+
+set PYEXE=%LOCALAPPDATA%\Programs\Python\Python314\python.exe
+if exist "%PYEXE%" goto run2
+
+echo [´íÎó] ÕÒ²»µ½×°ºÃÒÀÀµµÄ Python 3.14¡£
+echo        ÇëÖ´ÐÐ£º py -3.14 -m pip install fastapi uvicorn httpx pydantic python-docx pypdf Pillow
+goto end
+
+:run
+echo [Æô¶¯] Ê¹ÓÃ py -3.14
+%PYEXE% run.py --port 5001
+goto end
+
+:run2
+echo [Æô¶¯] Ê¹ÓÃ %PYEXE%
+"%PYEXE%" run.py --port 5001
+goto end
+
+:end
+echo.
+echo ·þÎñÒÑÍ£Ö¹¡£°´ÈÎÒâ¼ü¹Ø±Õ´°¿Ú¡£
+pause >nul

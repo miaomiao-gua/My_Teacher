@@ -1,48 +1,47 @@
-@echo off
-chcp 65001 >nul
-cd /d "%~dp0"
-title MyTeacher æ¡Œå® 
-
-REM ===========================================================================
-REM  åŒå‡»æˆ‘å°±è¡Œï¼šæ‰“å¼€æ¡Œå® é¡µé¢ï¼ˆLive2D å½¢è±¡ + æ°”æ³¡ + èƒ½ç›´æ¥è·Ÿå¥¹è¯´å¥è¯ï¼‰
-REM  - æœåŠ¡æ²¡åœ¨è·‘çš„è¯ï¼Œæˆ‘ä¼šé¡ºæ‰‹æŠŠ start_agent.cmd æ‹‰èµ·æ¥ï¼Œç­‰å®ƒå°±ç»ªå†å¼€é¡µé¢
-REM  - è‡ªæ£€ï¼ˆä¸äº§ç”Ÿä»»ä½•å‰¯ä½œç”¨ï¼‰ï¼š
-REM        cmd /c "set DRY=1&& start_pet.cmd"            åªæ‰“å°ä¼šå¼€å“ªä¸ªç½‘å€
-REM        cmd /c "set DRY=1&& set PORT=5002&& start_pet.cmd"   çœ‹ã€ŒæœåŠ¡æ²¡èµ·ã€é‚£æ¡è·¯
-REM  ä¸ºä»€ä¹ˆè¦å†™æˆè¿™æ ·ï¼šcmd å¯¹**å¸¦ä¸­æ–‡çš„æ‹¬å·å—**å’Œ LF æ¢è¡Œéƒ½å¾ˆå®¹æ˜“è§£æé”™
-REM  ï¼ˆå®æµ‹æŠ¥è¿‡ "'1`' is not recognized" è¿™ç±»æ€ªé”™ï¼‰ï¼Œæ‰€ä»¥è¿™é‡Œåªç”¨æ ‡ç­¾è·³è½¬ + CRLFã€‚
-REM ===========================================================================
-
-if not defined PORT set PORT=5001
-set URL=http://127.0.0.1:%PORT%/agent/pet
-set COUNT=0
-
-netstat -ano | findstr /r /c:"LISTENING" | findstr ":%PORT%" >nul 2>&1
-if not errorlevel 1 goto ready
-
-echo [æç¤º] Agent æœåŠ¡ï¼ˆç«¯å£ %PORT%ï¼‰æ²¡åœ¨è·‘ã€‚
-if defined DRY echo [è‡ªæ£€] æ­£å¼è¿è¡Œåˆ°è¿™é‡Œæ—¶ï¼Œä¼šå…ˆæ‹‰èµ· start_agent.cmdï¼Œå†ç­‰å®ƒå°±ç»ªã€‚
-if defined DRY goto bye
-
-echo [å¯åŠ¨] æ­£åœ¨æŠŠå®ƒæ‹‰èµ·æ¥â€¦
-start "My_Teacher Agent æœåŠ¡" cmd /c start_agent.cmd
-
-:wait
-timeout /t 1 >nul
-set /a COUNT=%COUNT%+1
-netstat -ano | findstr /r /c:"LISTENING" | findstr ":%PORT%" >nul 2>&1
-if not errorlevel 1 goto ready
-if %COUNT% lss 40 goto wait
-
-echo.
-echo [è­¦å‘Š] ç­‰äº† 40 ç§’æœåŠ¡è¿˜æ˜¯æ²¡èµ·æ¥ã€‚è¯·æ‰‹åŠ¨åŒå‡» start_agent.cmdï¼Œçœ‹é‚£ä¸ªé»‘çª—å£æŠ¥ä»€ä¹ˆé”™ã€‚
-echo        ä¸‹é¢ä»ä¼šè¯•ç€æ‰“å¼€æ¡Œå® é¡µé¢ï¼Œä½†æ°”æ³¡å’ŒèŠå¤©è¦ç­‰æœåŠ¡èµ·æ¥æ‰æœ‰ã€‚
-pause
-
-:ready
-if defined DRY echo [è‡ªæ£€] æœåŠ¡åœ¨è·‘ï¼Œæœ¬æ¥ä¼šæ‰“å¼€ï¼š%URL%
-if defined DRY goto bye
-start "" "%URL%"
-
-:bye
-exit /b 0
+@echo off
+cd /d "%~dp0"
+title MyTeacher ×À³è
+
+REM ===========================================================================
+REM  Ë«»÷ÎÒ¾ÍĞĞ£º´ò¿ª×À³èÒ³Ãæ£¨Live2D ĞÎÏó + ÆøÅİ + ÄÜÖ±½Ó¸úËıËµ¾ä»°£©
+REM  - ·şÎñÃ»ÔÚÅÜµÄ»°£¬ÎÒ»áË³ÊÖ°Ñ start_agent.cmd À­ÆğÀ´£¬µÈËü¾ÍĞ÷ÔÙ¿ªÒ³Ãæ
+REM  - ×Ô¼ì£¨²»²úÉúÈÎºÎ¸±×÷ÓÃ£©£º
+REM        cmd /c "set DRY=1&& start_pet.cmd"            Ö»´òÓ¡»á¿ªÄÄ¸öÍøÖ·
+REM        cmd /c "set DRY=1&& set PORT=5002&& start_pet.cmd"   ¿´¡¸·şÎñÃ»Æğ¡¹ÄÇÌõÂ·
+REM  ÎªÊ²Ã´ÒªĞ´³ÉÕâÑù£ºcmd ¶Ô**´øÖĞÎÄµÄÀ¨ºÅ¿é**ºÍ LF »»ĞĞ¶¼ºÜÈİÒ×½âÎö´í
+REM  £¨Êµ²â±¨¹ı "'1`' is not recognized" ÕâÀà¹Ö´í£©£¬ËùÒÔÕâÀïÖ»ÓÃ±êÇ©Ìø×ª + CRLF¡£
+REM ===========================================================================
+
+if not defined PORT set PORT=5001
+set URL=http://127.0.0.1:%PORT%/agent/pet
+set COUNT=0
+
+netstat -ano | findstr /r /c:"LISTENING" | findstr ":%PORT%" >nul 2>&1
+if not errorlevel 1 goto ready
+
+echo [ÌáÊ¾] Agent ·şÎñ£¨¶Ë¿Ú %PORT%£©Ã»ÔÚÅÜ¡£
+if defined DRY echo [×Ô¼ì] ÕıÊ½ÔËĞĞµ½ÕâÀïÊ±£¬»áÏÈÀ­Æğ start_agent.cmd£¬ÔÙµÈËü¾ÍĞ÷¡£
+if defined DRY goto bye
+
+echo [Æô¶¯] ÕıÔÚ°ÑËüÀ­ÆğÀ´¡­
+start "My_Teacher Agent ·şÎñ" cmd /c start_agent.cmd
+
+:wait
+timeout /t 1 >nul
+set /a COUNT=%COUNT%+1
+netstat -ano | findstr /r /c:"LISTENING" | findstr ":%PORT%" >nul 2>&1
+if not errorlevel 1 goto ready
+if %COUNT% lss 40 goto wait
+
+echo.
+echo [¾¯¸æ] µÈÁË 40 Ãë·şÎñ»¹ÊÇÃ»ÆğÀ´¡£ÇëÊÖ¶¯Ë«»÷ start_agent.cmd£¬¿´ÄÇ¸öºÚ´°¿Ú±¨Ê²Ã´´í¡£
+echo        ÏÂÃæÈÔ»áÊÔ×Å´ò¿ª×À³èÒ³Ãæ£¬µ«ÆøÅİºÍÁÄÌìÒªµÈ·şÎñÆğÀ´²ÅÓĞ¡£
+pause
+
+:ready
+if defined DRY echo [×Ô¼ì] ·şÎñÔÚÅÜ£¬±¾À´»á´ò¿ª£º%URL%
+if defined DRY goto bye
+start "" "%URL%"
+
+:bye
+exit /b 0

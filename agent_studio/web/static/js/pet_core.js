@@ -528,7 +528,7 @@ window.PetCore = (function () {
    * 名字和提示都靠 DOM 文本节点写进去（不用 innerHTML 拼），所以模型名里带
    * `-`、空格、中文、甚至 `<` 都不会出问题。
    */
-  function modelRow(m, cur, onPick) {
+  function modelRow(m, cur, onPick, close) {
     const row = document.createElement('div');
     row.className = 'pet-pick-row' + (m.id === cur ? ' on' : '');
     row.dataset.modelId = m.id;
@@ -562,11 +562,11 @@ window.PetCore = (function () {
     row.title = m.dir || '';                      // 鼠标停一下能看到它在硬盘哪儿（排查用）
 
     row.onclick = async () => {
-      if (m.id === cur) { boxRemove(); return; }   // 点当前这个 = 什么都不用做
+      if (m.id === cur) { close(); return; }       // 点当前这个 = 什么都不用做
       row.style.opacity = '.5';
       try {
         const res = await setModel(m.id);
-        boxRemove();
+        close();
         if (onPick) onPick(res.current || m, m);
       } catch (e) {
         row.style.opacity = '1';
@@ -598,6 +598,8 @@ window.PetCore = (function () {
     box.appendChild(list);
 
     // 关掉弹层。函数声明会提升，所以上面 modelRow 里调它没问题。
+    // （但 modelRow 是**模块级**函数，看不到这里的局部名字 —— 关闭动作必须当参数传进去，
+    //   第一版就是漏了传参，点任何一行都抛 ReferenceError，弹一句「换形象没成功」。）
     function boxRemove() { box.remove(); }
     box.dismiss = boxRemove;
 
@@ -606,7 +608,7 @@ window.PetCore = (function () {
       const models = (data.models || []).slice();
       // 当前选中的排最前面：学生点开多半是想确认「现在用的是哪个」
       models.sort((a, b) => (a.id === cur ? -1 : 0) - (b.id === cur ? -1 : 0));
-      models.forEach((m) => list.appendChild(modelRow(m, cur, opts.onPick)));
+      models.forEach((m) => list.appendChild(modelRow(m, cur, opts.onPick, boxRemove)));
       if (!models.length) {
         const none = document.createElement('div');
         none.textContent = '没扫到任何 Live2D 形象。';

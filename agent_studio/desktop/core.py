@@ -237,6 +237,7 @@ def save_pos(path: Path, patch: Dict[str, Any]) -> Dict[str, Any]:
 # 否则又变成两套：网页里勾了「一直在最前面」，桌面版却不认。
 PET_WIN_W, PET_WIN_H = 420, 620          # 默认窗口尺寸（缩放后的逻辑像素）
 PET_WIN_EDGE_GAP = 24                    # 距屏幕右下角的留白
+PET_WIN_BOTTOM_GAP = 64                  # 底部再多留一点（任务栏/托盘区不挡角色）
 PET_WIN_MIN_W, PET_WIN_MIN_H = 300, 380  # 太小就看不清角色了
 
 
@@ -249,7 +250,7 @@ def default_pet_window_pos(screen_w: int, screen_h: int,
                            w: int = PET_WIN_W, h: int = PET_WIN_H) -> Tuple[int, int]:
     """默认落在右下角（不挡视线，又能一眼看到）"""
     return (max(0, int(screen_w) - w - PET_WIN_EDGE_GAP),
-            max(0, int(screen_h) - h - PET_WIN_EDGE_GAP * 3))
+            max(0, int(screen_h) - h - PET_WIN_BOTTOM_GAP))
 
 
 def pet_window_prefs_path(data_dir: Path) -> Path:
@@ -274,22 +275,36 @@ def load_window_prefs(data_dir: Path) -> Dict[str, Any]:
 
 
 def save_window_prefs(data_dir: Path, patch: Dict[str, Any]) -> Dict[str, Any]:
-    """写回窗口偏好。尺寸会被夹到合理范围（太小看不清、太大挡住整个屏幕）。"""
+    """写回窗口偏好。尺寸会被夹到合理范围（太小看不清、太大挡住整个屏幕）。
+
+    两种键名都收（`always_top` 和 `alwaysTop`）：网页那边是 JS，习惯写驼峰。
+    之前只认下划线那种，结果页面点「一直在最前面」→ 存进去是 false（静默失效，
+    页面上还显示勾着）—— 这种「看着成功、其实没生效」最难查，踩过一次。
+    """
+    def pick(*names: str):
+        for n in names:
+            if n in patch:
+                return patch[n]
+        return None
+
     clean: Dict[str, Any] = {}
-    if "always_top" in patch:
-        clean["always_top"] = bool(patch["always_top"])
-    if "hide_header" in patch:
-        clean["hide_header"] = bool(patch["hide_header"])
+    for keys, field in ((("always_top", "alwaysTop"), "always_top"),
+                        (("hide_header", "hideHeader"), "hide_header")):
+        v = pick(*keys)
+        if v is not None:
+            clean[field] = bool(v)
     for key in ("x", "y"):
-        if patch.get(key) is not None:
+        v = pick(key)
+        if v is not None:
             try:
-                clean[key] = int(patch[key])
+                clean[key] = int(v)
             except Exception:
                 pass
     for key, lo, hi in (("w", PET_WIN_MIN_W, 2000), ("h", PET_WIN_MIN_H, 2000)):
-        if patch.get(key):
+        v = pick(key)
+        if v:
             try:
-                clean[key] = max(lo, min(hi, int(patch[key])))
+                clean[key] = max(lo, min(hi, int(v)))
             except Exception:
                 pass
     return save_pos(pet_window_prefs_path(data_dir), clean)

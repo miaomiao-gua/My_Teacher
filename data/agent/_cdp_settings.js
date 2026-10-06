@@ -45,9 +45,17 @@ const PANEL = `(() => {
 async function connect(url) {
   const ws = new WebSocket(url);
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = () => rej(new Error('WS 连不上')); });
-  let id = 0; const pending = new Map(); const logs = [];
+  let id = 0; const pending = new Map(); const logs = []; const dialogs = [];
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
+    // 页面里的 alert/confirm 会把**整个渲染进程**冻住（headless 里没人点确定），
+    // 表现是 Runtime.evaluate 永远超时 —— 看着像页面挂了，其实是我们在等一个没人关的弹窗。
+    // 所以必须接住它：记下原文，然后替用户点掉。
+    if (m.method === 'Page.javascriptDialogOpening') {
+      dialogs.push(m.params.type + ': ' + m.params.message);
+      ws.send(JSON.stringify({ id: ++id, method: 'Page.handleJavaScriptDialog',
+                               params: { accept: true } }));
+    }
     if (m.method === 'Runtime.consoleAPICalled' && (m.params.type === 'error' || m.params.type === 'warning')) {
       logs.push(m.params.type + ': ' + (m.params.args || []).map((a) => String(a.value || a.description || '')).join(' ').slice(0, 200));
     }
@@ -62,27 +70,51 @@ async function connect(url) {
   const send = (method, params) => new Promise((res, rej) => {
     const mid = ++id; pending.set(mid, { res, rej });
     ws.send(JSON.stringify({ id: mid, method, params: params || {} }));
-    setTimeout(() => { if (pending.has(mid)) { pending.delete(mid); rej(new Error(method + ' 超时')); } }, 30000);
+    setTimeout(() => { if (pending.has(mid)) { pending.delete(mid); rej(new Error(method + ' 超时')); } }, 60000);
   });
-  const evaluate = async (e) => {
-    const r = await send('Runtime.evaluate', { expression: e, returnByValue: true, awaitPromise: true });
+  // 注意参数形态：evaluate('标签', 表达式) 或 evaluate(表达式) 都行。
+  // （第一版把签名改成 (label, e) 却没改调用点，CDP 收到的 expression 是空的，
+  //   报的是「mandatory field missing」和 evaluate 超时 —— 看着像页面挂了，其实是探针自己传错了参数。）
+  const evaluate = async (label, e) => {
+    if (typeof e === 'undefined') { e = label; label = String(label).slice(0, 34); }
+    const t0 = Date.now();
+    process.stderr.write('    · evaluate[' + label + '] … ');
+    let r;
+    try {
+      r = await send('Runtime.evaluate', { expression: e, returnByValue: true, awaitPromise: true });
+    } catch (err) {
+      process.stderr.write('✗ ' + ((err && err.message) || err) + ' @' + (Date.now() - t0) + 'ms\n');
+      throw err;
+    }
     if (r.exceptionDetails) throw new Error('页面里报错：' + JSON.stringify(r.exceptionDetails.exception));
+    process.stderr.write('✓ ' + (Date.now() - t0) + 'ms\n');
     return r.result.value;
   };
   const shot = async (name) => {
     const r = await send('Page.captureScreenshot', { format: 'png' });
     fs.writeFileSync('D:/My_teacher/data/agent/' + name, Buffer.from(r.data, 'base64'));
   };
-  return { ws, send, evaluate, shot, logs };
+  return { ws, send, evaluate, shot, logs, dialogs };
 }
 
 async function main() {
   const out = { steps: [], verdict: {} };
+
+  // 老标签先关掉：这个探针浏览器是复用的，攒上四五个 Live2D 页面之后
+  // 渲染进程会卡到连 Runtime.evaluate 都超时（踩过，报错看着像「页面挂了」，其实是标签堆的）。
+  const old = await (await fetch(`http://127.0.0.1:${CDP}/json/list`)).json();
+  let closed = 0;
+  for (const t of old) {
+    if (t.type === 'page' && /127\.0\.0\.1:5001/.test(t.url)) {
+      try { await fetch(`http://127.0.0.1:${CDP}/json/close/` + t.id); closed++; } catch (e) {}
+    }
+  }
+  out.steps.push('⓪ 先关掉 ' + closed + ' 个残留标签（避免多个 Live2D 页面把渲染进程卡死）');
+
   const sessionBefore = await (await fetch(BASE + '/agent/pet/status')).json();
   const modelBefore = (await (await fetch(BASE + '/agent/live2d/models')).json()).current;
 
-  const t = await (await fetch(`http://127.0.0.1:${CDP}/json/new?` + encodeURIComponent(URL), { method: 'PUT' })).json();
-  const { ws, send, evaluate, shot, logs } = await connect(t.webSocketDebuggerUrl);
+  const t = await (await fetch(`http://127.0.0.1:${CDP}/json/new?` + encodeURIComponent(URL), { method: 'PUT' })).json();  const { ws, send, evaluate, shot, logs, dialogs } = await connect(t.webSocketDebuggerUrl);
   await send('Page.enable'); await send('Runtime.enable'); await send('Log.enable');
   await send('Emulation.setDeviceMetricsOverride', { width: 1180, height: 860, deviceScaleFactor: 1, mobile: false });
   await sleep(9000);
@@ -90,16 +122,16 @@ async function main() {
   // ① 打开设置面板
   const clicked = await evaluate(`(() => { const b = document.getElementById('settingsBtn'); if (!b) return false; b.click(); return true; })()`);
   await sleep(1200);
-  let s = await evaluate(PANEL);
+  let s = await evaluate('读面板', PANEL);
   out.steps.push('① 点「⚙ 设置」（找得到按钮=' + clicked + '）→ 面板打开=' + s.panelOn +
     '，分组=' + JSON.stringify(s.groups));
   out.steps.push('   当前形象牌：' + JSON.stringify(s.curChip));
   await shot('_shot_settings_1.png');
 
   // ② 打开换形象清单，检查每行的信息量
-  await evaluate(`(() => { document.getElementById('pickModel').click(); return 1; })()`);
+  await evaluate('开清单', `(() => { document.getElementById('pickModel').click(); return 1; })()`);
   await sleep(2500);
-  s = await evaluate(PANEL);
+  s = await evaluate('读面板', PANEL);
   out.steps.push('② 换形象清单：' + s.pickerRows.length + ' 行');
   s.pickerRows.slice(0, 8).forEach((r) => {
     out.steps.push('   · ' + r.name + ' ｜ ' + r.meta + (r.isCurrent ? ' ｜← 当前' : ''));
@@ -115,14 +147,14 @@ async function main() {
   let switched = null;
   if (other) {
     const targetId = other.id;
-    await evaluate(`(() => {
+    await evaluate('点一行模型', `(() => {
       const row = Array.from(document.querySelectorAll('#pet-picker .pet-pick-row'))
         .find((r) => r.dataset.modelId === ${JSON.stringify(targetId)});
       if (row) row.click();
       return !!row;
     })()`);
     await sleep(11000);
-    const after = await evaluate(PANEL);
+    const after = await evaluate('读面板(换完)', PANEL);
     const server = (await (await fetch(BASE + '/agent/live2d/models')).json()).current;
     switched = { target: targetId, pageModel: after.petModel, serverModel: server && server.id,
                  kind: after.petKind, chip: after.curChip };
@@ -132,7 +164,7 @@ async function main() {
   }
 
   // ④ 面板里定一条提醒 → 清单立刻多一条
-  const beforeList = (await evaluate(PANEL)).reminders;
+  const beforeList = (await evaluate('读提醒清单(前)', PANEL)).reminders;
   const pendingBefore = (await (await fetch(BASE + '/agent/pet/status')).json()).pending_reminders;
   await evaluate(`(() => { document.getElementById('ask2').value = '探针：复习第 3 题'; return 1; })()`);
   await evaluate(`(() => {
@@ -141,7 +173,7 @@ async function main() {
     return !!b;
   })()`);
   await sleep(2500);
-  const afterPanel = await evaluate(PANEL);
+  const afterPanel = await evaluate('读提醒清单(后)', PANEL);
   const pendingAfter = (await (await fetch(BASE + '/agent/pet/status')).json()).pending_reminders;
   out.steps.push('④ 面板里定「20 分钟后」提醒 → 待发提醒 ' + pendingBefore + ' → ' + pendingAfter +
     '，面板清单 ' + beforeList.length + ' → ' + afterPanel.reminders.length + ' 条');
@@ -151,7 +183,7 @@ async function main() {
   // ⑤ 窗口开关：勾上要记住（桌面版靠它决定置顶）
   await evaluate(`(() => { const c = document.getElementById('alwaysTop'); c.checked = true; c.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
   await sleep(900);
-  const prefState = (await evaluate(PANEL)).prefs;
+  const prefState = (await evaluate('读窗口偏好', PANEL)).prefs;
   out.steps.push('⑤ 勾「一直在最前面」→ 本机偏好 = ' + JSON.stringify(prefState));
 
   // 收尾：把形象换回去（别把学生默认形象留在探针挑的那只上）
@@ -167,6 +199,7 @@ async function main() {
 
   const errs = logs.filter((l) => l.indexOf('error') === 0);
   out.steps.push('⑦ 页面 JS error ' + errs.length + ' 条' + (errs.length ? '：' + errs.slice(0, 3).join(' | ') : ''));
+  if (dialogs.length) out.steps.push('⑦b 页面弹窗 ' + dialogs.length + ' 个：' + JSON.stringify(dialogs));
 
   out.verdict = {
     '设置面板能打开': s.panelOn === true,
@@ -175,7 +208,9 @@ async function main() {
     '当前选中标出来了（且只标一个）': currentMarked,
     '点清单真的换了模型（页面+服务端一致）': !!(switched && switched.pageModel === switched.target && switched.serverModel === switched.target),
     '换完还是 Live2D（没掉回备用形象）': !!(switched && String(switched.kind || '').indexOf('live2d') === 0),
-    '面板里定提醒→清单立刻多一条': pendingAfter === pendingBefore + 1 && afterPanel.reminders.length > beforeList.length,
+    '面板里定提醒→清单立刻多一条':
+      pendingAfter === pendingBefore + 1
+      && afterPanel.reminders.some((t) => t.indexOf('探针：复习第 3 题') >= 0),
     '窗口开关被记住': !!(prefState && prefState.alwaysTop === true),
     '没有页面报错': errs.length === 0,
   };

@@ -1,0 +1,62 @@
+{
+  "info": {
+    "title": "白（免费版） · 桌宠",
+    "brand": "白（免费版） · 桌宠",
+    "winClass": "pet-win",
+    "mode": "Live2D（本机运行时）",
+    "headerH": 74,
+    "footerShown": "none",
+    "stage": {
+      "w": 420,
+      "h": 546
+    },
+    "canvas": {
+      "w": 420,
+      "h": 546,
+      "shown": "block"
+    },
+    "sprite": {
+      "shown": "none",
+      "natural": 256
+    },
+    "bubble": "我是白（免费版）～顶栏「设置」里能换形象，想说话就点「跟她说句话」",
+    "settingsOpen": false,
+    "buttons": [
+      {
+        "id": "save",
+        "shown": false
+      },
+      {
+        "id": "model",
+        "shown": true
+      },
+      {
+        "id": "remind",
+        "shown": false
+      },
+      {
+        "id": "chatToggle",
+        "shown": true
+      },
+      {
+        "id": "settingsBtn",
+        "shown": true
+      },
+      {
+        "id": "open",
+        "shown": false
+      }
+    ],
+    "overflowX": false,
+    "overflowY": false
+  },
+  "panel": {
+    "on": true,
+    "w": 320,
+    "h": 483,
+    "right": 8,
+    "bottom": 54,
+    "scrollsInside": false
+  },
+  "dialogs": []
+}

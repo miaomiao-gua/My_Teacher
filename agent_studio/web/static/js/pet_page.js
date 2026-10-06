@@ -24,7 +24,13 @@
     chip.textContent = info[0];
     chip.dataset.tone = info[1];
     if (kind === 'live2d_cdn') offerOffline();          // 网络来的 → 顺手给「存到本机」
-    if (kind === 'sprite') el('diag').textContent = (state.pet && state.pet.liveError) || 'Live2D 运行时没拿到';
+    // 这行诊断只在**真的退到备用形象**时才有意义。以前不管什么情况都写「没拿到」，
+    // 于是用了本机运行时也显示「Live2D 运行时没拿到」——自己把自己说糊涂了。
+    if (kind === 'sprite') {
+      el('diag').textContent = (state.pet && state.pet.liveError) || 'Live2D 运行时没拿到';
+    } else if (kind && kind.indexOf('live2d') === 0) {
+      el('diag').textContent = '';
+    }
   }
 
   /* 浏览器有网、这台机器没网时用得上：把运行时下载下来交给服务端存到本机 */
@@ -163,6 +169,41 @@
     if (footer) footer.style.display = p.hideHeader ? 'none' : '';
   }
 
+  /** 是不是桌面版开的小窗（shell.py 打开的地址带 ?win=1） */
+  function isWinMode() {
+    try { return /(^|[?&])win=1/.test(location.search); } catch (e) { return false; }
+  }
+
+  /** 小窗形态：把「网页」的味道收掉，只留角色和必要的按钮。
+      桌面版是拿 Edge 的应用窗口开这一页的，所以能做的只有**页面自己**收边：
+      顶栏精简、页脚先藏（鼠标移到窗口上再露出来），角色占满。 */
+  function applyWinMode() {
+    if (!isWinMode()) return;
+    document.body.classList.add('pet-win');
+    const footer = document.querySelector('footer');
+    if (footer) footer.style.display = 'none';         // 诊断信息不该占桌面小窗的地方
+    // 小窗里留几个真正会用到的按钮，其余收进设置面板
+    ['save', 'open'].forEach((id) => { const b = el(id); if (b) b.style.display = 'none'; });
+    const remind = el('remind');
+    if (remind) remind.style.display = 'none';         // 提醒改到设置面板里（那有档位和清单）
+    // 「收起顶栏（只留角色）」在小窗里是个**自锁开关**：顶栏一收，设置按钮也跟着没了，
+    // 就再也点不回来（只能关掉窗口重开）。所以小窗里直接禁掉它，并说清为什么。
+    const hh = el('hideHeader');
+    if (hh) {
+      hh.checked = false;
+      hh.disabled = true;
+      const label = hh.closest ? hh.closest('label') : null;
+      if (label) {
+        label.style.opacity = '.55';
+        label.title = '桌面小窗里不提供这个开关：顶栏一收，设置入口就一起消失了，点不回来';
+      }
+      const note = label && label.nextElementSibling;
+      if (note && note.classList && note.classList.contains('snote')) {
+        note.textContent = '小窗形态下「收起顶栏」不可用（收掉顶栏会把设置入口一起藏起来，那就点不回来了）。';
+      }
+    }
+  }
+
   /* ---------------- 设置面板 ---------------- */
   function toggleSettings(force) {
     const box = el('settings');
@@ -190,6 +231,14 @@
       chip.textContent = '读不到形象清单（服务没在跑？）';
       chip.dataset.tone = 'warn';
     }
+  }
+
+  /** 顶栏品牌名跟着形象走：形象能换成 hiyori / 白-免费版，写死「艾琳」就是明摆着的错 */
+  function paintBrand(m) {
+    const name = m && (m.label || m.name);
+    const brand = el('brandName');
+    if (brand) brand.textContent = name ? (name + ' · 桌宠') : '学习搭子 · 桌宠';
+    try { document.title = name ? (name + ' · 桌宠') : '学习搭子 · 桌宠'; } catch (e) {}
   }
 
   /** 提醒列表：定了多少条、还有几分钟，一眼能看见（不然定了就消失，等于没有） */
@@ -271,6 +320,7 @@
           state.model = info || current;
           await state.pet.setModel(state.model);
           refreshCurrentModel(state.model);
+          paintBrand(state.model);
           say('换好啦：' + ((state.model && (state.model.label || state.model.name)) || ''));
         },
       });
@@ -305,6 +355,7 @@
 
   async function boot() {
     bind();
+    applyWinMode();
     await applyPrefs();
     setStatus('loading');
     let model = null;
@@ -329,6 +380,7 @@
       say('先用备用形象陪你～这个不影响上课');
     }
     refreshCurrentModel(model);
+    paintBrand(model);
     refreshReminders();
     // 事件与演绎动作：文案是服务端给的（kernel/pet_bus.py），动作在这里映射
     const ACT_LABEL = { think: '思考中', speak: '说话', listen: '在听', happy: '开心',

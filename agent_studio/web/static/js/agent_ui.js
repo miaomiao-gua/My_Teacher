@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  const AgentUI = { version: '0.12.0' };
+  const AgentUI = { version: '0.13.0' };
   const HTML_NS = 'http://www.w3.org/1999/xhtml';
 
   /* ==========================================================================
@@ -4677,6 +4677,9 @@
       const MINI_KEY = 'au_pet_mini_v1';
 
       const box = el('div', 'au-pet');
+      // 桌宠就该是**一只没有边框的角色**：不给它画窗口壳子（以前做成带标题栏的小窗口，
+      // 结果只能拽那条细边，学生想抓角色本身拖不动 —— 这是设计错误，不是实现问题）。
+      // 控件只在她头顶浮出来一条，默认半透明，鼠标移上去才明显。
       const bar = el('div', 'au-pet-bar');
       const title = el('span', 'au-pet-title', '艾琳');
       const btnModel = el('button', 'au-pet-btn', '换形象');
@@ -4688,8 +4691,11 @@
       bar.appendChild(btnBig);
       bar.appendChild(btnMini);
       const stage = el('div', 'au-pet-stage');
-      const hint = el('div', 'au-pet-hint', '点我一下 · 滚轮缩放');
+      const handle = el('div', 'au-pet-handle');      // 头顶那条「抓手」：整条都能拖
+      handle.title = '按住拖动我';
+      const hint = el('div', 'au-pet-hint', '拖我 / 点我一下 / 滚轮缩放');
       box.appendChild(bar);
+      box.appendChild(handle);
       box.appendChild(stage);
       box.appendChild(hint);
       hostRoot.appendChild(box);
@@ -4707,29 +4713,45 @@
       try { saved = JSON.parse(localStorage.getItem(POS_KEY) || 'null'); } catch (e) {}
       place(saved);
 
-      // 拖动（pointer 事件：鼠标和触屏都管用）
+      // 拖动：**抓住她身上任何地方都能拖**（以前只有标题栏那条细边能拖，学生拽角色拽不动）
       let dragging = null;
       let moved = false;
-      bar.addEventListener('pointerdown', function (ev) {
-        if (ev.target.closest('button')) return;
+      function onDown(ev) {
+        if (ev.target.closest('button')) return;          // 按钮不参与拖动
         dragging = { dx: ev.clientX - box.offsetLeft, dy: ev.clientY - box.offsetTop };
         moved = false;
-        try { bar.setPointerCapture(ev.pointerId); } catch (e) {}
+        try { box.setPointerCapture(ev.pointerId); } catch (e) {}
         ev.preventDefault();
-      });
-      bar.addEventListener('pointermove', function (ev) {
+      }
+      function onMove(ev) {
         if (!dragging) return;
-        moved = true;
-        box.style.left = (ev.clientX - dragging.dx) + 'px';
-        box.style.top = (ev.clientY - dragging.dy) + 'px';
-      });
-      bar.addEventListener('pointerup', function () {
+        const nx = ev.clientX - dragging.dx;
+        const ny = ev.clientY - dragging.dy;
+        if (Math.abs(nx - box.offsetLeft) > 3 || Math.abs(ny - box.offsetTop) > 3) moved = true;
+        box.classList.add('au-pet--dragging');
+        box.style.left = nx + 'px';
+        box.style.top = ny + 'px';
+      }
+      function onUp() {
         if (!dragging) return;
         dragging = null;
-        if (!moved) return;                              // 只是点了一下标题栏：别把位置写进浏览器
-        place({ x: box.offsetLeft, y: box.offsetTop });   // 贴边时校正，别让脑袋露在窗外
+        box.classList.remove('au-pet--dragging');
+        if (!moved) {                                     // 没移动 = 摸了她一下
+          if (mini) { mini = false; applyMini(); return; } // 收起状态点一下 = 展开
+          if (pet) pet.tap();
+          return;
+        }
+        place({ x: box.offsetLeft, y: box.offsetTop });     // 贴边时校正，别让她跑出屏幕
         try { localStorage.setItem(POS_KEY, JSON.stringify({ x: box.offsetLeft, y: box.offsetTop })); } catch (e) {}
-      });
+      }
+      // 监听器必须挂在**同一个**元素上，setPointerCapture 也要设在它身上：
+      // 之前把 capture 设在 box、监听器挂在子元素（stage/bar）上，
+      // 捕获后的事件只送到 box，子元素永远收不到 → 拖不动（实测踩到，抓角色纹丝不动）。
+      // 挂在 box 上最省事：子元素上的 pointerdown 会冒泡到它，整只都能抓。
+      box.addEventListener('pointerdown', onDown);
+      box.addEventListener('pointermove', onMove);
+      box.addEventListener('pointerup', onUp);
+      box.addEventListener('pointercancel', onUp);
       window.addEventListener('resize', function () { place({ x: box.offsetLeft, y: box.offsetTop }); });
 
       // 收起 / 展开（收起后只剩一个小头像，点它回来）
@@ -4743,9 +4765,6 @@
       }
       applyMini();
       btnMini.onclick = function (ev) { ev.stopPropagation(); mini = !mini; applyMini(); };
-      box.addEventListener('click', function (ev) {
-        if (mini) { mini = false; applyMini(); ev.stopPropagation(); }
-      });
 
       /* ---- 形象与演绎 ---- */
       let pet = null;
@@ -4817,7 +4836,8 @@
         const w = window.open('/agent/pet', 'au_pet', 'width=580,height=800,menubar=no,toolbar=no');
         if (!w) window.open('/agent/pet', '_blank');
       };
-      stage.addEventListener('click', function () { if (pet) pet.tap(); });
+      // 点她一下（抚触反应）由上面的 onUp 统一处理：那里区分了「点一下」和「拖动」，
+      // 这里不能再挂一个 click，否则拖完松手也会被当成点了一下。
 
       // 事件 → 说话 + 演一段（用服务端那条桌宠总线，和大窗口口径完全一致）
       PetCore.subscribe(function (ev) {
@@ -5240,10 +5260,46 @@
         if (info.last_ui) chatApp.showUi(info.last_ui);   // 恢复上次的工作台内容
         try { localStorage.setItem('au_session', id); } catch (e) {}
       } catch (err) {
+        // 这个对话在服务端已经不存在了（被删过、或者换过数据目录）。
+        // **不要**只丢一句「读不出来」就完事 —— 学生看到的是一栏空白，会以为界面坏了
+        // （实测就是这个现象：「左中右的对话老师不见了」）。
+        // 正确做法：忘掉这个 id，把最近的对话打开；一个都没有才开新的。
+        const gone = /404|不存在|not found/i.test(String(err.message || ''));
+        try { localStorage.removeItem('au_session'); } catch (e) {}
+        currentId = null;
+        chatApp.setSession('');
+        chatApp.clearChat();
+        if (gone) {
+          const fallback = await pickMostRecentSession();
+          if (fallback && fallback !== id) {
+            await openSession(fallback);
+            return;
+          }
+          newSession('', '');
+          return;
+        }
         chatApp.appendHistory([{ role: 'assistant', content: '（这个对话读不出来：' + err.message + '）' }]);
       }
       refreshTree();
       chatApp.focusInput();
+    }
+
+    /* 最近改过的那个对话（用来接住「记住的那个对话不在了」这种情况） */
+    async function pickMostRecentSession() {
+      try {
+        const data = await api('/agent/sessions');
+        let best = null;
+        (data.tree || []).forEach(function (s) {
+          (s.textbooks || []).forEach(function (b) {
+            (b.sessions || []).forEach(function (x) {
+              if (!best || (x.updated_at || 0) > (best.updated_at || 0)) best = x;
+            });
+          });
+        });
+        return best && best.id;
+      } catch (e) {
+        return null;
+      }
     }
 
     async function newSession(subject, textbook) {

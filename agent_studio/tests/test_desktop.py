@@ -207,6 +207,57 @@ def main() -> int:
     core.save_pos(lock, {"pid": 999999, "port": live_port})
     check("进程早没了 → 不算在跑", shell.already_running(SCRATCH) is None)
 
+    print("\n===== 11) 桌面小窗：同一只 Live2D + 位置与开关 =====")
+    # 这一版把桌面浮动小窗从「Pillow 画的猫头鹰」换成 /agent/pet 那一页（Live2D 同一只），
+    # 于是「放哪儿、多大、要不要置顶」的规则必须锁住 —— 这些是启动器唯一能控制它的地方。
+    check("小窗地址带 ?win=1", core.pet_window_url("http://127.0.0.1:5001") ==
+          "http://127.0.0.1:5001/agent/pet?win=1", core.pet_window_url("http://127.0.0.1:5001"))
+    check("结尾多余的斜杠不会拼出双斜杠",
+          core.pet_window_url("http://127.0.0.1:5001/") == "http://127.0.0.1:5001/agent/pet?win=1")
+    dx2, dy2 = core.default_pet_window_pos(1920, 1080)
+    # 注意：dy2 是窗口**顶边**。窗口高 620，所以「贴右下角」= 底边离屏幕底很近，
+    # 不能拿顶边跟半屏比（第一版断言就是这么写歪的）。
+    check("默认贴在右下角（不挡视线）",
+          dx2 > 1920 * 0.6 and (1080 - (dy2 + core.PET_WIN_H)) < 120 and dy2 > 0,
+          f"({dx2},{dy2}) 底边距屏幕底 {1080 - (dy2 + core.PET_WIN_H)}px")
+
+    wp = core.pet_window_prefs_path(SCRATCH)
+    prefs = core.load_window_prefs(SCRATCH)
+    check("没存过时给安全默认（不置顶、默认尺寸）",
+          prefs["always_top"] is False and prefs["hide_header"] is False
+          and (prefs["w"], prefs["h"]) == (core.PET_WIN_W, core.PET_WIN_H), str(prefs))
+    core.save_window_prefs(SCRATCH, {"always_top": True, "hide_header": True, "x": 12, "y": 34,
+                                     "w": 10, "h": 99999})
+    prefs = core.load_window_prefs(SCRATCH)
+    check("开关和位置存得下读得回",
+          prefs["always_top"] and prefs["hide_header"] and (prefs["x"], prefs["y"]) == (12, 34), str(prefs))
+    check("网页用驼峰发过来也认（alwaysTop / hideHeader）",
+          core.save_window_prefs(SCRATCH, {"alwaysTop": False, "hideHeader": True}) is not None
+          and core.load_window_prefs(SCRATCH)["always_top"] is False
+          and core.load_window_prefs(SCRATCH)["hide_header"] is True,
+          str(core.load_window_prefs(SCRATCH)))
+    core.save_window_prefs(SCRATCH, {"always_top": True})       # 给后面的断言留个已知状态
+    check("尺寸被夹到合理范围（太小看不清 / 太大挡住整个屏幕）",
+          prefs["w"] == core.PET_WIN_MIN_W and prefs["h"] == 2000, str((prefs["w"], prefs["h"])))
+    check("偏好文件就落在数据目录里", wp.is_file(), str(wp))
+
+    payload = shell.pet_window_payload("http://127.0.0.1:5001", SCRATCH)
+    check("小窗参数齐了（地址/位置/尺寸/置顶）",
+          payload["url"].endswith("/agent/pet?win=1") and len(payload["pos"]) == 2
+          and payload["always_top"] is True, str(payload))
+    px, py = payload["pos"]
+    check("小窗位置一定在屏幕内（多显示器拔掉也找得回来）",
+          -payload["size"][0] + 24 <= px < payload["screen"][0] and 0 <= py < payload["screen"][1],
+          f"pos={payload['pos']} screen={payload['screen']}")
+    args = core.pet_window_args("msedge.exe", payload["url"], SCRATCH / "browser_pet",
+                               pos=(px, py), size=payload["size"], always_top=True)
+    check("浏览器参数带上位置/尺寸/置顶（应用窗口不认网页层 moveTo，只能这样给）",
+          any(a.startswith("--window-position=") for a in args)
+          and any(a.startswith("--window-size=") for a in args)
+          and "--always-on-top" in args, " ".join(args))
+    check("小窗用独立的浏览器配置目录（不跟工作台窗口抢同一个）",
+          any(a.endswith("browser_pet") for a in args), " ".join(args))
+
     shutil.rmtree(SCRATCH, ignore_errors=True)
     os.environ.pop("AGENT_STUDIO_DATA", None)
     runtime_paths.reset_cache()

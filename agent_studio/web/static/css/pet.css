@@ -41,46 +41,74 @@
   border-bottom: 1px solid rgba(31, 46, 77, .16); transform: rotate(45deg);
 }
 
-/* ---------------- 工作台里的小玩偶 ---------------- */
+/* ---------------- 工作台里的小玩偶（**没有窗口壳子**，就是一只浮在界面上的角色） ----------------
+   设计上的教训：一开始做成了「带标题栏和边框的小窗口」，结果
+   ① 只有标题栏那条细边能拖，学生抓住角色本身拖不动；
+   ② 看着像界面里多了一块面板，不像桌宠。
+   现在：透明的、可抓任意位置的、控件只在头顶hover时浮出来。 */
 .au-pet {
   position: fixed; z-index: 60;
-  width: 186px; height: 252px;
-  display: flex; flex-direction: column;
-  border-radius: 14px;
-  background: linear-gradient(180deg, rgba(255, 252, 245, .96), rgba(244, 246, 251, .96));
-  border: 1px solid rgba(31, 46, 77, .16);
-  box-shadow: 0 14px 34px rgba(31, 46, 77, .18);
+  width: 190px; height: 262px;
+  display: flex; flex-direction: column; align-items: center;
+  background: transparent;            /* 不要底色 */
+  border: none;                       /* 不要边框 */
+  box-shadow: none;                   /* 不要卡片阴影（阴影会让人以为是面板） */
   user-select: none;
+  touch-action: none;                 /* 触屏上拖动不要被浏览器抢去滚页面 */
+  cursor: grab;
   transition: width .18s, height .18s, opacity .18s;
 }
-.au-pet--collapsed { width: 46px; height: 46px; overflow: hidden; cursor: pointer; }
+.au-pet--dragging { cursor: grabbing; opacity: .92; }
+/* 头顶的抓手：几乎看不见，但整条都能按住拖 */
+.au-pet-handle {
+  position: absolute; top: -6px; left: 50%; transform: translateX(-50%);
+  width: 46px; height: 6px; border-radius: 999px;
+  background: rgba(31, 46, 77, .18);
+  transition: background .15s;
+}
+.au-pet:hover .au-pet-handle { background: rgba(31, 46, 77, .38); }
+/* 控件条：平时半透明，鼠标移上去才实 */
 .au-pet-bar {
   display: flex; align-items: center; gap: 4px;
-  padding: 4px 6px; border-bottom: 1px solid rgba(31, 46, 77, .1);
+  padding: 3px 5px; margin-bottom: 2px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .82);
+  border: 1px solid rgba(31, 46, 77, .12);
+  box-shadow: 0 4px 14px rgba(31, 46, 77, .12);
+  opacity: .30; transition: opacity .18s;
   cursor: grab; flex: 0 0 auto;
 }
-.au-pet-bar:active { cursor: grabbing; }
+.au-pet:hover .au-pet-bar { opacity: 1; }
+.au-pet--dragging .au-pet-bar { opacity: 1; }
 .au-pet-title {
-  flex: 1; min-width: 0; font-size: 11.5px; font-weight: 600; color: #2E4370;
+  max-width: 68px; font-size: 11.5px; font-weight: 600; color: #2E4370;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .au-pet-btn {
   font: inherit; font-size: 11.5px; line-height: 1;
-  padding: 3px 6px; border-radius: 6px; cursor: pointer;
-  border: 1px solid rgba(31, 46, 77, .18); background: #fff; color: #2E4370;
+  padding: 3px 6px; border-radius: 999px; cursor: pointer;
+  border: 1px solid rgba(31, 46, 77, .16); background: #fff; color: #2E4370;
 }
 .au-pet-btn:hover { background: rgba(0, 103, 192, .1); border-color: rgba(0, 103, 192, .3); }
-.au-pet-stage { position: relative; flex: 1 1 auto; min-height: 0; cursor: pointer; }
-.au-pet-stage .pet-sprite { max-height: 94%; max-width: 94%; }
+.au-pet-stage {
+  position: relative; flex: 1 1 auto; align-self: stretch; min-height: 0;
+  cursor: grab;
+  filter: drop-shadow(0 10px 16px rgba(31, 46, 77, .22));   /* 阴影只给她本人 */
+}
+.au-pet-stage .pet-sprite { max-height: 96%; max-width: 96%; }
 .au-pet-stage .pet-bubble {
-  top: auto; bottom: 96%; font-size: 12.5px; padding: 7px 10px; max-width: 210px;
+  top: auto; bottom: 96%; font-size: 12.5px; padding: 7px 10px; max-width: 220px;
 }
 .au-pet-hint {
-  flex: 0 0 auto; padding: 3px 8px 6px;
-  font-size: 10.5px; color: #96A0B2; text-align: center;
+  flex: 0 0 auto; padding: 2px 0 0;
+  font-size: 10.5px; color: #96A0B2; opacity: 0; transition: opacity .18s;
 }
+.au-pet:hover .au-pet-hint { opacity: 1; }
+/* 收起：只剩一个小头像 */
+.au-pet--collapsed { width: 52px; height: 52px; }
 .au-pet--collapsed .au-pet-bar,
-.au-pet--collapsed .au-pet-hint { display: none; }
+.au-pet--collapsed .au-pet-hint,
+.au-pet--collapsed .au-pet-handle { display: none; }
 .au-pet--collapsed .au-pet-stage { display: flex; align-items: center; justify-content: center; }
-.au-pet--collapsed .pet-sprite { max-height: 84%; max-width: 84%; }
-.au-pet--collapsed .pet-canvas { max-width: 44px; max-height: 44px; }
+.au-pet--collapsed .pet-sprite { max-height: 94%; max-width: 94%; }
+.au-pet--collapsed .pet-canvas { max-width: 52px; max-height: 52px; }

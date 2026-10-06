@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>艾琳 · 桌宠</title>
+<title>学习搭子 · 桌宠</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%23F6E7C6'/%3E%3Cpath d='M5 13l11-5.5L27 13l-11 5.5z' fill='%231F2E4D'/%3E%3Cpath d='M10 16.5V21c0 2.2 2.7 3.6 6 3.6s6-1.4 6-3.6v-4.5' fill='none' stroke='%231F2E4D' stroke-width='2'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/css/pet.css?v=1">
 <style>
@@ -93,6 +93,17 @@
   .switch{display:flex; align-items:center; gap:7px; font-size:12.5px; color:var(--navy); cursor:pointer}
   .switch input{width:15px; height:15px; accent-color:var(--navy)}
 
+  /* 桌面小窗形态（地址带 ?win=1，由 shell.py 打开）：把「网页」的边收掉，角色占满。
+     这是 Edge 应用窗口里的一页，不能真做成透明浮窗，但至少让它看起来像个小挂件。
+     注意页脚那条得用 `body.pet-win > footer`：跟基础样式 `footer{display:flex}` 同优先级时
+     会**按先后顺序**输掉（基础样式在后面），第一版就是这么被吃掉的（截图里页脚还在）。 */
+  body.pet-win header{padding:7px 10px; gap:7px; background:rgba(255,255,255,.72)}
+  body.pet-win .brand{font-size:12.5px; font-weight:600}
+  body.pet-win button{padding:5px 9px; font-size:12px; border-radius:9px}
+  body.pet-win > footer{display:none}
+  body.pet-win #chat{right:8px; bottom:8px; width:min(400px,94vw)}
+  body.pet-win #settings{right:8px; top:8px; width:min(320px,94vw)}
+
   footer{
     padding:8px 16px; font-size:12px; color:#6E7A8F; border-top:1px solid var(--line);
     background:rgba(255,255,255,.5); display:flex; gap:12px; flex-wrap:wrap; align-items:center;
@@ -104,7 +115,7 @@
 <body>
 
 <header>
-  <div class="brand"><span class="dot"></span>艾琳 · 桌宠</div>
+  <div class="brand"><span class="dot"></span><span id="brandName">学习搭子 · 桌宠</span></div>
   <span class="chip" id="mode" data-tone="muted">加载中…</span>
   <span class="chip" id="action">待机</span>
   <span class="grow"></span>

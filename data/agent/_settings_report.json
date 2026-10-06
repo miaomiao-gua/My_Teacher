@@ -1,0 +1,53 @@
+{
+  "steps": [
+    "⓪ 先关掉 1 个残留标签（避免多个 Live2D 页面把渲染进程卡死）",
+    "① 点「⚙ 设置」（找得到按钮=true）→ 面板打开=true，分组=[\"形象\",\"提醒\",\"窗口\"]",
+    "   当前形象牌：\"当前：白（免费版） · 程序演绎动作\"",
+    "② 换形象清单：7 行",
+    "   · 白（免费版） ✓ 当前 ｜ 程序演绎动作 · 12.5MB ｜← 当前",
+    "   · hiyori_free_t08 ｜ 自带动作（6 组） · 3MB",
+    "   · hiyori_pro_t11 ｜ 自带动作（7 组） · 4.7MB",
+    "   · mao_pro ｜ 自带动作（2 组） · 8.9MB",
+    "   · 艾琳（老师） ｜ 自带动作（5 组） · 14.2MB",
+    "   · Q版小熊貓2.0 免費版 ｜ 程序演绎动作 · 7.7MB",
+    "   · shizuku ｜ 自带动作（4 组） · 5MB",
+    "③ 点「hiyori_free_t08」→ 页面模型=hiyori_free_t08，服务端记录=hiyori_free_t08，形象路线=live2d_local",
+    "④ 面板里定「20 分钟后」提醒 → 待发提醒 2 → 3，面板清单 2 → 3 条",
+    "   清单内容：[\"17 分钟后：探针：复习第 3 题\",\"18 分钟后：探针：复习第 3 题\",\"20 分钟后：探针：复习第 3 题\"]",
+    "⑤ 勾「一直在最前面」→ 本机偏好 = {\"alwaysTop\":true,\"hideHeader\":false}",
+    "⑥ 收尾：形象换回 1786973032__-___ → 1786973032__-___",
+    "⑦ 页面 JS error 0 条"
+  ],
+  "verdict": {
+    "设置面板能打开": true,
+    "三组都在（形象/提醒/窗口）": true,
+    "清单每行都有名字+动作类型+体积": true,
+    "当前选中标出来了（且只标一个）": true,
+    "点清单真的换了模型（页面+服务端一致）": true,
+    "换完还是 Live2D（没掉回备用形象）": true,
+    "面板里定提醒→清单立刻多一条": true,
+    "窗口开关被记住": true,
+    "没有页面报错": true
+  },
+  "console": [
+    "warning: [pet] 用备用形象：正在加载 Live2D 运行时…",
+    "warning: [pet] 用备用形象：正在加载 Live2D 运行时…"
+  ],
+  "sessionBefore": {
+    "ok": true,
+    "subscribers": 1,
+    "pending_reminders": 2,
+    "paths": {
+      "frozen": false,
+      "resource_root": "D:\\My_teacher\\agent_studio",
+      "exe_dir": "D:\\My_teacher\\agent_studio",
+      "data_root": "D:\\My_teacher\\agent_studio\\data",
+      "candidates": [
+        "exe 同目录的 data/ → D:\\My_teacher\\agent_studio\\data（有数据）",
+        "上级的 agent_studio/data → D:\\My_teacher\\agent_studio\\data（有数据）",
+        "上级的 data/ → D:\\My_teacher\\data（有数据）",
+        "%APPDATA%\\AgentStudio\\data → C:\\Users\\jinti\\AppData\\Roaming\\AgentStudio\\data"
+      ]
+    }
+  }
+}

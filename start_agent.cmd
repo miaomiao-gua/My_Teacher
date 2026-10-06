@@ -1,35 +1,50 @@
-@echo off
-chcp 65001 >nul
-cd /d "%~dp0"
-title My_Teacher Agent æœåŠ¡ (ç«¯å£ 5001)
-
-echo ============================================================
-echo   My_Teacher Agent æœåŠ¡
-echo   å¯åŠ¨åŽæµè§ˆå™¨æ‰“å¼€ï¼š http://127.0.0.1:5001/agent/app
-echo   å…³é—­è¿™ä¸ªé»‘çª—å£ = åœæ­¢æœåŠ¡
-echo ============================================================
-echo.
-
-REM ä¼˜å…ˆç”¨ py å¯åŠ¨å™¨æ‰¾ Python 3.14ï¼ˆé¡¹ç›®ä¾èµ–è£…åœ¨è¿™ä¸ªç‰ˆæœ¬é‡Œï¼‰
-py -3.14 -c "import fastapi, uvicorn" >nul 2>&1
-if not errorlevel 1 (
-    echo [å¯åŠ¨] ä½¿ç”¨ py -3.14
-    py -3.14 run_agent.py --port 5001
-    goto :end
-)
-
-REM å…œåº•ï¼šç›´æŽ¥ç”¨å·²çŸ¥è·¯å¾„
-set PYEXE=%LOCALAPPDATA%\Programs\Python\Python314\python.exe
-if exist "%PYEXE%" (
-    echo [å¯åŠ¨] ä½¿ç”¨ %PYEXE%
-    "%PYEXE%" run_agent.py --port 5001
-    goto :end
-)
-
-echo [é”™è¯¯] æ‰¾ä¸åˆ°è£…å¥½ä¾èµ–çš„ Python 3.14ã€‚
-echo        è¯·åœ¨é¡¹ç›®ç›®å½•æ‰§è¡Œï¼š py -3.14 -m pip install -r server\requirements.txt
-
-:end
-echo.
-echo æœåŠ¡å·²åœæ­¢ã€‚æŒ‰ä»»æ„é”®å…³é—­çª—å£ã€‚
-pause >nul
+@echo off
+cd /d "%~dp0"
+title AI ½ÌÑ§ Agent ¹¤×÷Ì¨£¨¶Ë¿Ú 5001£©
+
+REM ===========================================================================
+REM  Ë«»÷ÎÒÆô¶¯¹¤×÷Ì¨¡£½çÃæ£º http://127.0.0.1:5001/agent/app
+REM  ×À³èÒ³Ãæ£º http://127.0.0.1:5001/agent/pet
+REM  ¹ØµôÕâ¸öºÚ´°¿Ú = Í£Ö¹·þÎñ¡£
+REM
+REM  Á½Ìõ²È¹ýµÄ¿Ó£¨¶¼±ðÔÙ·¸£©£º
+REM   1) Õâ¸öÎÄ¼þ±ØÐë´æ³É **GBK(cp936) + CRLF**£¬²¢ÇÒ**²»Òª chcp 65001**¡£
+REM      UTF-8 µÄÖÐÎÄ»á±» cmd ½âÎö´í£¬Êµ²â±¨¹ý `'Teacher' ²»ÊÇÄÚ²¿»òÍâ²¿ÃüÁî`£¬
+REM      µ¼ÖÂË«»÷¸ù±¾Ã»Æô¶¯·þÎñ¡£
+REM   2) ²»ÒªÓÃ´øÖÐÎÄµÄÀ¨ºÅ¿é if (...)£¬Ò»ÂÉÓÃ±êÇ©Ìø×ª¡£
+REM ===========================================================================
+
+echo ============================================================
+echo   AI ½ÌÑ§ Agent ¹¤×÷Ì¨
+echo   Æô¶¯ºóä¯ÀÀÆ÷´ò¿ª£º http://127.0.0.1:5001/agent/app
+echo   ×À³èÒ³Ãæ£º         http://127.0.0.1:5001/agent/pet
+echo   ¹ØµôÕâ¸öºÚ´°¿Ú = Í£Ö¹·þÎñ
+echo ============================================================
+echo.
+
+set PYEXE=
+py -3.14 -c "import fastapi, uvicorn" >nul 2>&1
+if not errorlevel 1 set PYEXE=py -3.14
+if defined PYEXE goto run
+
+set PYEXE=%LOCALAPPDATA%\Programs\Python\Python314\python.exe
+if exist "%PYEXE%" goto run2
+
+echo [´íÎó] ÕÒ²»µ½×°ºÃÒÀÀµµÄ Python 3.14¡£
+echo        ÇëÖ´ÐÐ£º py -3.14 -m pip install fastapi uvicorn httpx pydantic python-docx pypdf Pillow
+goto end
+
+:run
+echo [Æô¶¯] Ê¹ÓÃ py -3.14
+%PYEXE% run_agent.py --port 5001
+goto end
+
+:run2
+echo [Æô¶¯] Ê¹ÓÃ %PYEXE%
+"%PYEXE%" run_agent.py --port 5001
+goto end
+
+:end
+echo.
+echo ·þÎñÒÑÍ£Ö¹¡£°´ÈÎÒâ¼ü¹Ø±Õ´°¿Ú¡£
+pause >nul
