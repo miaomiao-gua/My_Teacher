@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>My_Teacher Agent</title>
+<!-- KaTeX：有就用（公式更漂亮），没有也不影响功能（渲染器会退化成代码样式） -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<style>
+  /* 界面观感向 Windows 11 原生应用靠拢：浅色 Mica 底、Segoe UI、细边框、系统蓝 */
+  html, body { height: 100%; margin: 0; background: #f3f3f3; }
+  body {
+    display: flex; flex-direction: column;
+    font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+    color: #1b1b1b;
+  }
+  .top {
+    display: flex; align-items: center; gap: 12px; padding: 9px 16px;
+    background: rgba(255,255,255,.78); border-bottom: 1px solid rgba(0,0,0,.08);
+  }
+  .top .brand { font-size: 14px; font-weight: 600; letter-spacing: -.01em; }
+  .top .sub { font-size: 12px; color: #616161; }
+  .top .grow { flex: 1; }
+  .top button {
+    padding: 5px 12px; border-radius: 4px; border: 1px solid rgba(0,0,0,.14);
+    background: #fff; color: #1b1b1b; font: inherit; font-size: 12.5px; cursor: pointer;
+    transition: background .12s;
+  }
+  .top button:hover { background: rgba(0,0,0,.04); }
+  .chip {
+    font-size: 12px; padding: 3px 10px; border-radius: 4px; border: 1px solid rgba(0,0,0,.12);
+    background: #fff; color: #616161; white-space: nowrap;
+  }
+  .chip.ok { color: #0f7b0f; border-color: rgba(15,123,15,.35); background: rgba(15,123,15,.06); }
+  .chip.bad { color: #c42b1c; border-color: rgba(196,43,28,.35); background: rgba(196,43,28,.06); }
+  #root { flex: 1; min-height: 0; }
+</style>
+</head>
+<body>
+  <div class="top">
+    <span class="brand">My_Teacher Agent</span>
+    <span class="sub">AI 现场生成界面 · 工具调用内核</span>
+    <span class="grow"></span>
+    <span class="chip" id="health">检查中…</span>
+    <span class="chip" id="session">会话 —</span>
+    <button id="btn-session">新会话</button>
+    <button id="btn-plugins">重载插件</button>
+  </div>
+  <div id="root"></div>
+
+<script src="/static/js/agent_ui.js?v=0.3.0"></script>
+<script>
+  // 页面可能从 :5001 打开，也可能从老界面 :5000 或本地文件打开；
+  // 所以不写死地址，交给 AgentUI.detectBase() 探一次；探不到会给一句能照做的提示。
+  var BASE = (location.port === '5001') ? '' : null;
+  var app = AgentUI.mountChat(document.getElementById('root'), {
+    base: BASE || '',
+    teacherName: '艾琳老师',
+  });
+
+  var healthChip = document.getElementById('health');
+  var sessionChip = document.getElementById('session');
+
+  function setChip(el, text, cls) {
+    el.textContent = text;
+    el.className = 'chip' + (cls ? ' ' + cls : '');
+  }
+
+  function checkHealth() {
+    AgentUI.detectBase().then(function (base) {
+      if (base === null) {
+        setChip(healthChip, '服务未运行 —— 双击 start_agent.cmd 启动', 'bad');
+        return;
+      }
+      BASE = base;
+      fetch(base + '/agent/health').then(function (r) { return r.json(); }).then(function (d) {
+        var first = (d.chain || [])[0] || {};
+        var okCount = (d.chain || []).filter(function (c) { return c.ok; }).length;
+        var text = (okCount ? '就绪 · ' : '模型不可用 · ') + (first.label || '?') +
+          ' · ' + (d.tools || 0) + ' 个工具';
+        if ((d.plugins || []).length) text += ' · 插件 ' + d.plugins.length + ' 个';
+        setChip(healthChip, text, okCount ? 'ok' : 'bad');
+      }).catch(function () {
+        setChip(healthChip, '健康检查失败', 'bad');
+      });
+    });
+  }
+
+  function refreshSession() {
+    // 把渲染器版本一起显示出来：如果哪天页面又是缓存的旧版，一眼就能看出来，不用互相猜
+    var v = (window.AgentUI && AgentUI.version) ? 'v' + AgentUI.version : '?';
+    sessionChip.textContent = '渲染器 ' + v + ' · 会话 ' + (app.client.sessionId || '—');
+  }
+
+  document.getElementById('btn-session').onclick = function () {
+    var id = Math.random().toString(36).slice(2, 12);
+    try { localStorage.setItem('mt_agent_session', id); } catch (e) {}
+    location.reload();
+  };
+
+  // 刷新后回到同一个会话（否则界面里的实验台一刷新就没了）
+  try {
+    var saved = localStorage.getItem('mt_agent_session');
+    if (saved) app.setSession(saved); else {
+      var fresh = Math.random().toString(36).slice(2, 12);
+      localStorage.setItem('mt_agent_session', fresh);
+      app.setSession(fresh);
+    }
+  } catch (e) {}
+
+  document.getElementById('btn-plugins').onclick = function () {
+    fetch((BASE || '') + '/agent/plugins/reload', { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        alert('插件已重载：\n' + (d.plugins || []).map(function (p) {
+          return p.name + (p.loaded ? ' ✓ v' + p.version : ' ✗ ' + (p.error || ''));
+        }).join('\n'));
+      })
+      .catch(function (e) { alert('重载失败：' + e.message); });
+  };
+
+  refreshSession();
+  checkHealth();
+  setInterval(checkHealth, 15000);   // 服务被关掉/重启时，状态条能自己反映出来
+
+  // 兜底拦截：如果加载到的是旧版渲染器（浏览器缓存），直接告诉你，省得对着旧界面调试
+  if (window.AgentUI && AgentUI.version !== '0.3.0') {
+    setTimeout(function () {
+      alert('这个页面加载的是【旧版渲染器 v' + AgentUI.version + '】，最新是 v0.3.0。\n' +
+            '所以界面布局和绘图看起来还是老样子。\n\n' +
+            '请按 Ctrl + F5 强制刷新一次即可（只需一次，之后就正常了）。');
+    }, 300);
+  }
+</script>
+</body>
+</html>

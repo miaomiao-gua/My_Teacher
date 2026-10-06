@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>酸碱盐仿真实验</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .slider-container {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .solution {
+            width: 200px;
+            height: 200px;
+            border-radius: 50%;
+            margin: 20px auto;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            font-weight: bold;
+            background-color: #cccccc;
+            transition: background-color 0.3s;
+        }
+        .indicator-selector {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>酸碱盐仿真实验</h1>
+        <div class="solution" id="solution">
+            <span id="ph-value">pH: 7.0</span>
+        </div>
+        <div class="controls">
+            <div class="slider-container">
+                <label for="acid">加酸 (HCl)</label>
+                <input type="range" id="acid" min="0" max="100" value="0" step="1">
+                <span id="acid-value">0 mL</span>
+            </div>
+            <div class="slider-container">
+                <label for="base">加碱 (NaOH)</label>
+                <input type="range" id="base" min="0" max="100" value="0" step="1">
+                <span id="base-value">0 mL</span>
+            </div>
+            <div class="indicator-selector">
+                <label for="indicator">指示剂</label>
+                <select id="indicator">
+                    <option value="phenolphthalein">酚酞</option>
+                    <option value="methyl_orange">甲基橙</option>
+                    <option value="universal">通用指示剂</option>
+                </select>
+            </div>
+        </div>
+    </div>
+    <script>
+        const solution = document.getElementById('solution');
+        const phValue = document.getElementById('ph-value');
+        const acidSlider = document.getElementById('acid');
+        const baseSlider = document.getElementById('base');
+        const acidValue = document.getElementById('acid-value');
+        const baseValue = document.getElementById('base-value');
+        const indicatorSelect = document.getElementById('indicator');
+
+        let acidAmount = 0;
+        let baseAmount = 0;
+        let currentIndicator = 'phenolphthalein';
+
+        function updateSolution() {
+            const total = acidAmount + baseAmount;
+            let ph = 7;
+            if (total > 0) {
+                ph = 7 + (baseAmount - acidAmount) / 20;
+                ph = Math.max(0, Math.min(14, ph));
+            }
+            phValue.textContent = `pH: ${ph.toFixed(1)}`;
+
+            let color;
+            if (currentIndicator === 'phenolphthalein') {
+                color = ph < 8.3 ? 'transparent' : '#ff00ff';
+            } else if (currentIndicator === 'methyl_orange') {
+                color = ph < 3.1 ? '#ff0000' : ph < 4.4 ? '#ffa500' : '#ffff00';
+            } else {
+                if (ph < 3) color = '#ff0000';
+                else if (ph < 5) color = '#ff6600';
+                else if (ph < 7) color = '#ffff00';
+                else if (ph < 9) color = '#00ff00';
+                else if (ph < 11) color = '#0000ff';
+                else color = '#800080';
+            }
+            solution.style.backgroundColor = color;
+        }
+
+        acidSlider.addEventListener('input', () => {
+            acidAmount = parseInt(acidSlider.value);
+            acidValue.textContent = `${acidAmount} mL`;
+            updateSolution();
+        });
+
+        baseSlider.addEventListener('input', () => {
+            baseAmount = parseInt(baseSlider.value);
+            baseValue.textContent = `${baseAmount} mL`;
+            updateSolution();
+        });
+
+        indicatorSelect.addEventListener('change', () => {
+            currentIndicator = indicatorSelect.value;
+            updateSolution();
+        });
+
+        updateSolution();
+    </script>
+</body>
+</html>

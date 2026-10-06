@@ -1,0 +1,974 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>酸碱盐 · 酸碱中和滴定虚拟实验室</title>
+<style>
+  /* ================= 基础布局 ================= */
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; padding: 0; }
+  body {
+    font-family: "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB", "Source Han Sans SC", "Heiti SC", Arial, sans-serif;
+    font-size: 12px; color: #24303c; background: #eef2f6; overflow: hidden;
+  }
+  .app { height: 100vh; min-width: 700px; min-height: 500px; display: flex; flex-direction: column; gap: 8px; padding: 8px; }
+
+  /* ================= 顶部条 ================= */
+  .topbar { flex: 0 0 38px; display: flex; align-items: center; gap: 10px; padding: 0 12px;
+    background: linear-gradient(180deg, #ffffff, #eaf1f7); border: 1px solid #cfdae4; border-radius: 8px; }
+  .brand { font-weight: 700; font-size: 14px; color: #14577e; letter-spacing: .5px; white-space: nowrap; }
+  .brand small { font-weight: 400; color: #7a8b9a; font-size: 11px; margin-left: 6px; }
+  .chips { margin-left: auto; display: flex; gap: 6px; }
+  .chip { display: flex; align-items: baseline; gap: 5px; padding: 3px 9px; background: #f7fafc;
+    border: 1px solid #d5e0e9; border-radius: 6px; white-space: nowrap; }
+  .chip .k { font-size: 10px; color: #7a8b9a; }
+  .chip b { font-size: 13px; font-family: Consolas, Menlo, monospace; color: #14577e; }
+  .chip.color b { font-size: 12px; }
+
+  /* ================= 三栏主区 ================= */
+  .main { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 172px minmax(280px, 1fr) 236px; gap: 8px; }
+  .col { min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+  .card { background: #fff; border: 1px solid #d7e1ea; border-radius: 8px; box-shadow: 0 1px 2px rgba(23, 62, 92, .06);
+    padding: 6px 8px; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .card h3 { margin: 0 0 5px; font-size: 11.5px; color: #14577e; font-weight: 700; display: flex; align-items: center; gap: 5px; }
+  .card h3::before { content: ''; width: 3px; height: 11px; background: #1b7fb8; border-radius: 2px; }
+  .card h3 .push { margin-left: auto; }
+
+  /* ================= 实验步骤 ================= */
+  .steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; flex: 1 1 auto; min-height: 0; }
+  .steps li { display: flex; gap: 6px; align-items: flex-start; padding: 4px 6px; border-radius: 6px;
+    border: 1px solid transparent; background: #f6f9fc; color: #7d8c9a; }
+  .steps li .num { flex: 0 0 15px; height: 15px; border-radius: 50%; background: #c9d6e2; color: #fff;
+    font-size: 10px; text-align: center; line-height: 15px; font-weight: 700; }
+  .steps li b { display: block; font-size: 11px; font-weight: 700; line-height: 1.25; }
+  .steps li em { display: block; font-style: normal; font-size: 9.5px; line-height: 1.25; color: #93a3b1; }
+  .steps li.done { color: #2f7d52; background: #eef9f2; border-color: #cfe9da; }
+  .steps li.done .num { background: #3aa06a; }
+  .steps li.done em { color: #6aa585; }
+  .steps li.active { color: #0f4c72; background: #e8f4fd; border-color: #a9d5f0; box-shadow: inset 0 0 0 1px #cbe6f7; }
+  .steps li.active .num { background: #1b7fb8; }
+  .steps li.active em { color: #4d7f9f; }
+
+  /* ================= 仪表卡 ================= */
+  .meter-card { flex: 0 0 auto; }
+  .ph-row { display: flex; align-items: center; gap: 8px; }
+  .ph-digital { font-family: Consolas, Menlo, monospace; font-size: 30px; font-weight: 700; line-height: 1;
+    color: #b3261e; min-width: 74px; text-align: center; }
+  .ph-digital.neutral { color: #2f8f56; }
+  .ph-digital.base { color: #1b5fb8; }
+  .ph-side { flex: 1 1 auto; min-width: 0; }
+  .ph-tag { font-size: 11px; font-weight: 700; color: #46586a; }
+  .ph-sub { font-size: 9px; color: #8798a8; line-height: 1.25; word-break: break-all; }
+  .t-row { display: flex; align-items: baseline; gap: 5px; margin-top: 5px; }
+  .t-row .t-lab { font-size: 10px; color: #7a8b9a; }
+  .t-row b { font-size: 12px; font-family: Consolas, Menlo, monospace; color: #b3521e; margin-left: auto; }
+  .bar { height: 9px; background: #e7eef5; border-radius: 5px; overflow: hidden; margin-top: 2px; }
+  .bar i { display: block; height: 100%; width: 0%; border-radius: 5px;
+    background: linear-gradient(90deg, #f0a34a, #e2534a); transition: width .25s ease; }
+  .t-note { font-size: 8.5px; color: #a3b1bd; line-height: 1.2; margin-top: 2px; }
+  .pstrip { margin-top: 6px; }
+  .pstrip .cap { font-size: 9px; color: #8798a8; margin-bottom: 2px; }
+  .stripwrap { position: relative; }
+  .stripwrap .row { display: flex; height: 13px; border-radius: 3px; overflow: hidden; border: 1px solid #c9d6e2; }
+  .stripwrap .row i { flex: 1 1 0; }
+  .pstrip .marks { display: flex; justify-content: space-between; font-size: 8px; color: #8798a8; line-height: 9px; margin-top: 5px; }
+  .stripwrap .arrow { position: absolute; bottom: -5px; width: 0; height: 0; transform: translateX(-50%);
+    border-left: 4px solid transparent; border-right: 4px solid transparent; border-bottom: 6px solid #14324a; }
+
+  /* ================= 实验台场景 ================= */
+  .bench { position: relative; flex: 1 1 auto; min-height: 330px; border-radius: 8px; overflow: hidden;
+    border: 1px solid #d7e1ea; background: linear-gradient(180deg, #f6fafd 0%, #eaf1f7 58%, #dfe9f1 100%); }
+  .tiles { position: absolute; inset: 0; opacity: .55;
+    background-image: linear-gradient(rgba(255,255,255,.75) 1px, transparent 1px),
+                      linear-gradient(90deg, rgba(255,255,255,.75) 1px, transparent 1px);
+    background-size: 26px 26px; }
+  .tabletop { position: absolute; left: 0; right: 0; bottom: 0; height: 52px; border-top: 2px solid #e8d2ad;
+    background: linear-gradient(180deg, #dcb888, #c39a63 46%, #ac7f49); }
+  .tabletop::before { content: ''; position: absolute; inset: 0; opacity: .35;
+    background: repeating-linear-gradient(92deg, rgba(120,80,40,.35) 0 2px, rgba(255,255,255,0) 2px 13px); }
+  .tabletop::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 11px;
+    background: linear-gradient(180deg, #9a6f3d, #7c5630); }
+  .scene-note { position: absolute; left: 8px; top: 6px; font-size: 9px; color: #8b9aa8;
+    background: rgba(255,255,255,.72); border: 1px solid #e2eaf1; border-radius: 4px; padding: 1px 5px; }
+
+  /* 铁架台 */
+  .stand-base { position: absolute; left: 4%; bottom: 52px; width: 34%; height: 13px; border-radius: 4px;
+    background: linear-gradient(180deg, #818e98, #4e5a63); box-shadow: 0 3px 5px rgba(20, 40, 60, .25); }
+  .stand-rod { position: absolute; left: 8%; bottom: 62px; width: 9px; height: 248px; border-radius: 4px;
+    background: linear-gradient(90deg, #97a4ae, #eef4f8 45%, #8b98a2); }
+  .clamp { position: absolute; left: 8%; bottom: 286px; width: 39%; height: 11px; border-radius: 3px;
+    background: linear-gradient(180deg, #8b98a3, #5d6a74); }
+  .clamp::after { content: ''; position: absolute; right: -3px; top: -5px; width: 15px; height: 21px;
+    border-radius: 50%; background: radial-gradient(circle at 35% 35%, #b9c5ce, #6b7883); }
+
+  /* 滴定管（HCl） */
+  .burette { position: absolute; left: 45%; bottom: 166px; width: 18px; height: 148px; }
+  .bur-glass { position: absolute; left: 0; bottom: 20px; width: 100%; height: 128px; overflow: hidden;
+    border: 1px solid #b9cbd8; border-radius: 3px 3px 2px 2px;
+    background: linear-gradient(90deg, rgba(255,255,255,.85), rgba(255,255,255,.25) 40%, rgba(255,255,255,.7)); }
+  .bur-fluid { position: absolute; left: 0; right: 0; top: 0; height: 100%;
+    background: linear-gradient(180deg, rgba(214, 233, 214, .85), rgba(178, 214, 190, .95));
+    border-bottom: 2px solid rgba(120, 170, 140, .8); transition: height .25s ease; }
+  .bur-scale { position: absolute; left: 1px; top: 0; bottom: 0; width: 6px; opacity: .8;
+    background: repeating-linear-gradient(180deg, #6b7d8d 0 1px, rgba(0,0,0,0) 1px 8px); }
+  .bur-cock { position: absolute; left: -3px; bottom: 8px; width: 24px; height: 12px; border-radius: 6px;
+    background: linear-gradient(180deg, #dfe7ee, #a9b8c4); border: 1px solid #9aabba; }
+  .bur-tip { position: absolute; left: 6px; bottom: 0; width: 6px; height: 10px;
+    background: linear-gradient(90deg, #dfe9f1, #b6c8d6); clip-path: polygon(0 0, 100% 0, 62% 100%, 38% 100%); }
+  .tag { position: absolute; font-size: 9px; color: #5d7284; background: rgba(255,255,255,.85);
+    border: 1px solid #dfe8ef; border-radius: 4px; padding: 1px 4px; white-space: nowrap; }
+  .tag-acid { left: 45%; bottom: 320px; }
+  .tag-base { left: 58%; bottom: 276px; }
+
+  /* 胶头滴管（NaOH） */
+  .dropper { position: absolute; left: 58%; bottom: 196px; width: 16px; height: 76px; transform: rotate(-11deg); }
+  .dp-bulb { position: absolute; left: 1px; top: 0; width: 14px; height: 22px; border-radius: 7px 7px 5px 5px;
+    background: linear-gradient(90deg, #5c6b78, #97a5b1 45%, #4d5b67); }
+  .dp-glass { position: absolute; left: 5px; top: 20px; width: 7px; height: 56px;
+    border: 1px solid #b9cbd8; border-radius: 2px; background: rgba(255,255,255,.55); overflow: hidden; }
+  .dp-fluid { position: absolute; left: 0; right: 0; bottom: 0; height: 66%;
+    background: linear-gradient(180deg, rgba(198, 226, 240, .9), rgba(150, 200, 230, .95)); }
+
+  /* 落滴动画 */
+  .drop { position: absolute; width: 6px; height: 9px; opacity: 0; background: rgba(150, 200, 230, .95);
+    border-radius: 50% 50% 50% 50% / 62% 62% 38% 38%; }
+  .drop-acid { left: 45.6%; bottom: 158px; background: rgba(170, 210, 190, .95); }
+  .drop-base { left: 58.6%; bottom: 186px; }
+  .drop.falling { animation: dsh-fall .6s ease-in forwards; }
+  @keyframes dsh-fall {
+    0% { opacity: 1; transform: translateY(0); }
+    80% { opacity: 1; }
+    100% { opacity: 0; transform: translateY(34px); }
+  }
+
+  /* 烧杯 */
+  .beaker { position: absolute; left: 40%; bottom: 52px; width: 88px; height: 88px; }
+  .bk-body { position: absolute; inset: 0; border: 2px solid rgba(140, 180, 205, .85); border-top: none;
+    border-radius: 3px 3px 11px 11px;
+    background: linear-gradient(100deg, rgba(255,255,255,.60), rgba(255,255,255,.10) 42%, rgba(255,255,255,.42));
+    box-shadow: inset 0 0 14px rgba(255,255,255,.75), 0 2px 7px rgba(30, 60, 90, .13); }
+  .bk-spout { position: absolute; right: -5px; top: -3px; width: 11px; height: 8px; background: rgba(160, 195, 215, .9);
+    clip-path: polygon(0 100%, 60% 0, 100% 100%); }
+  .bk-liquid { position: absolute; left: 2px; right: 2px; bottom: 2px; height: 50%; overflow: hidden;
+    border-radius: 0 0 9px 9px; isolation: isolate;
+    background: linear-gradient(180deg, #d6ecf9 0%, #b6dcf1 55%, #a2d0ea 100%); transition: height .25s ease; }
+  .bk-ind { position: absolute; inset: 0; mix-blend-mode: multiply; transition: background .3s ease; }
+  .bk-surface { position: absolute; left: -6%; right: -6%; top: -3px; height: 7px; border-radius: 50%;
+    background: rgba(255, 255, 255, .72); }
+  .bk-glass { position: absolute; left: 5px; top: 6px; width: 12px; height: 62px; border-radius: 6px;
+    background: linear-gradient(180deg, rgba(255,255,255,.85), rgba(255,255,255,.12)); pointer-events: none; }
+  .bk-ticks span { position: absolute; right: 3px; display: flex; align-items: center; gap: 2px; }
+  .bk-ticks span i { display: block; width: 9px; height: 1px; background: rgba(90, 130, 155, .75); }
+  .bk-ticks span em { font-style: normal; font-size: 8px; color: #5d7284; }
+  .bk-vol { position: absolute; left: 50%; bottom: -15px; transform: translateX(-50%); font-size: 9.5px;
+    font-family: Consolas, Menlo, monospace; color: #1c4f70; background: rgba(255,255,255,.9);
+    border: 1px solid #dfe8ef; border-radius: 4px; padding: 0 5px; white-space: nowrap; }
+
+  /* 温度计 */
+  .thermo { position: absolute; left: 72%; bottom: 52px; width: 15px; height: 122px; }
+  .th-tube { position: absolute; left: 4px; top: 0; width: 8px; height: 108px; overflow: hidden;
+    border: 1px solid #b9cbd8; border-radius: 4px 4px 0 0; background: rgba(255,255,255,.8); }
+  .th-col { position: absolute; left: 0; right: 0; bottom: 0; height: 8%; border-radius: 3px 3px 0 0;
+    background: linear-gradient(180deg, #f07a4a, #d63c2e); transition: height .3s ease; }
+  .th-bulb { position: absolute; left: 0; bottom: 0; width: 15px; height: 16px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 32%, #f2906a, #c9301f); border: 1px solid #b9cbd8; }
+  .th-lab { position: absolute; left: -20px; bottom: -1px; font-size: 8.5px; color: #5d7284; white-space: nowrap; }
+
+  /* ================= 指示剂试剂瓶 ================= */
+  .bottles { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; }
+  .bottle { position: relative; display: flex; flex-direction: column; align-items: center; gap: 2px;
+    padding: 4px 1px 3px; border: 1px solid #d7e1ea; border-radius: 7px; background: #f8fbfd;
+    cursor: pointer; font-family: inherit; font-size: 10px; color: #55687a; line-height: 1.1; }
+  .bottle:hover { background: #eef6fc; border-color: #a9d5f0; }
+  .bottle .cap { width: 11px; height: 5px; background: #9fb3c2; border-radius: 2px 2px 0 0; }
+  .bottle .glass { position: relative; width: 17px; height: 21px; overflow: hidden;
+    border: 1px solid #b9cbd8; border-radius: 2px 2px 5px 5px; background: rgba(255,255,255,.75); }
+  .bottle .fluid { position: absolute; left: 0; right: 0; bottom: 0; height: 62%; }
+  .bottle .nm { font-size: 9.5px; white-space: nowrap; transform: scale(.94); }
+  .bottle.active { background: #e8f4fd; border-color: #1b7fb8; box-shadow: inset 0 0 0 1px #cbe6f7; color: #0f4c72; font-weight: 700; }
+
+  /* ================= 控制按钮 ================= */
+  .ctrl-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+  .btn { font-family: inherit; font-size: 10.5px; padding: 6px 3px; border-radius: 6px; cursor: pointer;
+    border: 1px solid #c3d6e4; background: linear-gradient(180deg, #ffffff, #eef4f9); color: #1c4f70; font-weight: 600; line-height: 1.15; }
+  .btn:hover { border-color: #7fb7dc; background: linear-gradient(180deg, #f6fcff, #e2f0fa); }
+  .btn:active { transform: translateY(1px); }
+  .btn.acid { border-color: #ebc6c2; color: #a8342c; background: linear-gradient(180deg, #ffffff, #fdf1f0); }
+  .btn.base { border-color: #c2d6ea; color: #1a5b96; background: linear-gradient(180deg, #ffffff, #eef5fc); }
+  .btn.rec { border-color: #bfe0cb; color: #226b43; background: linear-gradient(180deg, #ffffff, #eef9f2); }
+  .btn.reset { grid-column: 1 / span 2; border-color: #d8c9e6; color: #5a3a7a; background: linear-gradient(180deg, #ffffff, #f6f1fb); }
+  .btn.mini { padding: 2px 8px; font-size: 10px; grid-column: auto; }
+
+  /* ================= 滴定曲线 ================= */
+  .curve-card { flex: 1 1 auto; min-height: 0; }
+  .curve-box { flex: 1 1 auto; min-height: 0; display: flex; align-items: center; justify-content: center; }
+  .curve-box svg { width: 100%; height: auto; display: block; }
+  .curve-empty { font-size: 10px; color: #9aa9b6; text-align: center; line-height: 1.5; }
+
+  /* ================= 底部：结论 + 数据表 ================= */
+  .bottom { flex: 0 0 132px; min-height: 0; display: grid; grid-template-columns: minmax(300px, 1fr) 432px; gap: 8px; }
+  .concl { flex: 1 1 auto; min-height: 0; border-radius: 6px; padding: 6px 8px; border: 1px solid #d7e1ea; background: #f7fafc; }
+  .concl .c-title { font-size: 12.5px; font-weight: 700; color: #14577e; line-height: 1.3; }
+  .concl .c-text { font-size: 10.5px; color: #55687a; line-height: 1.4; margin-top: 3px; }
+  .concl.ok { background: #eef9f2; border-color: #bfe0cb; }
+  .concl.ok .c-title { color: #226b43; }
+  .concl.warn { background: #fdf6ec; border-color: #f0d9b5; }
+  .concl.warn .c-title { color: #a8631a; }
+  .concl.info { background: #eef6fc; border-color: #cbe2f4; }
+  .calc { flex: 0 0 auto; margin-top: 5px; font-size: 9.5px; color: #6b7d8d; line-height: 1.35;
+    font-family: Consolas, Menlo, monospace; word-break: break-all; }
+  .twrap { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+  table { width: 100%; border-collapse: collapse; font-size: 10.5px; }
+  th { position: sticky; top: 0; background: #eef4f9; color: #4a6478; font-weight: 700; text-align: left;
+    padding: 3px 4px; border-bottom: 1px solid #d7e1ea; white-space: nowrap; }
+  td { padding: 2px 4px; border-bottom: 1px dashed #e6edf3; color: #46586a; white-space: nowrap; }
+  tr:nth-child(even) td { background: #fafcfe; }
+  td.ph { font-family: Consolas, Menlo, monospace; font-weight: 700; color: #14577e; }
+  td.empty { text-align: center; color: #a3b1bd; padding: 12px 4px; }
+  .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 3px;
+    border: 1px solid #c9d6e2; vertical-align: -1px; background: #eef4f9; }
+  .hint { font-size: 9.5px; color: #93a3b1; font-weight: 400; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ================= 顶部：实时读数 ================= -->
+  <header class="topbar">
+    <div class="brand">酸碱中和滴定虚拟实验室<small>0.100 mol/L HCl ⇄ 0.100 mol/L NaOH · 50.00 mL 蒸馏水</small></div>
+    <div class="chips">
+      <div class="chip"><span class="k">pH</span><b id="chipPh">7.0</b></div>
+      <div class="chip"><span class="k">总体积</span><b id="chipVol">50.00 mL</b></div>
+      <div class="chip"><span class="k">温度</span><b id="chipTemp">25.00 ℃</b></div>
+      <div class="chip color"><span class="k">颜色</span><b id="chipColor">无色</b></div>
+    </div>
+  </header>
+
+  <main class="main">
+    <!-- ================= 左栏：步骤 + 仪表 ================= -->
+    <section class="col">
+      <div class="card" style="flex:1 1 auto;">
+        <h3>实验步骤</h3>
+        <ul class="steps" id="stepList"></ul>
+      </div>
+
+      <div class="card meter-card">
+        <h3>pH 计 · 温度 · 比色卡</h3>
+        <div class="ph-row">
+          <div class="ph-digital neutral" id="phDigital">7.0</div>
+          <div class="ph-side">
+            <div class="ph-tag" id="phTag">中性</div>
+            <div class="ph-sub" id="phSub">c(H⁺)=1.0×10⁻⁷ mol/L</div>
+          </div>
+        </div>
+        <div class="t-row"><span class="t-lab">温度</span><b id="tempDigital">25.00 ℃</b></div>
+        <div class="bar"><i id="tempBar"></i></div>
+        <div class="t-note">中和放热：ΔT 已 ×100 便于观察（真实约 0.03 ℃/mL）</div>
+        <div class="pstrip">
+          <div class="cap">广泛 pH 试纸比色卡</div>
+          <div class="stripwrap">
+            <div class="row" id="phStripRow"></div>
+            <div class="arrow" id="phArrow" style="left:46%;"></div>
+          </div>
+          <div class="marks"><span>1</span><span>4</span><span>7</span><span>10</span><span>14</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= 中栏：实验台 ================= -->
+    <section class="col">
+      <div class="bench">
+        <div class="tiles"></div>
+        <div class="scene-note">试剂为便于观察的示意色（真实 HCl、NaOH 溶液均无色）</div>
+
+        <div class="stand-base"></div>
+        <div class="stand-rod"></div>
+        <div class="clamp"></div>
+
+        <div class="burette">
+          <div class="bur-glass">
+            <div class="bur-fluid" id="buretteFluid"></div>
+            <div class="bur-scale"></div>
+          </div>
+          <div class="bur-cock"></div>
+          <div class="bur-tip"></div>
+        </div>
+        <div class="tag tag-acid">滴定管：HCl 0.100 mol/L</div>
+
+        <div class="dropper">
+          <div class="dp-bulb"></div>
+          <div class="dp-glass"><div class="dp-fluid"></div></div>
+        </div>
+        <div class="tag tag-base">胶头滴管：NaOH 0.100 mol/L</div>
+
+        <div class="drop drop-acid" id="dropAcid"></div>
+        <div class="drop drop-base" id="dropBase"></div>
+
+        <div class="beaker">
+          <div class="bk-body"></div>
+          <div class="bk-liquid" id="beakerLiquid">
+            <div class="bk-ind" id="beakerIndicator"></div>
+            <div class="bk-surface"></div>
+          </div>
+          <div class="bk-glass"></div>
+          <div class="bk-spout"></div>
+          <div class="bk-ticks">
+            <span style="bottom:20%;"><i></i><em>20</em></span>
+            <span style="bottom:40%;"><i></i><em>40</em></span>
+            <span style="bottom:60%;"><i></i><em>60</em></span>
+            <span style="bottom:80%;"><i></i><em>80</em></span>
+          </div>
+          <div class="bk-vol" id="beakerVolLabel">50.00 mL</div>
+        </div>
+
+        <div class="thermo">
+          <div class="th-tube"><div class="th-col" id="thermoCol"></div></div>
+          <div class="th-bulb"></div>
+          <div class="th-lab">温度计</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= 右栏：指示剂 + 操作 + 曲线 ================= -->
+    <section class="col">
+      <div class="card">
+        <h3>指示剂试剂瓶</h3>
+        <div class="bottles" id="bottleList"></div>
+      </div>
+
+      <div class="card">
+        <h3>操作台</h3>
+        <div class="ctrl-grid">
+          <button class="btn acid" id="btnAcidDrop" type="button">加 1 滴 HCl</button>
+          <button class="btn base" id="btnBaseDrop" type="button">加 1 滴 NaOH</button>
+          <button class="btn acid" id="btnAcidMl" type="button">加 1 mL HCl</button>
+          <button class="btn base" id="btnBaseMl" type="button">加 1 mL NaOH</button>
+          <button class="btn rec" id="btnRecord" type="button">记录当前读数</button>
+          <button class="btn reset" id="btnReset" type="button">重置实验</button>
+        </div>
+      </div>
+
+      <div class="card curve-card">
+        <h3>滴定曲线 pH–V(NaOH)</h3>
+        <div class="curve-box" id="curveBox"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ================= 底部：结论 + 数据表 ================= -->
+  <footer class="bottom">
+    <div class="card">
+      <h3>实验结论 · 实时提示</h3>
+      <div class="concl info" id="conclusion">
+        <div class="c-title" id="conclTitle">请先选择一种指示剂</div>
+        <div class="c-text" id="conclText">指示剂的变色范围决定了它适用于哪一段 pH 突跃。</div>
+      </div>
+      <div class="calc" id="conclCalc"></div>
+    </div>
+
+    <div class="card">
+      <h3>数据记录 <span class="hint" id="recCount">0 条</span>
+        <button class="btn mini push" id="btnClear" type="button">清空表格</button>
+      </h3>
+      <div class="twrap" id="tableWrap">
+        <table>
+          <thead>
+            <tr><th>#</th><th>操作</th><th>V(HCl)/V(NaOH) mL</th><th>pH</th><th>颜色</th><th>T/℃</th></tr>
+          </thead>
+          <tbody id="tableBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </footer>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ==========================================================================
+   * 一、实验常量
+   * ======================================================================== */
+  var C_ACID = 0.1;        // HCl 浓度 mol/L
+  var C_BASE = 0.1;        // NaOH 浓度 mol/L
+  var V0 = 50;             // 初始蒸馏水体积 mL
+  var V_DROP = 0.05;       // 1 滴 = 0.05 mL
+  var KW = 1e-14;          // 水的离子积 (25 ℃)
+  var BEAKER_MAX = 100;    // 烧杯容量 mL（用于液面高度换算）
+  var TEMP_AMP = 100;      // 温度教学放大倍数
+  var DH_NEUTRAL = 57300;  // 中和热 ≈ 57.3 kJ/mol → 57300 J/mol
+
+  /* ==========================================================================
+   * 二、pH 模型（真实的对数模型，非线性的核心）
+   * --------------------------------------------------------------------------
+   * HCl 与 NaOH 均为强酸强碱，在水中完全电离，中和反应为
+   *     H⁺ + OH⁻ → H₂O        （n(HCl) 与 n(NaOH) 等量时恰好完全中和）
+   * 混合后设净强酸浓度 d = (n(HCl) − n(NaOH)) / V（mol/L，负值表示碱过量）。
+   * 由电荷守恒 [H⁺] = [OH⁻] + d 与水的离子积 [H⁺]·[OH⁻] = Kw 联立得
+   *     [H⁺]² − d·[H⁺] − Kw = 0
+   *     [H⁺] = ( d + √(d² + 4Kw) ) / 2
+   * 于是 pH = −lg[H⁺]。
+   * 该式在等当点附近自然给出「pH 突跃」：d 由 +1×10⁻⁵ 变到 −1×10⁻⁵ 时
+   * pH 直接从酸性跳到碱性，而不是缓慢经过 7 —— 这正是中和滴定的核心现象。
+   * 当 d = 0 时该式退化为 [H⁺] = √Kw = 1×10⁻⁷ mol/L，即 pH = 7.00（纯水）。
+   * ======================================================================== */
+  function pHFromVolumes(va, vb) {
+    var V_L = (V0 + va + vb) / 1000;                 // 总体积 (L)
+    var nA = C_ACID * va / 1000;                     // n(HCl)  (mol)
+    var nB = C_BASE * vb / 1000;                     // n(NaOH) (mol)
+    var d = (nA - nB) / V_L;                         // 净强酸浓度 mol/L
+    var h = (d + Math.sqrt(d * d + 4 * KW)) / 2;     // 一元二次方程的正根
+    var pH = -Math.log10(h);
+    if (!isFinite(pH)) { pH = 7; }
+    if (pH < 0) { pH = 0; }
+    if (pH > 14) { pH = 14; }
+    return pH;
+  }
+
+  /* ==========================================================================
+   * 三、温度模型（中和放热）
+   * --------------------------------------------------------------------------
+   * 中和热 ΔH ≈ −57.3 kJ/mol，放热量 Q = n(已中和) × 57300 J/mol；
+   * 溶液按密度 1 g/mL、比热容 4.18 J/(g·℃) 估算，ΔT = Q / (c·m)。
+   * 0.100 mol/L 的试剂滴加量很小，真实 ΔT 只有 10⁻³ ℃ 量级，无法观察，
+   * 因此这里按同一物理模型计算后统一放大 TEMP_AMP 倍用于教学观察（界面已注明）。
+   * 由于 n(已中和) = min(n(HCl), n(NaOH)) 在等当点达到最大，
+   * 温度在等当点附近出现峰值，之后过量的试剂只起稀释作用，温度略降。
+   * ======================================================================== */
+  function computeTemp(nA, nB, V_L) {
+    var nNeutral = Math.min(nA, nB);
+    var Q = nNeutral * DH_NEUTRAL;          // J
+    var mass = V_L * 1000;                  // g
+    var dTreal = Q / (4.18 * mass);         // 真实温升 ℃
+    return { dTreal: dTreal, T: 25 + dTreal * TEMP_AMP };
+  }
+
+  /* ==========================================================================
+   * 四、四种指示剂的变色阈值（严格按教材/国标范围）
+   * --------------------------------------------------------------------------
+   * zones：按 pH 升序，max 为该颜色区间的上界（用于给出颜色名称）；
+   * stops：颜色锚点，相邻锚点之间线性插值，因此颜色是渐变而非突变
+   *        （真实滴定中最后一滴也常呈过渡色，这样更贴近实验现象）；
+   *        a 为覆盖色透明度，a = 0 表示无色。
+   *   酚酞   pH < 8.2 无色 ；8.2 ~ 10.0 浅粉 ；> 10.0 深红
+   *   石蕊   pH < 5.0 红   ；5.0 ~ 8.0  紫   ；> 8.0  蓝
+   *   甲基橙 pH < 3.1 红   ；3.1 ~ 4.4  橙   ；> 4.4  黄
+   *   甲基红 pH < 4.4 红   ；4.4 ~ 6.2  橙   ；> 6.2  黄
+   * ======================================================================== */
+  var INDICATORS = [
+    {
+      key: 'none', name: '不加', full: '不加指示剂', bottle: 'rgba(226,238,246,.55)',
+      zones: [{ max: 99, name: '无色' }],
+      stops: [{ p: 0, c: [226, 238, 246], a: 0 }]
+    },
+    {
+      key: 'phenolphthalein', name: '酚酞', full: '酚酞', bottle: 'rgba(233,86,146,.30)',
+      zones: [{ max: 8.2, name: '无色' }, { max: 10.0, name: '浅粉色' }, { max: 99, name: '深红色' }],
+      stops: [
+        { p: 8.2, c: [236, 232, 226], a: 0.00 },
+        { p: 10.0, c: [233, 86, 146], a: 0.42 },
+        { p: 14.0, c: [196, 18, 74], a: 0.78 }
+      ]
+    },
+    {
+      key: 'litmus', name: '石蕊', full: '石蕊', bottle: 'rgba(120,88,180,.32)',
+      zones: [{ max: 5.0, name: '红色' }, { max: 8.0, name: '紫色' }, { max: 99, name: '蓝色' }],
+      stops: [
+        { p: 5.0, c: [205, 40, 60], a: 0.55 },
+        { p: 8.0, c: [122, 86, 178], a: 0.50 },
+        { p: 14.0, c: [40, 92, 200], a: 0.50 }
+      ]
+    },
+    {
+      key: 'methylOrange', name: '甲基橙', full: '甲基橙', bottle: 'rgba(240,150,40,.32)',
+      zones: [{ max: 3.1, name: '红色' }, { max: 4.4, name: '橙色' }, { max: 99, name: '黄色' }],
+      stops: [
+        { p: 3.1, c: [214, 50, 48], a: 0.55 },
+        { p: 4.4, c: [240, 140, 30], a: 0.55 },
+        { p: 14.0, c: [245, 205, 40], a: 0.50 }
+      ]
+    },
+    {
+      key: 'methylRed', name: '甲基红', full: '甲基红', bottle: 'rgba(220,70,60,.32)',
+      zones: [{ max: 4.4, name: '红色' }, { max: 6.2, name: '橙色' }, { max: 99, name: '黄色' }],
+      stops: [
+        { p: 4.4, c: [220, 60, 60], a: 0.55 },
+        { p: 6.2, c: [236, 145, 45], a: 0.55 },
+        { p: 14.0, c: [240, 210, 50], a: 0.50 }
+      ]
+    }
+  ];
+
+  // 广泛 pH 试纸比色卡（pH 1~14 的标准色，仅用于显示）
+  var PH_STRIP = ['#d8332a', '#e35d2c', '#ea7b2c', '#efb02c', '#f2e02c', '#d8e02c', '#8fc73e',
+                  '#4aa64a', '#2f9e8f', '#2b7fb8', '#2a5aa8', '#3a3f8f', '#5a3a8f', '#6b2a7a'];
+
+  var STEP_DEFS = [
+    { t: '选择指示剂', d: '点右侧试剂瓶，如酚酞' },
+    { t: '逐滴加入酸或碱', d: '先加 HCl，再用 NaOH 回滴' },
+    { t: '观察颜色与 pH 变化', d: '盯住等当点附近的突跃' },
+    { t: '记录数据', d: '每次读数写入表格' },
+    { t: '得出结论', d: '比较变色范围与突跃范围' }
+  ];
+
+  /* ==========================================================================
+   * 五、状态与工具函数
+   * ======================================================================== */
+  var st = {
+    volAcid: 0,      // 已加入 HCl 体积 mL
+    volBase: 0,      // 已加入 NaOH 体积 mL
+    indIndex: 0,     // 当前指示剂下标
+    indChosen: false,
+    records: [],
+    lastAction: '',
+    event: null,
+    overflow: false
+  };
+
+  function $(id) { return document.getElementById(id); }
+  function setText(id, txt) { var el = $(id); if (el) { el.textContent = txt; } }
+  function setHTML(id, html) { var el = $(id); if (el) { el.innerHTML = html; } }
+  function setStyle(id, prop, val) { var el = $(id); if (el && el.style) { el.style[prop] = val; } }
+  function setActive(id, on) {
+    var el = $(id);
+    if (!el || !el.classList) { return; }
+    if (on) { el.classList.add('active'); } else { el.classList.remove('active'); }
+  }
+  function round4(x) { return Math.round(x * 10000) / 10000; }
+  function clamp(x, lo, hi) { return x < lo ? lo : (x > hi ? hi : x); }
+  function signOf(x) { if (Math.abs(x) < 1e-9) { return 0; } return x > 0 ? 1 : -1; }
+
+  function supNum(e) {
+    var map = { '-': '⁻', '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹' };
+    var s = String(e), out = '';
+    for (var i = 0; i < s.length; i++) {
+      var ch = s.charAt(i);
+      out += (map[ch] === undefined ? ch : map[ch]);
+    }
+    return out;
+  }
+  // 把数值写成 a×10ᵇ 的科学计数法，便于显示 mol 数与 c(H⁺)
+  function sci(x, unit) {
+    var suffix = unit ? (' ' + unit) : '';
+    if (!isFinite(x) || x === 0) { return '0' + suffix; }
+    var e = Math.floor(Math.log10(Math.abs(x)));
+    var m = x / Math.pow(10, e);
+    if (Math.abs(m) >= 9.995) { m = m / 10; e = e + 1; }
+    if (Math.abs(m) < 1) { m = m * 10; e = e - 1; }
+    return m.toFixed(2) + '×10' + supNum(e) + suffix;
+  }
+
+  // 指示剂在某 pH 下所属的颜色区间
+  function zoneOf(ind, pH) {
+    var zs = ind.zones;
+    for (var i = 0; i < zs.length; i++) {
+      if (pH <= zs[i].max) { return zs[i]; }
+    }
+    return zs[zs.length - 1];
+  }
+
+  function mixColor(c1, c2, t) {
+    return [
+      Math.round(c1[0] + (c2[0] - c1[0]) * t),
+      Math.round(c1[1] + (c2[1] - c1[1]) * t),
+      Math.round(c1[2] + (c2[2] - c1[2]) * t)
+    ];
+  }
+
+  // 指示剂在给定 pH 下覆盖在液面上的颜色（含透明度），相邻锚点线性过渡
+  function indicatorColor(ind, pH) {
+    var s = ind.stops;
+    var rgb = s[0].c, alpha = s[0].a;
+    if (pH >= s[s.length - 1].p) {
+      rgb = s[s.length - 1].c;
+      alpha = s[s.length - 1].a;
+    } else if (pH > s[0].p) {
+      for (var i = 0; i < s.length - 1; i++) {
+        if (pH >= s[i].p && pH <= s[i + 1].p) {
+          var t = (pH - s[i].p) / (s[i + 1].p - s[i].p);
+          rgb = mixColor(s[i].c, s[i + 1].c, t);
+          alpha = s[i].a + (s[i + 1].a - s[i].a) * t;
+          break;
+        }
+      }
+    }
+    return {
+      rgb: rgb,
+      alpha: alpha,
+      css: 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',' + alpha.toFixed(3) + ')'
+    };
+  }
+
+  function colorShort(s) {
+    if (s.ind.key === 'none') { return '无色'; }
+    return s.zone.name;
+  }
+  function colorFull(s) {
+    if (s.ind.key === 'none') { return '无色（未加指示剂）'; }
+    return s.ind.full + '：' + s.zone.name;
+  }
+
+  /* ==========================================================================
+   * 六、核心计算：由当前加入量得到全部读数
+   * ======================================================================== */
+  function computeState() {
+    var V_L = (V0 + st.volAcid + st.volBase) / 1000;
+    var nA = C_ACID * st.volAcid / 1000;
+    var nB = C_BASE * st.volBase / 1000;
+    var pH = pHFromVolumes(st.volAcid, st.volBase);
+    var d = (nA - nB) / V_L;
+    var h = (d + Math.sqrt(d * d + 4 * KW)) / 2;
+    var ind = INDICATORS[st.indIndex];
+    var tp = computeTemp(nA, nB, V_L);
+    return {
+      nA: nA, nB: nB, V_L: V_L, h: h, d: d, pH: pH,
+      total: V0 + st.volAcid + st.volBase,
+      ind: ind,
+      color: indicatorColor(ind, pH),
+      zone: zoneOf(ind, pH),
+      T: tp.T,
+      dTreal: tp.dTreal
+    };
+  }
+
+  /* ==========================================================================
+   * 七、交互动作
+   * ======================================================================== */
+  function selectIndicator(i) {
+    st.indIndex = i;
+    st.indChosen = true;
+    st.event = null;
+    renderAll();
+  }
+
+  function addVolume(kind, mL) {
+    var before = computeState();
+    var sign0 = signOf(before.nA - before.nB);
+    if (kind === 'acid') { st.volAcid = round4(st.volAcid + mL); }
+    else { st.volBase = round4(st.volBase + mL); }
+    var after = computeState();
+    var sign1 = signOf(after.nA - after.nB);
+
+    st.lastAction = (kind === 'acid' ? '加 HCl ' : '加 NaOH ') + mL.toFixed(2) + ' mL';
+    st.event = null;
+
+    // ① 指示剂是否变色（比较变色区间名，例如 无色 → 浅粉色）
+    var z0 = zoneOf(before.ind, before.pH).name;
+    var z1 = zoneOf(after.ind, after.pH).name;
+    if (before.ind.key !== 'none' && z0 !== z1) {
+      st.event = { kind: 'indicator', from: z0, to: z1, phFrom: before.pH, phTo: after.pH, dv: mL };
+    } else if (st.volAcid > 0 && st.volBase > 0 && sign1 !== 0 && sign0 !== sign1) {
+      // ② 跨过等当点 → pH 突跃
+      st.event = { kind: 'jump', phFrom: before.pH, phTo: after.pH, dv: mL };
+    }
+
+    // 烧杯容积提示：超过 100 mL 刻度时液面不再抬升，只给出文字提醒
+    st.overflow = (V0 + st.volAcid + st.volBase) > BEAKER_MAX + 1e-9;
+
+    flashDrop(kind);
+    renderAll();
+  }
+
+  function flashDrop(kind) {
+    var el = $(kind === 'acid' ? 'dropAcid' : 'dropBase');
+    if (!el || !el.classList) { return; }
+    el.classList.remove('falling');
+    setTimeout(function () { el.classList.add('falling'); }, 16);
+    setTimeout(function () { el.classList.remove('falling'); }, 900);
+  }
+
+  function recordReading() {
+    var s = computeState();
+    st.records.push({
+      n: st.records.length + 1,
+      action: st.lastAction ? st.lastAction : '初始状态',
+      va: st.volAcid, vb: st.volBase,
+      ph: s.pH, color: colorShort(s), css: s.color.css, temp: s.T
+    });
+    renderAll();
+    renderTable();
+    scrollTableBottom();
+  }
+
+  function clearTable() {
+    st.records = [];
+    renderAll();
+    renderTable();
+  }
+
+  function resetAll() {
+    st.volAcid = 0;
+    st.volBase = 0;
+    st.indIndex = 0;
+    st.indChosen = false;
+    st.records = [];
+    st.lastAction = '';
+    st.event = null;
+    st.overflow = false;
+    renderAll();
+    renderTable();
+  }
+
+  function scrollTableBottom() {
+    var w = $('tableWrap');
+    if (w) { w.scrollTop = w.scrollHeight; }
+  }
+
+  /* ==========================================================================
+   * 八、渲染（每次先整体重写容器内容，避免节点堆积）
+   * ======================================================================== */
+  function renderAll() {
+    var s = computeState();
+    renderChips(s);
+    renderMeter(s);
+    renderBeaker(s);
+    renderBurette(s);
+    renderThermo(s);
+    renderBottles();
+    renderSteps();
+    renderCurve(s);
+    renderConclusion(s);
+  }
+
+  function renderChips(s) {
+    setText('chipPh', s.pH.toFixed(1));
+    setText('chipVol', s.total.toFixed(2) + ' mL');
+    setText('chipTemp', s.T.toFixed(2) + ' ℃');
+    setText('chipColor', colorShort(s));
+  }
+
+  function renderMeter(s) {
+    var phEl = $('phDigital');
+    setText('phDigital', s.pH.toFixed(1));
+    if (phEl) {
+      var cls = 'ph-digital';
+      var tag = '中性';
+      if (s.pH < 6.5) { cls += ' acid'; tag = '酸性'; }
+      else if (s.pH > 7.5) { cls += ' base'; tag = '碱性'; }
+      else { cls += ' neutral'; }
+      phEl.className = cls;
+      setText('phTag', tag);
+    }
+    setText('phSub', 'c(H⁺)=' + sci(s.h, 'mol/L'));
+    setText('tempDigital', s.T.toFixed(2) + ' ℃');
+    // 温度条：25 ~ 35 ℃ 映射到 0 ~ 100%
+    var pct = clamp((s.T - 25) / 10 * 100, 0, 100);
+    setStyle('tempBar', 'width', pct.toFixed(1) + '%');
+    setStyle('thermoCol', 'height', clamp(8 + pct * 0.9, 8, 98).toFixed(1) + '%');
+    // 比色卡指针：pH 1 ~ 14 映射到 0 ~ 100%
+    var left = clamp((s.pH - 1) / 13 * 100, 0, 100);
+    setStyle('phArrow', 'left', left.toFixed(1) + '%');
+  }
+
+  function renderBeaker(s) {
+    var pct = clamp(s.total / BEAKER_MAX * 100, 6, 100);
+    setStyle('beakerLiquid', 'height', pct.toFixed(2) + '%');
+    setStyle('beakerIndicator', 'background', s.color.css);
+    setText('beakerVolLabel', st.overflow ? '已超出 100 mL 刻度' : s.total.toFixed(2) + ' mL');
+  }
+
+  function renderBurette() {
+    // 滴定管刻度示意：每加入 1 mL 液面下降 5%
+    var lv = clamp(100 - st.volAcid * 5, 5, 100);
+    setStyle('buretteFluid', 'height', lv.toFixed(1) + '%');
+  }
+
+  function renderThermo() {
+    // 颜色柱已在 renderMeter 中随温度更新
+  }
+
+  function renderBottles() {
+    for (var i = 0; i < INDICATORS.length; i++) {
+      setActive('ind-' + INDICATORS[i].key, i === st.indIndex);
+    }
+  }
+
+  function currentStep() {
+    if (!st.indChosen) { return 1; }
+    if (st.volAcid + st.volBase === 0) { return 2; }
+    if (st.records.length === 0) { return 3; }
+    if (st.records.length < 3) { return 4; }
+    return 5;
+  }
+
+  function renderSteps() {
+    var cur = currentStep(), h = '';
+    for (var i = 0; i < STEP_DEFS.length; i++) {
+      var n = i + 1, cls = 'step';
+      if (n < cur) { cls = 'step done'; } else if (n === cur) { cls = 'step active'; }
+      h += '<li class="' + cls + '"><span class="num">' + (n < cur ? '✓' : n) + '</span>' +
+           '<span><b>' + STEP_DEFS[i].t + '</b><em>' + STEP_DEFS[i].d + '</em></span></li>';
+    }
+    setHTML('stepList', h);
+  }
+
+  // 滴定曲线：以当前已加入的 HCl 为被测物，横轴为 NaOH 加入量，纵轴 pH
+  function renderCurve(s) {
+    if (st.volAcid <= 0) {
+      setHTML('curveBox', '<div class="curve-empty">先加入 HCl，<br>才能绘制 pH–V(NaOH) 滴定曲线</div>');
+      return;
+    }
+    var W = 224, H = 104, pl = 26, pr = 6, pt = 6, pb = 16;
+    var vbMax = Math.max(st.volAcid * 2, st.volBase + 0.4, 1);
+    function X(v) { return pl + (v / vbMax) * (W - pl - pr); }
+    function Y(p) { return pt + (1 - p / 14) * (H - pt - pb); }
+    var g = '';
+    var gl = [0, 3, 7, 11, 14];
+    for (var i = 0; i < gl.length; i++) {
+      var y = Y(gl[i]), strong = (gl[i] === 7);
+      g += '<line x1="' + pl + '" y1="' + y.toFixed(1) + '" x2="' + (W - pr) + '" y2="' + y.toFixed(1) +
+           '" stroke="' + (strong ? '#b9cbd8' : '#e2eaf1') + '" stroke-width="1"' +
+           (strong ? ' stroke-dasharray="3 3"' : '') + '/>';
+      g += '<text x="' + (pl - 3) + '" y="' + (y + 3).toFixed(1) + '" font-size="7" fill="#8798a8" text-anchor="end">' + gl[i] + '</text>';
+    }
+    var xEq = X(st.volAcid);
+    g += '<line x1="' + xEq.toFixed(1) + '" y1="' + pt + '" x2="' + xEq.toFixed(1) + '" y2="' + (H - pb) +
+         '" stroke="#e0a24a" stroke-width="1" stroke-dasharray="3 3"/>';
+    var pts = [], N = 120;
+    for (var k = 0; k <= N; k++) {
+      var vb = vbMax * k / N;
+      pts.push(X(vb).toFixed(1) + ',' + Y(pHFromVolumes(st.volAcid, vb)).toFixed(1));
+    }
+    g += '<polyline fill="none" stroke="#1b7fb8" stroke-width="1.6" points="' + pts.join(' ') + '"/>';
+    var cx = X(Math.min(st.volBase, vbMax)), cy = Y(s.pH);
+    g += '<circle cx="' + cx.toFixed(1) + '" cy="' + cy.toFixed(1) + '" r="3" fill="#e2534a" stroke="#ffffff" stroke-width="1"/>';
+    g += '<text x="' + pl + '" y="' + (H - 4) + '" font-size="7" fill="#8798a8">0</text>';
+    g += '<text x="' + (W - pr) + '" y="' + (H - 4) + '" font-size="7" fill="#8798a8" text-anchor="end">' + vbMax.toFixed(1) + ' mL</text>';
+    g += '<text x="' + (xEq + 2).toFixed(1) + '" y="' + (pt + 8) + '" font-size="7" fill="#c08a3a">等当点</text>';
+    setHTML('curveBox', '<svg viewBox="0 0 ' + W + ' ' + H + '" width="' + W + '" height="' + H + '" role="img" aria-label="滴定曲线">' + g + '</svg>');
+  }
+
+  function renderConclusion(s) {
+    var box = $('conclusion');
+    var tone = 'info', title = '', text = '';
+    var tot = st.volAcid + st.volBase;
+    var ev = st.event;
+
+    if (!st.indChosen) {
+      title = '第 ① 步：先选一种指示剂';
+      text = '指示剂的变色范围决定了它适合哪一段滴定突跃。强酸滴强碱常用酚酞（变色范围 8.2~10.0），' +
+             '强碱滴强酸常用甲基橙（3.1~4.4）。';
+    } else if (ev && ev.kind === 'indicator') {
+      tone = 'ok';
+      title = '指示剂变色：' + s.ind.full + ' 由 ' + ev.from + ' 变为 ' + ev.to + ' —— 到达滴定终点！';
+      text = '这 ' + (ev.dv < 0.1 ? '1 滴（0.05 mL）' : ev.dv.toFixed(2) + ' mL') + '使 pH 从 ' +
+             ev.phFrom.toFixed(1) + ' 突跃到 ' + ev.phTo.toFixed(1) + '，指示剂正好落在这一突跃范围内。';
+    } else if (ev && ev.kind === 'jump') {
+      tone = 'warn';
+      title = 'pH 突跃：跨过等当点，pH 由 ' + ev.phFrom.toFixed(1) + ' 跳到 ' + ev.phTo.toFixed(1) + '！';
+      text = '此时 n(HCl) 与 n(NaOH) 恰好相等（或刚被超越），溶液中 H⁺ 几乎被 OH⁻ 完全消耗，' +
+             '剩余 c(H⁺/OH⁻) 极小，因此 pH 变化极为剧烈。';
+    } else if (tot > 0 && Math.abs(s.pH - 7) < 0.35) {
+      tone = 'ok';
+      title = '接近中和点（pH ≈ 7.0）';
+      text = 'H⁺ 与 OH⁻ 的物质的量几乎相等，恰好完全反应生成 NaCl 和 H₂O。' +
+             '若酸的浓度、体积未知，此刻由 c(HCl)·V(HCl) = c(NaOH)·V(NaOH) 即可求算。';
+    } else if (s.pH < 3) {
+      tone = 'info';
+      title = '强酸性：HCl 明显过量（pH ' + s.pH.toFixed(1) + '）';
+      text = '此时酚酞为无色、甲基橙为红色。继续滴加 NaOH，pH 将缓慢升高，直到接近等当点才突然跃变。';
+    } else if (s.pH > 11) {
+      tone = 'info';
+      title = '强碱性：NaOH 明显过量（pH ' + s.pH.toFixed(1) + '）';
+      text = '此时酚酞为深红色、甲基橙为黄色。注意：过量碱时温度反而略降，因为不再发生中和反应，' +
+             '加进去的溶液只起稀释作用。';
+    } else if (tot === 0) {
+      title = '溶液为 50.00 mL 蒸馏水，pH = 7.0';
+      text = '水的自偶电离使 c(H⁺) = 1.0×10⁻⁷ mol/L。向纯水中加入第 1 滴 0.100 mol/L 的强酸或强碱，' +
+             'pH 就会跳到 4 或 10 附近 —— 纯水没有缓冲能力。';
+    } else {
+      tone = 'info';
+      title = '当前 pH = ' + s.pH.toFixed(1) + '，' + (s.pH < 7 ? '酸性' : (s.pH > 7 ? '碱性' : '中性'));
+      text = '继续逐滴加入并观察 pH 与颜色的变化，注意记录到达等当点前后的读数。';
+    }
+
+    if (box) { box.className = 'concl ' + tone; }
+    setText('conclTitle', title);
+    setText('conclText', text);
+
+    // 定量计算行：物质的量守恒，帮学生看见「等当点 = 等物质的量」
+    var ex = s.nA - s.nB, exTxt = '';
+    if (signOf(ex) === 0) { exTxt = '恰好完全中和'; }
+    else if (ex > 0) { exTxt = 'HCl 过量 ' + sci(ex, 'mol'); }
+    else { exTxt = 'NaOH 过量 ' + sci(-ex, 'mol'); }
+    setText('conclCalc',
+      'n(HCl)=' + sci(s.nA, 'mol') + '　n(NaOH)=' + sci(s.nB, 'mol') + '　' + exTxt +
+      '　V总=' + s.total.toFixed(2) + ' mL　ΔT(真实)=' + s.dTreal.toFixed(4) + ' ℃');
+  }
+
+  function renderTable() {
+    var rows = st.records, h = '';
+    if (rows.length === 0) {
+      h = '<tr><td class="empty" colspan="6">还没有数据 —— 调好 pH 后点「记录当前读数」</td></tr>';
+    } else {
+      for (var i = 0; i < rows.length; i++) {
+        var r = rows[i];
+        h += '<tr><td>' + r.n + '</td><td>' + r.action + '</td><td>' +
+             r.va.toFixed(2) + ' / ' + r.vb.toFixed(2) + '</td><td class="ph">' + r.ph.toFixed(1) + '</td>' +
+             '<td><span class="sw" style="background:' + r.css + '"></span>' + r.color + '</td>' +
+             '<td>' + r.temp.toFixed(2) + '</td></tr>';
+      }
+    }
+    setHTML('tableBody', h);
+    setText('recCount', rows.length + ' 条');
+  }
+
+  /* ==========================================================================
+   * 九、初始化：一次性生成试剂瓶、比色卡，并绑定 12 个交互
+   * ======================================================================== */
+  function buildBottles() {
+    var h = '';
+    for (var i = 0; i < INDICATORS.length; i++) {
+      var ind = INDICATORS[i];
+      h += '<button class="bottle" id="ind-' + ind.key + '" type="button">' +
+             '<span class="cap"></span>' +
+             '<span class="glass"><span class="fluid" style="background:' + ind.bottle + '"></span></span>' +
+             '<span class="nm">' + ind.name + '</span>' +
+           '</button>';
+    }
+    setHTML('bottleList', h);
+  }
+
+  function buildStrip() {
+    var h = '';
+    for (var i = 0; i < PH_STRIP.length; i++) {
+      h += '<i style="background:' + PH_STRIP[i] + '"></i>';
+    }
+    setHTML('phStripRow', h);
+  }
+
+  function wire(id, fn) {
+    var el = $(id);
+    if (el && el.addEventListener) { el.addEventListener('click', fn); }
+  }
+
+  function init() {
+    buildBottles();
+    buildStrip();
+
+    // 绑定顺序 = 自动化冒烟测试顺序：先指示剂，再操作，最后记录/重置/清空
+    wire('ind-none', function () { selectIndicator(0); });
+    wire('ind-phenolphthalein', function () { selectIndicator(1); });
+    wire('ind-litmus', function () { selectIndicator(2); });
+    wire('ind-methylOrange', function () { selectIndicator(3); });
+    wire('ind-methylRed', function () { selectIndicator(4); });
+
+    wire('btnAcidDrop', function () { addVolume('acid', V_DROP); });
+    wire('btnBaseDrop', function () { addVolume('base', V_DROP); });
+    wire('btnAcidMl', function () { addVolume('acid', 1); });
+    wire('btnBaseMl', function () { addVolume('base', 1); });
+
+    wire('btnRecord', function () { recordReading(); });
+    wire('btnReset', function () { resetAll(); });
+    wire('btnClear', function () { clearTable(); });
+
+    renderAll();
+    renderTable();
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>

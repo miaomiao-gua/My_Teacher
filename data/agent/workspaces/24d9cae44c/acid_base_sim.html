@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>酸碱盐仿真实验台</title>
+<style>
+  body { font-family: "Microsoft YaHei", sans-serif; background: #f0f4f8; margin: 0; padding: 1em; }
+  h1, h2 { text-align: center; color: #2c3e50; }
+  .container { max-width: 960px; margin: auto; background: white; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); padding: 1em; }
+  .tank { background: #eef7ff; border: 3px solid #3498db; border-radius: 12px; height: 160px; position: relative; overflow: hidden; margin-bottom: 1em; display: flex; align-items: center; justify-content: center; }
+  .liquid { font-size: 24px; color: #2c3e50; transition: background-color 0.5s, color 0.5s; white-space: nowrap; text-align: center; padding: 0 1em; border-radius: 8px; }
+  .controls { display: flex; gap: 1em; flex-wrap: wrap; justify-content: center; margin-bottom: 1em; align-items: center; }
+  button, select, input[type=range] { padding: 0.5em 0.8em; border-radius: 6px; border: 1px solid #bdc3c7; background: white; font-size: 14px; cursor: pointer; }
+  button:hover { background: #ecf0f1; }
+  button:active { background: #d5dbdb; }
+  .indicator-select { width: 180px; }
+  .buttons-group { display: flex; gap: 0.5em; align-items: center; }
+  .info-panel { background: #f8f9fa; border-left: 4px solid #27ae60; padding: 0.8em; margin-top: 1em; font-size: 14px; color: #34495e; }
+  .legend { display: flex; gap: 1.5em; flex-wrap: wrap; justify-content: center; margin-top: 0.5em; font-size: 12px; }
+  .legend-item { display: inline-flex; align-items: center; gap: 0.3em; background: #fff; border: 1px solid #ecf0f1; padding: 0.3em 0.6em; border-radius: 4px; }
+  .color-box { width: 16px; height: 16px; border-radius: 3px; display: inline-block; vertical-align: middle; border: 1px solid #bdc3c7; }
+  @keyframes bubble { 0% { transform: translateY(0); opacity: 0.8; } 100% { transform: translateY(-20px); opacity: 0; } }
+  .bubble { position: absolute; bottom: 0; left: 50%; width: 6px; height: 6px; background: rgba(255,255,255,0.7); border-radius: 50%; animation: bubble 3s infinite ease-in-out; }
+</style>
+</head>
+<body onload="init()">
+<div class="container">
+  <h1>🧪 酸碱盐仿真实验台</h1>
+
+  <!-- 反应池 -->
+  <div class="tank" id="tank">
+    <div class="liquid" id="liquid">中性水 (pH = 7.0)</div>
+  </div>
+
+  <!-- 操作按钮组 -->
+  <div class="controls">
+    <div class="buttons-group">
+      <button onclick="addAcid()">加酸 🧪</button>
+      <button onclick="addBase()">加碱 🧴</button>
+      <button onclick="resetExperiment()">重置实验 🔄</button>
+    </div>
+
+    <select id="indicator" class="indicator-select" onchange="changeIndicator()">
+      <option value="litmus">石蕊 (Litmus)</option>
+      <option value="phenolphthalein">酚酞 (Phenolphthalein)</option>
+      <option value="methylorange">甲基橙 (Methyl Orange)</option>
+    </select>
+
+    <!-- 初始 pH 滑块 -->
+    <div style="display:flex;align-items:center;gap:0.5em;">
+      <label for="initialPH" style="font-size:14px;">起始 pH:</label>
+      <input id="initialPH" type="range" min="0" max="14" value="7" step="0.1" oninput="updateLabel()" onchange="resetExperiment()">
+      <span id="phValue" style="font-weight:600;">7.0</span>
+    </div>
+  </div>
+
+  <!-- 图例说明 -->
+  <div class="legend">
+    <div class="legend-item"><span class="color-box" style="background:#e74c3c"></span><span>红色：酸性</span></div>
+    <div class="legend-item"><span class="color-box" style="background:#2ecc71"></span><span>蓝色：碱性</span></div>
+    <div class="legend-item"><span class="color-box" style="background:#ecf0f1"></span><span>无色/浅色：中性或弱碱</span></div>
+    <div class="legend-item"><span class="color-box" style="background:#ffcc00"></span><span>黄色/橙色：过渡区</span></div>
+  </div>
+
+  <!-- 信息面板 -->
+  <div class="info-panel">
+    <strong>💡 实验提示：</strong>点击“加酸”或“加碱”按钮，观察反应池的 pH 值和颜色变化。不同指示剂对酸碱度非常敏感！<br>
+    <strong>当前状态：</strong>pH = <span id="currentPH">7.0</span> | 指示剂：<span id="indicatorName">石蕊 (Litmus)</span><br>
+    <strong>操作说明：</strong>每次添加会改变 pH（±0.5），模拟真实滴定过程。滑块可调整起始 pH（比如从酸性溶液开始实验）。<br>
+    <strong>注意事项：</strong>酚酞在 pH 8-10 时呈浅粉红，pH 12 以上为深红色；甲基橙在 pH 3.1-4.4 呈橙色。
+  </div>
+
+  <!-- 隐藏元素：用于计算 -->
+  <input type="hidden" id="currentPHVal">
+</div>
+
+<script>
+// DOM 元素引用（初始化时获取）
+let liquidEl, currentPHSpan, indicatorNameSpan, tank, initialPHInput, phValueLabel;
+let state = {
+  ph: 7.0,
+  indicator: "litmus"
+};
+
+// 指示剂颜色规则
+const indicators = {
+  litmus: {
+    name: "石蕊 (Litmus)",
+    rules: [
+      { maxPH: 4.5, color: "#e74c3c", text: "红色" },   // 酸性
+      { minPH: 8.3, color: "#2ecc71", text: "蓝色" }    // 碱性
+    ]
+  },
+  phenolphthalein: {
+    name: "酚酞 (Phenolphthalein)",
+    rules: [
+      { maxPH: 8.0, color: "#ecf0f1", text: "无色" },   // 酸性/中性
+      { minPH: 10, color: "#ff6b81", text: "粉红色" }  // 碱性（pH>10）
+    ]
+  },
+  methylorange: {
+    name: "甲基橙 (Methyl Orange)",
+    rules: [
+      { maxPH: 3.1, color: "#e74c3c", text: "红色" },   // 强酸
+      { defaultColor: "#ffcc00", defaultText: "橙色" }  // 过渡区（pH 3.1-4.4）
+    ]
+  }
+};
+
+// 更新标签显示
+function updateLabel() {
+  phValueLabel.textContent = initialPHInput.value;
+}
+
+// 改变指示剂
+function changeIndicator() {
+  const selectEl = document.getElementById("indicator");
+  state.indicator = selectEl.value;
+  
+  const indData = indicators[state.indicator];
+  if (indData) {
+    indicatorNameSpan.textContent = indData.name;
+    updateLiquidColor();
+  }
+}
+
+// 更新液体颜色和文本
+function updateLiquidColor() {
+  const indData = indicators[state.indicator];
+  if (!indData) {
+    liquidEl.style.backgroundColor = "#ecf0f1";
+    liquidEl.textContent = "错误：无法识别指示剂";
+    return;
+  }
+
+  let color = null;
+  let text = null;
+  
+  const phVal = state.ph;
+  
+  if (phVal <= indData.rules[0].maxPH) {
+    color = indData.rules[0].color;
+    text = indData.rules[0].text;
+  } else if (phVal >= indData.rules[1].minPH) {
+    color = indData.rules[1].color;
+    text = indData.rules[1].text;
+  } else if ("defaultColor" in indData.rules[1]) {
+    // 甲基橙的特殊情况
+    color = indData.rules[1].defaultColor;
+    text = indData.rules[1].defaultText;
+  } else {
+    // 酚酞的中间区域（8-10）显示浅粉红
+    color = "#ffc2d1";
+    text = "浅粉红色（过渡区）";
+  }
+
+  liquidEl.style.backgroundColor = color;
+  liquidEl.textContent = `溶液 (pH = ${phVal.toFixed(1)}) - ${text}`;
+  
+  // 添加气泡动画（随机位置）
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.style.left = Math.random() * 80 + 10 + "%";
+  bubble.style.animationDelay = Math.random() * 2 + "s";
+  tank.appendChild(bubble);
+
+  // 移除旧气泡（最多保留 3 个）
+  const bubbles = document.querySelectorAll(".bubble");
+  if (bubbles.length > 3) {
+    bubbles[0].remove();
+  }
+}
+
+// 加酸按钮
+function addAcid() {
+  state.ph -= 0.5;
+  if (state.ph < 1) state.ph = 1;
+  currentPHSpan.textContent = state.ph.toFixed(1);
+  document.getElementById("currentPHVal").value = state.ph;
+  updateLiquidColor();
+}
+
+// 加碱按钮
+function addBase() {
+  state.ph += 0.5;
+  if (state.ph > 13) state.ph = 13;
+  currentPHSpan.textContent = state.ph.toFixed(1);
+  document.getElementById("currentPHVal").value = state.ph;
+  updateLiquidColor();
+}
+
+// 重置实验
+function resetExperiment() {
+  state.ph = parseFloat(initialPHInput.value);
+  currentPHSpan.textContent = state.ph.toFixed(1);
+  document.getElementById("currentPHVal").value = state.ph;
+  updateLiquidColor();
+}
+
+// 初始化函数
+function init() {
+  liquidEl = document.getElementById("liquid");
+  currentPHSpan = document.getElementById("currentPH");
+  indicatorNameSpan = document.getElementById("indicatorName");
+  tank = document.getElementById("tank");
+  initialPHInput = document.getElementById("initialPH");
+  phValueLabel = document.getElementById("phValue");
+
+  // 更新滑块标签
+  updateLabel();
+
+  // 设置默认指示剂并渲染
+  state.indicator = "litmus";
+  const defaultIndData = indicators["litmus"];
+  indicatorNameSpan.textContent = defaultIndData.name;
+  updateLiquidColor();
+}
+</script>
+</body>
+</html>

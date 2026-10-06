@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 教学 Agent 工作台</title>
+<!-- 图标：省掉一次 favicon.ico 404（控制台里那条红字看久了会让人以为是故障） -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%23F6E7C6'/%3E%3Cpath d='M5 13l11-5.5L27 13l-11 5.5z' fill='%231F2E4D'/%3E%3Cpath d='M10 16.5V21c0 2.2 2.7 3.6 6 3.6s6-1.4 6-3.6v-4.5' fill='none' stroke='%231F2E4D' stroke-width='2'/%3E%3C/svg%3E">
+<!-- KaTeX：有就用（公式更漂亮），没有也不影响功能（渲染器会退化成代码样式） -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<style>
+  /* 观感向 Windows 11 原生应用靠拢：浅色 Mica 底、Segoe UI、细边框、系统蓝 */
+  html, body { height: 100%; margin: 0; background: #f3f3f3; overflow: hidden; }
+  body {
+    font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+    color: #1b1b1b;
+  }
+  #root { height: 100vh; display: flex; }
+  /* 渲染器没加载出来时的兜底提示（否则就是一片白，什么线索都没有） */
+  #load-error {
+    display: none; margin: auto; max-width: 560px; padding: 22px 26px; line-height: 1.9;
+    background: #fff; border: 1px solid rgba(196,43,28,.35); border-radius: 8px; font-size: 14px;
+  }
+  #load-error code { background: #f3f3f3; padding: 1px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <div id="root"></div>
+  <div id="load-error">
+    <b>界面脚本没加载成功。</b><br>
+    1. 先确认服务在跑：双击项目目录里的 <code>start_agent.cmd</code>；<br>
+    2. 若刚更新过代码，按 <code>Ctrl + F5</code> 强制刷新一次（浏览器缓存了旧脚本是最常见的原因）。
+  </div>
+
+<link rel="stylesheet" href="/static/css/pet.css?v=1">
+<script src="/static/js/pet_core.js?v=1"></script>
+<script src="/static/js/agent_ui.js?v=0.12.0"></script>
+<script>
+  (function () {
+    if (!window.AgentUI) {
+      document.getElementById('load-error').style.display = 'block';
+      return;
+    }
+    // 三栏工作台：左侧历史对话（学科 → 教材 → 对话）· 中间对话 · 右侧生成式界面
+    // 服务地址不写死：AgentUI 会自己探（同源 → 127.0.0.1:5001 → localhost:5001）
+    var app = AgentUI.mountApp(document.getElementById('root'), {
+      teacherName: '艾琳老师',
+    });
+    window.__app = app;
+
+    // 兜底拦截：如果加载到的是旧版渲染器（浏览器缓存），直接告诉你，省得对着旧界面调试
+    if (AgentUI.version !== '0.12.0') {
+      setTimeout(function () {
+        alert('这个页面加载的是【旧版渲染器 v' + AgentUI.version + '】，最新是 v0.12.0。\n' +
+              '所以界面看起来还是老样子。\n\n请按 Ctrl + F5 强制刷新一次即可（只需一次）。');
+      }, 300);
+    }
+  })();
+</script>
+</body>
+</html>

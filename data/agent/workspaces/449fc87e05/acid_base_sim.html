@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<title>酸碱中和仿真实验 - 艾琳老师</title>
+<style>
+  body { font-family: "Segoe UI", sans-serif; background:#f7f9fc; color:#223; margin:0; padding:16px; }
+  h1 { text-align:center; color:#145; }
+  .container { max-width:900px; margin:0 auto; background:#fff; border-radius:10px; box-shadow:0 2px 8px rgba(0,0,0,.08); padding:16px; }
+  
+  /* 烧杯区域 */
+  .beaker-box { position:relative; height:300px; background:#eef4f9; border-radius:8px; overflow:hidden; border:2px dashed #7a9bc5; margin-bottom:12px; }
+  .liquid-layer { position:absolute; bottom:0; left:0; right:0; height:60%; background:linear-gradient(to top, #ff9f43 0%,#fdcb6e 20%,#fff740 100%); border-radius:50% 50% 0 0; transition:height 0.3s ease,background 0.4s ease; }
+  .particle { position:absolute; width:8px; height:8px; border-radius:50%; transition:all 0.4s ease; opacity:0.7; }
+  .h-ion { background:#ff6b6b; box-shadow:0 0 4px #ff6b6b; }
+  .oh-ion { background:#4ecdc4; box-shadow:0 0 4px #4ecdc4; }
+  .water-molecule { position:absolute; width:12px; height:8px; border:2px solid #a2d2ff; border-radius:50% 0 50% 0; opacity:0.6; }
+  
+  /* 控制区 */
+  .controls { display:flex; gap:16px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+  .btn { padding:8px 14px; border-radius:6px; border:none; cursor:pointer; font-size:14px; font-weight:500; transition:transform 0.1s,box-shadow 0.1s; }
+  .btn:hover { transform:translateY(-1px); box-shadow:0 2px 4px rgba(0,0,0,.1); }
+  .btn-add-acid { background:#ff6b6b; color:#fff; }
+  .btn-add-base { background:#4ecdc4; color:#fff; }
+  .btn-reset { background:#95a7a6; color:#fff; }
+  
+  /* 显示区 */
+  .info-panel { display:flex; justify-content:space-between; align-items:center; padding:10px 14px; background:#f0f4f8; border-radius:8px; margin-bottom:12px; font-size:14px; }
+  .ph-display { font-size:24px; font-weight:600; color:#145; letter-spacing:2px; }
+  
+  /* 指示剂选择 */
+  .indicator-select { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+  .indicator-btn { padding:6px 10px; border-radius:4px; border:1px solid #ddd; cursor:pointer; background:#fff; font-size:13px; }
+  .indicator-btn.active { background:#eef7ff; border-color:#145; font-weight:500; }
+  
+  /* 微观动画说明 */
+  .legend { display:flex; gap:20px; justify-content:center; margin-top:8px; flex-wrap:wrap; font-size:13px; }
+  .legend-item { display:flex; align-items:center; gap:6px; }
+  .legend-icon { width:16px; height:16px; border-radius:50%; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🧪 酸碱中和仿真实验（可操作）</h1>
+
+  <!-- 烧杯 -->
+  <div class="beaker-box" id="beaker">
+    <div class="liquid-layer" id="liquid"></div>
+    <!-- 粒子由 JS 动态生成 -->
+  </div>
+
+  <!-- 指示剂选择 -->
+  <div class="indicator-select">
+    <span>🧪 选择指示剂：</span>
+    <button class="indicator-btn active" data-indicator="none">无指示剂</button>
+    <button class="indicator-btn" data-indicator="phenolphthalein">酚酞 (Phenolphthalein)</button>
+    <button class="indicator-btn" data-indicator="litmus">石蕊 (Litmus)</button>
+  </div>
+
+  <!-- 控制按钮 -->
+  <div class="controls">
+    <button class="btn btn-add-acid" onclick="addAcid()">➕ 加酸 (HCl)</button>
+    <button class="btn btn-add-base" onclick="addBase()">➕ 加碱 (NaOH)</button>
+    <button class="btn btn-reset" onclick="resetExperiment()">🔄 重置实验</button>
+  </div>
+
+  <!-- 信息面板 -->
+  <div class="info-panel">
+    <span>当前溶液：</span>
+    <span id="solution-desc">中性起始液 (NaCl 水溶液)</span>
+    <span class="ph-display" id="ph-value">pH = 7.00</span>
+  </div>
+
+  <!-- 图例说明 -->
+  <div class="legend">
+    <div class="legend-item"><div class="legend-icon" style="background:#ff6b6b;"></div><span>H⁺ (氢离子，来自酸)</span></div>
+    <div class="legend-item"><div class="legend-icon" style="background:#4ecdc4;"></div><span>OH⁻ (氢氧根离子，来自碱)</span></div>
+    <div class="legend-item"><div class="legend-icon" style="border:2px solid #a2d2ff; border-radius:50% 0 50% 0;"></div><span>H₂O (水分子)</span></div>
+  </div>
+
+  <p style="text-align:center;font-size:13px;color:#666;margin-top:10px;">
+    💡 提示：每次加酸/碱的量相同。观察 pH 变化、颜色变化和粒子反应！
+  </p>
+</div>
+
+<script>
+// 实验参数
+let acidCount = 0, baseCount = 0;
+let indicator = 'none';
+const STEP_ACID = 1;   // 每次加酸增加的量（相对单位）
+const STEP_BASE = 1;   // 每次加碱增加的量
+
+// 初始 pH 模型：中性溶液 pH=7
+function calcPH(acid, base) {
+  // 简化模型：假设每单位酸贡献 +0.5 pH 变化，每单位碱贡献 -0.5 pH 变化
+  let delta = (base - acid) * 0.5;
+  let ph = 7 + delta;
+  
+  // 限制在合理范围
+  if (ph < 1) ph = 1;
+  if (ph > 14) ph = 14;
+  
+  return ph.toFixed(2);
+}
+
+// 根据 pH 计算颜色（简化线性渐变）
+function getLiquidColor(ph) {
+  // 红色(pH<3) -> 橙色(pH=7) -> 蓝色(pH>10)
+  if (ph <= 3) return `rgb(${Math.floor(255 * (1 - ph/3))}, ${Math.floor(255 * (ph/3))}, 69)`;
+  if (ph >= 11) return `rgb(${Math.floor(255 * ((ph-11)/3))}, ${Math.floor(255 * (1 - (ph-11)/3))}, 198)`;
+  
+  // 中间用 HSL 渐变
+  let hue = (ph - 7) * 40; // pH=7 -> hue=0, pH=11 -> hue=160
+  return `hsl(${hue}, 80%, 65%)`;
+}
+
+// 指示剂颜色逻辑
+function getIndicatorColor(ph) {
+  if (indicator === 'none') return 'transparent';
+  
+  switch(indicator) {
+    case 'phenolphthalein':
+      // 酚酞：pH<8.2 无色，pH>10 粉红/红
+      if (ph < 8.2) return 'rgba(255,255,255,0)';
+      let alpha = Math.min(1, (ph - 8.2) / 1.8);
+      return `rgba(255,182,193,${alpha})`;
+    case 'litmus':
+      // 石蕊：pH<5 红，pH>8 蓝，中间紫
+      if (ph < 5) return '#c00';
+      if (ph > 8) return '#007bb';
+      return '#a00cb0'; // 紫色过渡
+    default:
+      return 'transparent';
+  }
+}
+
+// 添加酸
+function addAcid() {
+  acidCount += STEP_ACID;
+  update();
+}
+
+// 添加碱
+function addBase() {
+  baseCount += STEP_BASE;
+  update();
+}
+
+// 重置
+function resetExperiment() {
+  acidCount = 0;
+  baseCount = 0;
+  update();
+}
+
+// 更新界面
+function update() {
+  let ph = calcPH(acidCount, baseCount);
+  document.getElementById('ph-value').textContent = `pH = ${ph}`;
+  
+  // 液层高度与颜色
+  let totalVol = Math.max(10, acidCount + baseCount + 20); // 起始体积 20
+  let height = Math.min(90, (totalVol / 30) * 100);
+  document.getElementById('liquid').style.height = `${height}%`;
+  document.getElementById('liquid').style.background = getLiquidColor(ph);
+  
+  // 指示剂颜色层
+  let indColor = getIndicatorColor(ph);
+  if (indColor !== 'transparent') {
+    let overlay = document.createElement('div');
+    overlay.style.position = 'absolute';
+    overlay.style.top = 0; left: 0; right: 0; bottom: 0;
+    overlay.style.background = indColor;
+    overlay.style.pointerEvents = 'none';
+    overlay.style.mixBlendMode = 'overlay';
+    document.getElementById('beaker').appendChild(overlay);
+    
+    // 移除旧覆盖层
+    let oldOverlay = document.getElementById('indicator-overlay');
+    if (oldOverlay) oldOverlay.remove();
+    document.getElementById('indicator-overlay') = overlay;
+  } else {
+    let oldOverlay = document.getElementById('indicator-overlay');
+    if (oldOverlay) oldOverlay.remove();
+  }
+
+  // 更新溶液描述
+  if (acidCount > baseCount) {
+    document.getElementById('solution-desc').textContent = `酸性溶液 (H⁺ 过量，pH=${ph})`;
+  } else if (baseCount > acidCount) {
+    document.getElementById('solution-desc').textContent = `碱性溶液 (OH⁻ 过量，pH=${ph})`;
+  } else {
+    document.getElementById('solution-desc').textContent = `中性溶液 (恰好中和)`;
+  }
+
+  // 生成粒子动画
+  renderParticles(ph);
+}
+
+// 渲染粒子
+function renderParticles(ph) {
+  let beaker = document.getElementById('beaker');
+  
+  // 清除旧粒子
+  let oldH = [], oldOH = [], oldW = [];
+  beaker.querySelectorAll('.h-ion, .oh-ion, .water-molecule').forEach(el => {
+    if (el.classList.contains('old')) {
+      el.remove();
+    } else {
+      // 保留新粒子
+    }
+  });
+
+  let totalVol = Math.max(10, acidCount + baseCount + 20);
+  let hRatio = acidCount / totalVol;
+  let ohRatio = baseCount / totalVol;
+  
+  // 生成 H⁺
+  for (let i=0; i<Math.floor(hRatio * 8); i++) {
+    let p = document.createElement('div');
+    p.className = 'particle h-ion';
+    p.style.left = Math.random()*90 + '%';
+    p.style.top = Math.random()*80 + '%';
+    beaker.appendChild(p);
+  }
+  
+  // 生成 OH⁻
+  for (let i=0; i<Math.floor(ohRatio * 8); i++) {
+    let p = document.createElement('div');
+    p.className = 'particle oh-ion';
+    p.style.left = Math.random()*90 + '%';
+    p.style.top = Math.random()*80 + '%';
+    beaker.appendChild(p);
+  }
+
+  // 生成水分子（中和产物）
+  let neutralized = Math.min(acidCount, baseCount);
+  for (let i=0; i<Math.floor(neutralized * 6); i++) {
+    let p = document.createElement('div');
+    p.className = 'particle water-molecule';
+    p.style.left = Math.random()*90 + '%';
+    p.style.top = Math.random()*80 + '%';
+    beaker.appendChild(p);
+  }
+}
+
+// 指示剂按钮点击事件
+document.querySelectorAll('.indicator-btn').forEach(btn => {
+  btn.addEventListener('click', function() {
+    document.querySelectorAll('.indicator-btn').forEach(b => b.classList.remove('active'));
+    this.classList.add('active');
+    indicator = this.dataset.indicator;
+    update();
+  });
+});
+
+// 初始化
+update();
+</script>
+</body>
+</html>

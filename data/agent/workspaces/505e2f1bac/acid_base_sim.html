@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>酸碱中和仿真实验 - 艾琳老师的虚拟烧杯</title>
+<style>
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: #f0f4f8; margin: 0; padding: 20px; }
+  .container { max-width: 600px; margin: 0 auto; background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); padding: 20px; }
+  
+  /* 烧杯视觉 */
+  .beaker-visual { height: 260px; background: linear-gradient(to right, #e3f2fd 0%, #e3f2fd 40%, transparent 40%, transparent 60%); border-radius: 0 0 12px 12px; border: 3px solid #333; position: relative; overflow: hidden; margin-bottom: 20px; }
+  .liquid { transition: background-color 0.8s ease; }
+  
+  /* 颜色板 */
+  .color-boxes { display: flex; gap: 10px; justify-content: center; margin-bottom: 20px; }
+  .indicator-card { border: 2px solid #ddd; padding: 10px; border-radius: 8px; text-align: center; width: 90px; cursor: pointer; transition: all 0.3s; }
+  .indicator-card.active { border-color: #2196f3; background: #e3f2fd; transform: scale(1.05); box-shadow: 0 2px 8px rgba(33,150,243,0.2); }
+  .color-preview { width: 40px; height: 40px; border-radius: 4px; margin: 8px auto; border: 1px solid #999; }
+  
+  /* 控制区 */
+  .controls { display: flex; gap: 20px; justify-content: center; align-items: center; padding: 15px; background: #f8fafc; border-radius: 8px; }
+  .slider-group { flex: 1; text-align: center; }
+  input[type=range] { width: 100%; margin-top: 8px; }
+  
+  /* 读数显示 */
+  .readout { font-size: 1.4em; font-weight: bold; text-align: center; padding: 15px; background: #263238; color: #fff; border-radius: 8px; margin-bottom: 10px; }
+  .ph-value { font-family: 'Courier New', monospace; font-size: 2em; }
+  
+  /* 实验记录 */
+  .log-box { background: #fff3e0; padding: 15px; border-radius: 8px; font-size: 0.9em; max-height: 120px; overflow-y: auto; margin-top: 10px; }
+  
+  /* 提示 */
+  .hint { font-size: 0.85em; color: #666; text-align: center; margin-top: 5px; }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <h2 style="text-align:center;margin-top:0;">🧪 虚拟烧杯实验台</h2>
+  
+  <!-- 指示剂选择 -->
+  <div class="color-boxes" id="indicatorSelector"></div>
+  
+  <!-- 烧杯展示区 -->
+  <div class="beaker-visual">
+    <div class="liquid" id="liquid" style="background-color: #4fc3f7;"></div>
+    <div style="position:absolute; bottom:20px; left:50%; transform:translateX(-50%); font-weight:bold; text-shadow:1px 1px 2px white;">虚拟烧杯</div>
+  </div>
+  
+  <!-- pH 读数 -->
+  <div class="readout">pH = <span class="ph-value" id="phDisplay">7.00</span></div>
+  
+  <!-- 控制滑块 -->
+  <div class="controls">
+    <div class="slider-group">
+      <label>加入酸 (HCl)</label>
+      <input type="range" id="acidSlider" min="-10" max="10" value="0" step="0.5">
+    </div>
+    <div class="slider-group">
+      <label>加入碱 (NaOH)</label>
+      <input type="range" id="baseSlider" min="-10" max="10" value="0" step="0.5">
+    </div>
+  </div>
+  
+  <!-- 实验记录 -->
+  <div class="log-box" id="logBox">
+    <div style="color:#666;">📝 实验记录：<span id="currentLog" style="color:#333;">初始状态：纯水，pH=7.0</span></div>
+  </div>
+  
+  <div class="hint">💡 提示：拖动滑块改变酸或碱的量。如果两边平衡，溶液呈中性；一边多则显酸性或碱性。</div>
+</div>
+
+<script>
+// 指示剂颜色数据 (pH 变色范围简化)
+const indicators = {
+  'litmus': { name: '石蕊', acidic: '#9c27b0', neutral: '#fff', basic: '#2196f3', range: '5-8' },
+  'methylOrange': { name: '甲基橙', acidic: '#ff5722', neutral: '#ffeb3b', basic: '#ff9800', range: '3.1-4.4' },
+  'bromothymolBlue': { name: '溴百里酚蓝', acidic: '#ffeb3b', neutral: '#fff', basic: '#26a69a', range: '6.0-7.6' },
+  'phenolphthalein': { name: '酚酞', acidic: '#e0e0e0', neutral: '#e0e0e0', basic: '#f48fb1', range: '8.2-10.0' }
+};
+
+// 当前选中的指示剂
+let currentIndicator = 'litmus';
+
+// 酸和碱的量 (-10 到 10)
+let acidAmount = 0;
+let baseAmount = 0;
+
+// 初始化界面
+function init() {
+  const selector = document.getElementById('indicatorSelector');
+  
+  // 生成指示剂选择卡片
+  Object.keys(indicators).forEach(key => {
+    const ind = indicators[key];
+    const card = document.createElement('div');
+    card.className = 'indicator-card';
+    if (key === currentIndicator) card.classList.add('active');
+    
+    card.innerHTML = `
+      <div style="font-weight:bold;">${ind.name}</div>
+      <div class="color-preview" style="background-color:${ind.acidic};"></div>
+      <div style="font-size:0.8em;color:#666;margin-top:4px;">变色范围：${ind.range}</div>
+    `;
+    
+    card.onclick = () => {
+      document.querySelectorAll('.indicator-card').forEach(c => c.classList.remove('active'));
+      card.classList.add('active');
+      currentIndicator = key;
+      updateSimulation();
+    };
+    
+    selector.appendChild(card);
+  });
+  
+  // 绑定滑块事件
+  document.getElementById('acidSlider').oninput = updateSimulation;
+  document.getElementById('baseSlider').oninput = updateSimulation;
+  
+  updateSimulation();
+}
+
+// 更新模拟
+function updateSimulation() {
+  acidAmount = parseFloat(document.getElementById('acidSlider').value);
+  baseAmount = parseFloat(document.getElementById('baseSlider').value);
+  
+  // 计算净差值
+  let netValue = baseAmount - acidAmount; // 正数偏碱，负数偏酸
+  
+  // 简化 pH 计算模型：pH = 7 + netValue * 0.8 (非真实公式，仅为演示)
+  // 限制在 1-13 范围内
+  let calculatedPh = 7 + netValue * 0.8;
+  calculatedPh = Math.max(1, Math.min(13, calculatedPh));
+  
+  // 更新 pH 显示 (保留两位小数)
+  document.getElementById('phDisplay').textContent = calculatedPh.toFixed(2);
+  
+  // 计算颜色
+  const ind = indicators[currentIndicator];
+  
+  if (netValue > 0) { // 偏碱
+    const intensity = Math.min(1, netValue / 8);
+    const color = interpolateColor(ind.basic, ind.acidic, intensity);
+    document.getElementById('liquid').style.backgroundColor = color;
+    
+    const logText = `当前：加入酸 ${acidAmount.toFixed(1)} mol + 碱 ${baseAmount.toFixed(1)} mol<br>净结果：偏碱性 (pH=${calculatedPh.toFixed(2)})`;
+    document.getElementById('currentLog').innerHTML = logText;
+  } else if (netValue < 0) { // 偏酸
+    const intensity = Math.min(1, -netValue / 8);
+    const color = interpolateColor(ind.acidic, ind.basic, intensity);
+    document.getElementById('liquid').style.backgroundColor = color;
+    
+    const logText = `当前：加入酸 ${acidAmount.toFixed(1)} mol + 碱 ${baseAmount.toFixed(1)} mol<br>净结果：偏酸性 (pH=${calculatedPh.toFixed(2)})`;
+    document.getElementById('currentLog').innerHTML = logText;
+  } else { // 中性
+    document.getElementById('liquid').style.backgroundColor = '#e0f7fa';
+    document.getElementById('currentLog').textContent = `当前：加入酸 ${acidAmount.toFixed(1)} mol + 碱 ${baseAmount.toFixed(1)} mol<br>净结果：中性 (pH=${calculatedPh.toFixed(2)})`;
+  }
+}
+
+// 颜色插值函数 (简化版)
+function interpolateColor(color1, color2, factor) {
+  // 这里用简化的 RGB 插值，实际可以做得更复杂
+  const hexToRgb = h => {
+    const bigint = parseInt(h.slice(1), 16);
+    return { r: (bigint >> 16) & 255, g: (bigint >> 8) & 255, b: bigint & 255 };
+  };
+  
+  const rgb1 = hexToRgb(color1);
+  const rgb2 = hexToRgb(color2);
+  
+  const r = Math.round(rgb1.r + (rgb2.r - rgb1.r) * factor);
+  const g = Math.round(rgb1.g + (rgb2.g - rgb1.g) * factor);
+  const b = Math.round(rgb1.b + (rgb2.b - rgb1.b) * factor);
+  
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+// 启动
+init();
+</script>
+
+</body>
+</html>

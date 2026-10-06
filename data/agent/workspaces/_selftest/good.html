@@ -1,0 +1,11 @@
+﻿<html><head><title>t</title></head><body>
+<div id="v">0</div>
+<button id="b" onclick="inc()">加一</button>
+<button class="ind" data-k="a">A</button>
+<script>
+var n = 0;
+function inc(){ n = n + 1; document.getElementById("v").textContent = String(n); }
+document.querySelectorAll(".ind").forEach(function(b){ b.addEventListener("click", function(){ inc(); }); });
+setTimeout(function(){ inc(); }, 10);
+</script>
+</body></html>

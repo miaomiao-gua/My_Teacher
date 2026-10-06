@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>酸碱盐仿真实验</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .slider-container {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        .indicator {
+            width: 100%;
+            height: 100px;
+            border-radius: 8px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-weight: bold;
+            color: white;
+        }
+        .dropdown {
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>酸碱盐仿真实验</h1>
+        <div class="slider-container">
+            <label for="acid">加酸 (mL):</label>
+            <input type="range" id="acid" min="0" max="50" value="0" step="1">
+            <span id="acid-value">0 mL</span>
+        </div>
+        <div class="slider-container">
+            <label for="base">加碱 (mL):</label>
+            <input type="range" id="base" min="0" max="50" value="0" step="1">
+            <span id="base-value">0 mL</span>
+        </div>
+        <div>
+            <label for="indicator">选择指示剂:</label>
+            <select id="indicator" class="dropdown">
+                <option value="phenolphthalein">酚酞</option>
+                <option value="litmus">石蕊</option>
+                <option value="bromothymol">溴百里酚蓝</option>
+            </select>
+        </div>
+        <div class="indicator" id="ph-indicator">pH = 7 (中性)</div>
+        <div class="indicator" id="color-indicator">颜色: 无色</div>
+    </div>
+
+    <script>
+        const acidSlider = document.getElementById('acid');
+        const baseSlider = document.getElementById('base');
+        const acidValue = document.getElementById('acid-value');
+        const baseValue = document.getElementById('base-value');
+        const indicatorSelect = document.getElementById('indicator');
+        const phIndicator = document.getElementById('ph-indicator');
+        const colorIndicator = document.getElementById('color-indicator');
+
+        function updateExperiment() {
+            const acid = parseInt(acidSlider.value);
+            const base = parseInt(baseSlider.value);
+            const indicator = indicatorSelect.value;
+
+            acidValue.textContent = `${acid} mL`;
+            baseValue.textContent = `${base} mL`;
+
+            // 计算 pH 值
+            const pH = 7 - (acid * 0.1) + (base * 0.1);
+            phIndicator.textContent = `pH = ${pH.toFixed(1)}`;
+
+            // 设置 pH 颜色
+            if (pH < 7) {
+                phIndicator.style.backgroundColor = '#FF6B6B';
+                phIndicator.textContent += ' (酸性)';
+            } else if (pH > 7) {
+                phIndicator.style.backgroundColor = '#5C6BC0';
+                phIndicator.textContent += ' (碱性)';
+            } else {
+                phIndicator.style.backgroundColor = '#66BB6A';
+                phIndicator.textContent += ' (中性)';
+            }
+
+            // 根据指示剂设置颜色
+            let color;
+            if (indicator === 'phenolphthalein') {
+                color = pH > 8.3 ? '粉红色' : '无色';
+            } else if (indicator === 'litmus') {
+                color = pH < 5 ? '红色' : pH > 8 ? '蓝色' : '紫色';
+            } else if (indicator === 'bromothymol') {
+                color = pH < 6 ? '黄色' : pH > 7.6 ? '蓝色' : '绿色';
+            }
+
+            colorIndicator.textContent = `颜色: ${color}`;
+            colorIndicator.style.backgroundColor = getColorCode(color);
+        }
+
+        function getColorCode(color) {
+            switch (color) {
+                case '粉红色': return '#FF80AB';
+                case '红色': return '#FF5252';
+                case '蓝色': return '#42A5F5';
+                case '紫色': return '#AB47BC';
+                case '黄色': return '#FFEE58';
+                case '绿色': return '#66BB6A';
+                default: return '#E0E0E0';
+            }
+        }
+
+        // 监听变化
+        acidSlider.addEventListener('input', updateExperiment);
+        baseSlider.addEventListener('input', updateExperiment);
+        indicatorSelect.addEventListener('change', updateExperiment);
+
+        // 初始化
+        updateExperiment();
+    </script>
+</body>
+</html>

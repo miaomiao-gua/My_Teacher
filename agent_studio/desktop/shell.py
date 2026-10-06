@@ -1,0 +1,347 @@
+"""桌面版启动器：双击 exe 就起。
+
+做的事（顺序有讲究）：
+  1. 单实例检查 —— 已经在跑就把应用窗口提到前面，不再起第二个服务
+  2. 挑一个空闲端口（优先 5001，被占就往后；不用随机端口，用户下次还能用同一个地址）
+  3. **在后台线程里起 uvicorn**（复用 kernel.server:app，一行界面代码都不用改）
+  4. 轮询 /agent/health 等它就绪（没就绪就报清楚，而不是开个空白窗口让人猜）
+  5. 打开应用窗口：Edge/Chrome 的 `--app=` 模式（无地址栏，像个原生软件）
+     —— 找不到浏览器就退回系统默认浏览器（多一条地址栏，但能用）
+  6. 起桌宠（tkinter 主循环跑在主线程），关掉应用窗口它还在；右键「退出」才真正结束
+
+为什么要「服务跑在同一个进程里」而不是另起一个 exe：打包成单个 exe 时，
+子进程会重新解包一遍自己（慢、还可能被杀软拦），同进程起线程最省事也最稳。
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+import threading
+import time
+import webbrowser
+from pathlib import Path
+from typing import Optional
+
+# 允许直接 `py -3.14 agent_studio/desktop/shell.py` 跑（也允许 `-m desktop.shell`）：
+# 直接跑脚本时 __package__ 是空的，相对导入会炸，所以统一用「把项目根塞进 sys.path + 绝对导入」。
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from desktop import core          # noqa: E402
+
+
+def _log(data_dir: Path, msg: str) -> None:
+    stamp = time.strftime("%H:%M:%S")
+    line = f"[{stamp}] {msg}"
+    try:
+        if sys.stdout is not None:          # 无控制台的窗口程序里 stdout 是 None
+            print(line, flush=True)
+    except Exception:
+        pass
+    try:
+        p = data_dir / "logs"
+        p.mkdir(parents=True, exist_ok=True)
+        with (p / "desktop.log").open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
+def _msgbox(title: str, text: str) -> None:
+    """启动失败时弹个框：窗口程序没有控制台，什么都不显示最让人抓狂"""
+    try:
+        if os.name == "nt":
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, text, title, 0x10)   # type: ignore[attr-defined]
+        else:
+            print(f"{title}: {text}", flush=True)
+    except Exception:
+        pass
+
+
+def _setup_logging(data_dir: Path) -> None:
+    """把日志写文件，并且**把 stdout/stderr 接到日志文件上**。
+
+    打包成窗口程序（--windowed）时 sys.stdout / sys.stderr 都是 None：
+    - print() 会抛 AttributeError；
+    - uvicorn 的日志配置会去问 sys.stderr.isatty()，直接报
+      「Unable to configure formatter 'default'」（实测就是这么挂的）。
+    所以这里把两个流都指到日志文件，第三方库怎么打印都不会炸。
+    """
+    import logging
+    try:
+        p = data_dir / "logs"
+        p.mkdir(parents=True, exist_ok=True)
+        logfile = p / "desktop.log"
+        if sys.stdout is None or sys.stderr is None:
+            stream = open(logfile, "a", encoding="utf-8", buffering=1)   # noqa: SIM115
+            if sys.stdout is None:
+                sys.stdout = stream          # type: ignore[assignment]
+            if sys.stderr is None:
+                sys.stderr = stream          # type: ignore[assignment]
+        logging.basicConfig(
+            filename=str(p / "server.log"), level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s %(message)s", encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _pid_alive(pid: int) -> bool:
+    """这个进程还在不在。
+
+    用 Win32 的 OpenProcess 直接问系统，**不走 tasklist**：
+    起子进程抓输出在受限环境里会失败（沙箱不给管道），而且慢；
+    打包成 exe 之后每次双开都要问一次，越快越稳越好。
+    """
+    if not pid:
+        return False
+    try:
+        if os.name == "nt":
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            k = ctypes.windll.kernel32                     # type: ignore[attr-defined]
+            h = k.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+            if not h:
+                return False
+            try:
+                code = ctypes.c_ulong()
+                if k.GetExitCodeProcess(h, ctypes.byref(code)):
+                    return code.value == STILL_ACTIVE
+                return True
+            finally:
+                k.CloseHandle(h)
+        os.kill(int(pid), 0)
+        return True
+    except Exception:
+        return False
+
+
+def _lock_path(data_dir: Path) -> Path:
+    return data_dir / "desktop.lock"
+
+
+def already_running(data_dir: Path) -> Optional[int]:
+    """返回正在运行的 pid（单实例）。看到「进程还在」但端口不通，就当它已经死了。"""
+    from desktop import core as _c
+    try:
+        info = core.load_pos(_lock_path(data_dir))
+        pid = int(info.get("pid") or 0)
+        port = int(info.get("port") or 0)
+        if pid and _pid_alive(pid):
+            if port and not _c.port_in_use("127.0.0.1", port):
+                time.sleep(0.8)                     # 可能刚起来，再给一次机会
+                if not _c.port_in_use("127.0.0.1", port):
+                    return None
+            return pid
+    except Exception:
+        pass
+    return None
+
+
+def _uvicorn_log_config(data_dir: Path) -> dict:
+    """给 uvicorn 一份**明确的**日志配置（写文件、不带颜色）。
+
+    必须这样做的原因：uvicorn 默认的 DefaultFormatter 会调 sys.stderr.isatty()，
+    而窗口程序（--windowed）里 sys.stderr 是 None → 直接
+    「AttributeError: 'NoneType' object has no attribute 'isatty'」，
+    再被包装成「Unable to configure formatter 'default'」——很难猜的报错。
+    给它一个纯文件的配置就彻底绕开了（不依赖任何流是否存在）。
+    """
+    p = data_dir / "logs"
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {"plain": {"format": "%(asctime)s %(levelname)s %(name)s %(message)s"}},
+        "handlers": {
+            "file": {
+                "class": "logging.FileHandler",
+                "filename": str(p / "server.log"),
+                "formatter": "plain",
+                "encoding": "utf-8",
+            }
+        },
+        "loggers": {
+            "uvicorn": {"handlers": ["file"], "level": "INFO", "propagate": False},
+            "uvicorn.error": {"handlers": ["file"], "level": "INFO", "propagate": False},
+            "uvicorn.access": {"handlers": ["file"], "level": "INFO", "propagate": False},
+        },
+        "root": {"handlers": ["file"], "level": "INFO"},
+    }
+
+
+def start_server(port: int, host: str = "127.0.0.1", log_level: str = "warning",
+                 data_dir: Optional[Path] = None):
+    """在后台线程里跑 uvicorn，返回 (server, thread)
+
+    日志显式写成文件（见 `_uvicorn_log_config`）——窗口程序里没有控制台，
+    uvicorn 自带的彩色 formatter 会直接报错。
+    """
+    import uvicorn
+    from kernel.server import app as fastapi_app
+
+    cfg = {"log_level": log_level}
+    if data_dir is not None:
+        cfg["log_config"] = _uvicorn_log_config(data_dir)
+    config = uvicorn.Config(fastapi_app, host=host, port=port, **cfg)
+    server = uvicorn.Server(config)
+    t = threading.Thread(target=server.run, daemon=True, name="uvicorn")
+    t.start()
+    return server, t
+
+
+def wait_healthy(base: str, timeout: float = 45.0) -> bool:
+    import httpx
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if httpx.get(base + "/agent/health", timeout=2).status_code == 200:
+                return True
+        except Exception:
+            pass
+        time.sleep(0.4)
+    return False
+
+
+def open_app_window(base: str, url_path: str = "/agent/app", profile: Optional[Path] = None,
+                    size=(1440, 920)) -> str:
+    """打开应用窗口。返回 'app'（无地址栏）或 'browser'（回退）"""
+    url = base + url_path
+    browser = core.find_app_browser()
+    if browser and profile is not None:
+        args = core.app_window_args(browser, url, profile, size)
+        try:
+            creation = 0
+            if os.name == "nt":
+                creation = 0x00000008 | 0x08000000      # DETACHED_PROCESS | CREATE_NO_WINDOW
+            subprocess.Popen(args, creationflags=creation, close_fds=True)
+            return "app"
+        except Exception:
+            pass
+    webbrowser.open(url)
+    return "browser"
+
+
+def main(argv: Optional[list] = None) -> int:
+    ap = argparse.ArgumentParser(description="艾琳老师 · 桌面版")
+    ap.add_argument("--port", type=int, default=int(os.environ.get("AGENT_PORT", "5001")))
+    ap.add_argument("--no-pet", action="store_true", help="不起桌宠（排查窗口问题时用）")
+    ap.add_argument("--no-window", action="store_true", help="不自动打开应用窗口")
+    ap.add_argument("--data", help="指定数据目录（默认按 runtime_paths 的规则找）")
+    ap.add_argument("--log-level", default="warning")
+    ap.add_argument("--check", action="store_true", help="只做自检并打印结果（打包后验收用）")
+    args = ap.parse_args(argv)
+
+    if args.data:
+        os.environ["AGENT_STUDIO_DATA"] = args.data
+
+    import runtime_paths
+    data_dir = runtime_paths.data_root()
+    _setup_logging(data_dir)
+    _log(data_dir, "=" * 56)
+    _log(data_dir, f"艾琳老师 · 桌面版启动中（python {sys.version.split()[0]}）")
+    _log(data_dir, f"数据目录：{data_dir}")
+    _log(data_dir, f"资源目录：{runtime_paths.resource_root()}")
+    _log(data_dir, f"打包运行：{runtime_paths.is_frozen()}")
+
+    dup = already_running(data_dir)
+    if dup:
+        _log(data_dir, f"已经有一个在跑了（pid {dup}），直接把窗口叫到前面")
+        port = int(core.load_pos(_lock_path(data_dir)).get("port") or args.port)
+        base = f"http://127.0.0.1:{port}"
+        if not args.no_window:
+            open_app_window(base, profile=data_dir / "browser")
+        return 0
+
+    port = core.pick_free_port("127.0.0.1", args.port)
+    base = f"http://127.0.0.1:{port}"
+    if port != args.port:
+        _log(data_dir, f"端口 {args.port} 被占用，改用 {port}")
+
+    server = None
+    if core.port_in_use("127.0.0.1", port):
+        _log(data_dir, f"端口 {port} 已有服务（应该是别的实例），直接用它")
+    else:
+        server, _t = start_server(port, log_level=args.log_level, data_dir=data_dir)
+        if not wait_healthy(base):
+            note = (f"本地服务 45 秒内没起来。\n\n"
+                    f"详细日志：{data_dir / 'logs' / 'desktop.log'}\n"
+                    f"（也可能是端口被防火墙拦了：{base}）")
+            _log(data_dir, "❌ " + note.replace("\n", " "))
+            if not args.check:       # 自检模式别弹框：自动化跑的时候会卡在那儿等人点确定
+                _msgbox("艾琳老师 启动失败", note)
+            return 2
+        _log(data_dir, f"服务就绪：{base}")
+
+    core.save_pos(_lock_path(data_dir), {"pid": os.getpid(), "port": port, "base": base,
+                                         "started": time.time()})
+
+    if args.check:
+        import httpx
+        try:
+            st = httpx.get(base + "/agent/pet/status", timeout=5).json()
+        except Exception as exc:
+            st = {"error": str(exc)}
+        _log(data_dir, "自检结果：" + str(st))
+        _log(data_dir, "浏览器：" + str(core.find_app_browser() or "（没有，会退回默认浏览器）"))
+        if server is not None:
+            server.should_exit = True
+        return 0
+
+    opened_as = "skipped"
+    if not args.no_window:
+        opened_as = open_app_window(base, profile=data_dir / "browser")
+        _log(data_dir, f"应用窗口已打开（{opened_as}{'：无地址栏' if opened_as == 'app' else '：退回了默认浏览器'}）")
+
+    rc = 0
+    if args.no_pet:
+        _log(data_dir, "（--no-pet：不起桌宠）按 Ctrl+C 结束")
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            pass
+    else:
+        from desktop.pet import PetApp, PetConfig
+
+        pet = PetApp(PetConfig(
+            api_base=base,
+            data_dir=data_dir,
+            on_open_app=lambda: open_app_window(base, profile=data_dir / "browser"),
+            on_quit=lambda: None,
+        ))
+        _log(data_dir, "桌宠已就位（拖它换位置；右键有菜单）")
+
+        def _bye() -> None:
+            _log(data_dir, "退出中…")
+            if server is not None:
+                server.should_exit = True
+            try:
+                core.save_pos(_lock_path(data_dir), {"pid": 0, "stopped": time.time()})
+            except Exception:
+                pass
+
+        pet.cfg.on_quit = _bye
+        try:
+            pet.run()
+        except KeyboardInterrupt:
+            pass
+        _bye()
+
+    if server is not None:
+        server.should_exit = True
+        time.sleep(0.6)
+    return rc
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

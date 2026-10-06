@@ -66,3 +66,20 @@ Thumbs.db
 # ====== 用户业务文档（不入库） ======
 /*计划书*.pdf
 /*_My_Teacher.pdf
+
+# ====== 新项目 agent_studio：运行数据与打包产物不入库 ======
+# （这些是本机状态：会话、密钥、形象选择、几百 MB 的 exe）
+agent_studio/data/
+agent_studio/dist_desktop/
+agent_studio/build_desktop/
+agent_studio/*.exe
+
+# 调试产物不入库，但**探针脚本本身要留**（data/agent/*.js 是有用的验证工具）
+data/browser/
+data/agent/_shot_*.png
+data/_models.json
+data/_build.log
+
+# agent_studio/tools/ 下的自检脚本要入库（上面的 check*.py 规则会误伤）
+!agent_studio/tools/check*.py
+

@@ -1,0 +1,86 @@
+/* ============================================================================
+ * 桌宠的样式（pet.css）—— 两个地方共用
+ * ----------------------------------------------------------------------------
+ * 用在哪：① 工作台里的小玩偶（.au-pet …）  ② 独立小窗口 /agent/pet（#stage …）
+ * 为什么单独一个文件：角色的骨架（.pet-root / .pet-body / .pet-canvas / .pet-sprite /
+ * .pet-bubble）由 pet_core.js 生成，两处用**同一套类名**。样式写两份迟早不一致
+ * （「大窗口里正常、小玩偶里跑偏」就是这么来的），所以只留这一份。
+ *
+ * 注意：.pet-body 上会被 JS 加 transform（蹦、摇、点头），所以它里面的元素
+ * 一律用 flex 居中，**不要**再用 transform 定位 —— 两者会互相顶掉。
+ * ========================================================================== */
+
+/* ---------------- 角色骨架（两个界面通用） ---------------- */
+.pet-root { position: relative; }
+.pet-body {
+  position: absolute; inset: 0;
+  display: flex; align-items: flex-end; justify-content: center;
+  transform-origin: 50% 100%;
+  will-change: transform;
+}
+.pet-canvas { display: block; }
+.pet-sprite {
+  display: block; max-height: 88%; max-width: 88%; object-fit: contain;
+  filter: drop-shadow(0 14px 22px rgba(31, 46, 77, .22));
+}
+.pet-bubble {
+  position: absolute; left: 50%; top: 6%;
+  transform: translate(-50%, 6px) scale(.96);
+  max-width: min(460px, 84%);
+  padding: 10px 14px; border-radius: 14px;
+  background: #fff; color: #16233D; font-size: 14px; line-height: 1.55;
+  border: 1px solid rgba(31, 46, 77, .16);
+  box-shadow: 0 10px 26px rgba(31, 46, 77, .16);
+  opacity: 0; pointer-events: none; transition: .2s;
+  z-index: 3;
+}
+.pet-bubble.on { opacity: 1; transform: translate(-50%, 0) scale(1); }
+.pet-bubble::after {
+  content: ""; position: absolute; left: 50%; bottom: -6px; width: 11px; height: 11px; margin-left: -6px;
+  background: #fff; border-right: 1px solid rgba(31, 46, 77, .16);
+  border-bottom: 1px solid rgba(31, 46, 77, .16); transform: rotate(45deg);
+}
+
+/* ---------------- 工作台里的小玩偶 ---------------- */
+.au-pet {
+  position: fixed; z-index: 60;
+  width: 186px; height: 252px;
+  display: flex; flex-direction: column;
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(255, 252, 245, .96), rgba(244, 246, 251, .96));
+  border: 1px solid rgba(31, 46, 77, .16);
+  box-shadow: 0 14px 34px rgba(31, 46, 77, .18);
+  user-select: none;
+  transition: width .18s, height .18s, opacity .18s;
+}
+.au-pet--collapsed { width: 46px; height: 46px; overflow: hidden; cursor: pointer; }
+.au-pet-bar {
+  display: flex; align-items: center; gap: 4px;
+  padding: 4px 6px; border-bottom: 1px solid rgba(31, 46, 77, .1);
+  cursor: grab; flex: 0 0 auto;
+}
+.au-pet-bar:active { cursor: grabbing; }
+.au-pet-title {
+  flex: 1; min-width: 0; font-size: 11.5px; font-weight: 600; color: #2E4370;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.au-pet-btn {
+  font: inherit; font-size: 11.5px; line-height: 1;
+  padding: 3px 6px; border-radius: 6px; cursor: pointer;
+  border: 1px solid rgba(31, 46, 77, .18); background: #fff; color: #2E4370;
+}
+.au-pet-btn:hover { background: rgba(0, 103, 192, .1); border-color: rgba(0, 103, 192, .3); }
+.au-pet-stage { position: relative; flex: 1 1 auto; min-height: 0; cursor: pointer; }
+.au-pet-stage .pet-sprite { max-height: 94%; max-width: 94%; }
+.au-pet-stage .pet-bubble {
+  top: auto; bottom: 96%; font-size: 12.5px; padding: 7px 10px; max-width: 210px;
+}
+.au-pet-hint {
+  flex: 0 0 auto; padding: 3px 8px 6px;
+  font-size: 10.5px; color: #96A0B2; text-align: center;
+}
+.au-pet--collapsed .au-pet-bar,
+.au-pet--collapsed .au-pet-hint { display: none; }
+.au-pet--collapsed .au-pet-stage { display: flex; align-items: center; justify-content: center; }
+.au-pet--collapsed .pet-sprite { max-height: 84%; max-width: 84%; }
+.au-pet--collapsed .pet-canvas { max-width: 44px; max-height: 44px; }

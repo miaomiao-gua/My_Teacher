@@ -1,0 +1,37 @@
+{
+  "name": "acid_base_lab",
+  "title": "酸碱盐虚拟实验室",
+  "version": "1.0.0",
+  "description": "NOBOOK 风格的酸碱中和虚拟实验台：可以选择指示剂（酚酞/石蕊/甲基橙/甲基红）、逐滴加入 HCl 或 NaOH，实时看到 pH（真实对数模型，等当点附近有突跃）、溶液颜色、液面高度与温度变化，并能记录数据、得出结论。讲酸碱盐、中和反应、指示剂变色、滴定突跃、pH 计算时，优先直接调用它，不用现场生成 HTML。",
+  "tools": [
+    {
+      "name": "acid_base_lab",
+      "description": "打开酸碱中和虚拟实验室，让学生动手做实验（选指示剂、逐滴加酸加碱、看 pH 与颜色变化、记录数据）。涉及酸碱盐、中和反应、指示剂、滴定、pH 的课程都该用它。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "indicator": {
+            "type": "string",
+            "description": "初始指示剂：phenolphthalein（酚酞，默认）/ litmus（石蕊）/ methyl_orange（甲基橙）/ methyl_red（甲基红）/ none（不加指示剂）"
+          },
+          "conc": {
+            "type": "number",
+            "description": "酸碱浓度 mol/L，默认 0.1"
+          },
+          "focus": {
+            "type": "string",
+            "description": "这一节课希望学生重点观察什么（会显示在界面顶部的任务提示里），如「等当点附近的 pH 突跃」"
+          }
+        },
+        "required": []
+      },
+      "handler": "handler.py:run",
+      "produces": ["ui"]
+    }
+  ],
+  "ui": {
+    "entry": "ui/index.html",
+    "height": 620,
+    "title": "酸碱盐虚拟实验室"
+  }
+}

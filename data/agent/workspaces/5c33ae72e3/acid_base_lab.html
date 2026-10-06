@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>酸碱中和仿真实验台</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: #333;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: rgba(255,255,255,0.95);
+            border-radius: 20px;
+            padding: 25px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+        }
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+            margin-bottom: 20px;
+            font-size: 28px;
+        }
+        .experiment-area {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        /* 烧杯可视化 */
+        .beaker-container {
+            position: relative;
+            width: 280px;
+            height: 320px;
+            margin: 0 auto;
+            background: linear-gradient(180deg, #e0e0e0 0%, #d0d0d0 100%);
+            border-radius: 0 0 40px 40px;
+            border: 4px solid #999;
+            border-top: none;
+            overflow: hidden;
+            box-shadow: inset 0 5px 10px rgba(0,0,0,0.1);
+        }
+        .beaker-handle {
+            position: absolute;
+            right: -35px;
+            top: 40px;
+            width: 60px;
+            height: 200px;
+            border: 8px solid #999;
+            border-left: none;
+            border-radius: 0 30px 30px 0;
+        }
+        .liquid {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: var(--liquid-height, 60px);
+            background: linear-gradient(180deg, 
+                var(--liquid-color, rgba(52,152,219,0.7)) 0%,
+                var(--liquid-color, rgba(52,152,219,0.4)) 100%);
+            border-radius: 0 0 20px 20px;
+            transition: height 0.6s ease, background 0.6s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .liquid::after {
+            content: attr(data-volume);
+            position: absolute;
+            font-size: 14px;
+            color: #333;
+            font-weight: bold;
+        }
+        /* 指示剂颜色显示 */
+        .indicator-display {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: white;
+            padding: 10px 20px;
+            border-radius: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            min-width: 140px;
+            text-align: center;
+        }
+        .indicator-name { font-size: 14px; color: #666; margin-bottom: 5px; }
+        .indicator-result { 
+            font-size: 20px; 
+            font-weight: bold; 
+            padding: 5px 15px; 
+            border-radius: 15px; 
+            display: inline-block;
+            transition: all 0.5s ease;
+        }
+        /* 控制区 */
+        .controls {
+            background: #f8f9fa;
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: inset 0 1px 3px rgba(0,0,0,0.05);
+        }
+        .control-section { margin-bottom: 20px; }
+        .control-section:last-child { margin-bottom: 0; }
+        .section-title {
+            font-size: 16px;
+            font-weight: bold;
+            color: #2c3e50;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .slider-container {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        .slider-info {
+            min-width: 60px;
+            text-align: right;
+            font-size: 14px;
+            color: #555;
+        }
+        .slider-info span {
+            display: block;
+            font-weight: bold;
+            color: #2c3e50;
+            font-size: 18px;
+        }
+        /* 指示剂选择 */
+        .indicator-selector {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .indicator-btn {
+            padding: 12px 20px;
+            border: 2px solid #ddd;
+            border-radius: 12px;
+            background: white;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s ease;
+            min-width: 100px;
+        }
+        .indicator-btn:hover { transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        .indicator-btn.active {
+            border-color: #667eea;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        /* 信息面板 */
+        .info-panel {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 15px;
+            padding: 18px;
+            color: white;
+            box-shadow: 0 4px 15px rgba(102,126,234,0.4);
+        }
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.2);
+        }
+        .info-row:last-child { border-bottom: none; }
+        .info-label { font-size: 14px; opacity: 0.9; }
+        .info-value { 
+            font-size: 20px; 
+            font-weight: bold; 
+            background: rgba(255,255,255,0.2);
+            padding: 5px 15px;
+            border-radius: 10px;
+        }
+        .info-value.pH { color: #4fc3f7; }
+        .info-value.concentration { color: #a5d6a7; }
+        /* 重置按钮 */
+        .reset-btn {
+            background: linear-gradient(135deg, #ff6b6b 0%, #ee5a24 100%);
+            border: none;
+            color: white;
+            padding: 12px 30px;
+            border-radius: 25px;
+            font-size: 16px;
+            cursor: pointer;
+            width: 100%;
+            margin-top: 10px;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(255,107,107,0.4);
+        }
+        .reset-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(255,107,107,0.5); }
+        
+        /* 颜色预设 */
+        .phenolphthalein-acid { background: #e3f2fd; }
+        .phenolphthalein-neutral { background: #e8e8e8; }
+        .phenolphthalein-base { background: #ffcdd2; }
+        
+        .methyl-orange-acid { background: #ff9800; }
+        .methyl-orange-neutral { background: #fff59d; }
+        .methyl-orange-base { background: #e3f2fd; }
+        
+        .litmus-acid { background: #ef5350; }
+        .litmus-neutral { background: #9e9e9e; }
+        .litmus-base { background: #4fc3f7; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧪 酸碱中和仿真实验台</h1>
+        
+        <div class="experiment-area">
+            <!-- 烧杯区域 -->
+            <div style="text-align:center;margin-bottom:10px;font-weight:bold;color:#2c3e50;">
+                实验烧杯 - 当前溶液：<span id="solution-name" style="color:#667eea;font-size:18px;">未知</span>
+            </div>
+            
+            <div class="beaker-container">
+                <div class="indicator-display">
+                    <div class="indicator-name" id="indicator-name">请选择指示剂</div>
+                    <div class="indicator-result phenolphthalein-acid" id="indicator-result"></div>
+                </div>
+                <div class="liquid" id="liquid" data-volume="0mL">
+                    初始溶液：100mL 水
+                </div>
+                <div class="beaker-handle"></div>
+            </div>
+
+            <!-- 控制区 -->
+            <div class="controls">
+                <!-- 加酸 -->
+                <div class="control-section">
+                    <div class="section-title">🔴 添加稀盐酸 (HCl)</div>
+                    <div class="slider-container">
+                        <input type="range" id="acid-slider" min="0" max="100" value="0" step="1">
+                        <div class="slider-info">
+                            累计加入<br><span id="acid-amount" style="color:#ef5350;">0</span>mL
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 加碱 -->
+                <div class="control-section">
+                    <div class="section-title">🔵 添加氢氧化钠 (NaOH)</div>
+                    <div class="slider-container">
+                        <input type="range" id="base-slider" min="0" max="100" value="0" step="1">
+                        <div class="slider-info">
+                            累计加入<br><span id="base-amount" style="color:#4fc3f7;">0</span>mL
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 指示剂选择 -->
+                <div class="control-section">
+                    <div class="section-title">🎨 选择指示剂</div>
+                    <div class="indicator-selector" id="indicator-selector">
+                        <button class="indicator-btn active" data-indicator="phenolphthalein">酚酞<br><small>(酸性无色，碱性粉红)</small></button>
+                        <button class="indicator-btn" data-indicator="methyl-orange">甲基橙<br><small>(酸橙红，碱黄)</small></button>
+                        <button class="indicator-btn" data-indicator="litmus">石蕊<br><small>(酸红，碱蓝)</small></button>
+                    </div>
+                </div>
+
+                <!-- 信息面板 -->
+                <div class="info-panel">
+                    <div class="info-row">
+                        <span class="info-label">当前 pH 值</span>
+                        <span class="info-value pH" id="ph-value">7.00</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">溶液酸碱性</span>
+                        <span class="info-value" id="acidity-status" style="background:rgba(255,255,255,0.3);">中性</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">理论中和点</span>
+                        <span class="info-value" style="background:rgba(255,255,255,0.3);">加入等量酸/碱时</span>
+                    </div>
+                </div>
+
+                <!-- 重置按钮 -->
+                <button class="reset-btn" onclick="resetExperiment()">🔄 重置实验</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 实验状态
+        let state = {
+            acidAdded: 0,    // 添加的酸体积 (mL)
+            baseAdded: 0,    // 添加的碱体积 (mL)
+            initialVolume: 100, // 初始溶液体积 (mL)
+            totalVolume: 100, // 当前总体积 (mL)
+            indicator: 'phenolphthalein', // 当前指示剂
+            ph: 7.0, // 当前 pH 值
+            neutralizationPoint: null // 中和点状态
+        };
+
+        // DOM 元素
+        const acidSlider = document.getElementById('acid-slider');
+        const baseSlider = document.getElementById('base-slider');
+        const liquid = document.getElementById('liquid');
+        const phValue = document.getElementById('ph-value');
+        const acidityStatus = document.getElementById('acidity-status');
+        const indicatorName = document.getElementById('indicator-name');
+        const indicatorResult = document.getElementById('indicator-result');
+        const solutionName = document.getElementById('solution-name');
+
+        // 指示剂颜色配置
+        const indicatorColors = {
+            phenolphthalein: {
+                acid: { bg: 'rgba(227,242,253,0.9)', text: '无色', class: 'phenolphthalein-acid' },
+                neutral: { bg: 'rgba(232,232,232,0.9)', text: '浅粉色', class: 'phenolphthalein-neutral' },
+                base: { bg: 'rgba(255,205,210,0.8)', text: '粉红色', class: 'phenolphthalein-base' }
+            },
+            methyl-orange: {
+                acid: { bg: 'rgba(255,152,0,0.9)', text: '橙红色', class: 'methyl-orange-acid' },
+                neutral: { bg: 'rgba(255,245,157,0.8)', text: '黄色', class: 'methyl-orange-neutral' },
+                base: { bg: 'rgba(227,242,253,0.9)', text: '淡黄色', class: 'methyl-orange-base' }
+            },
+            litmus: {
+                acid: { bg: 'rgba(239,83,80,0.8)', text: '红色', class: 'litmus-acid' },
+                neutral: { bg: 'rgba(158,158,158,0.7)', text: '紫色', class: 'litmus-neutral' },
+                base: { bg: 'rgba(79,195,247,0.8)', text: '蓝色', class: 'litmus-base' }
+            }
+        };
+
+        // 计算 pH 值的简化模型
+        function calculatePH(acidVol, baseVol) {
+            const totalVol = state.initialVolume + acidVol + baseVol;
+            
+            if (acidVol > baseVol) {
+                // 酸过量
+                const excessAcid = acidVol - baseVol;
+                const hPlusConc = excessAcid / totalVol * 0.1; // 简化计算
+                return Math.max(1, -Math.log10(hPlusConc));
+            } else if (baseVol > acidVol) {
+                // 碱过量
+                const excessBase = baseVol - acidVol;
+                const ohMinusConc = excessBase / totalVol * 0.1;
+                return Math.min(14, 14 + Math.log10(ohMinusConc));
+            } else {
+                // 完全中和
+                return 7.0;
+            }
+        }
+
+        // 更新实验显示
+        function updateExperiment() {
+            state.acidAdded = parseInt(acidSlider.value);
+            state.baseAdded = parseInt(baseSlider.value);
+            state.totalVolume = state.initialVolume + state.acidAdded + state.baseAdded;
+            
+            // 计算 pH
+            state.ph = calculatePH(state.acidAdded, state.baseAdded);
+            
+            // 更新烧杯液体高度
+            const liquidHeightPercent = Math.min(90, (state.totalVolume / state.initialVolume) * 80);
+            liquid.style.setProperty('--liquid-height', `${liquidHeightPercent}%`);
+            liquid.dataset.volume = state.totalVolume.toFixed(1) + 'mL';
+
+            // 更新 pH 值显示
+            phValue.textContent = state.ph.toFixed(2);
+            
+            // 判断酸碱性
+            if (state.ph < 7) {
+                acidityStatus.textContent = "酸性";
+                acidityStatus.style.background = "rgba(239,83,80,0.4)";
+                solutionName.textContent = "酸性溶液";
+            } else if (state.ph > 7) {
+                acidityStatus.textContent = "碱性";
+                acidityStatus.style.background = "rgba(79,195,247,0.4)";
+                solutionName.textContent = "碱性溶液";
+            } else {
+                acidityStatus.textContent = "中性";
+                acidityStatus.style.background = "rgba(255,255,255,0.3)";
+                solutionName.textContent = "中性溶液 (中和点)";
+            }
+
+            // 更新指示剂显示
+            updateIndicatorDisplay();
+
+            // 更新滑块数字
+            document.getElementById('acid-amount').textContent = state.acidAdded;
+            document.getElementById('base-amount').textContent = state.baseAdded;
+        }
+
+        // 更新指示剂显示
+        function updateIndicatorDisplay() {
+            const indicator = state.indicator;
+            const colors = indicatorColors[indicator];
+            
+            let resultClass, resultText;
+            
+            if (state.ph < 7) {
+                // 酸性
+                resultClass = `${indicator}-acid`;
+                resultText = colors.acid.text;
+            } else if (state.ph > 8.2) {
+                // 碱性（不同指示剂变色范围略有不同）
+                resultClass = `${indicator}-base`;
+                resultText = colors.base.text;
+            } else {
+                // 中性或过渡
+                const transitionThresholds = {
+                    phenolphthalein: 8.2,
+                    methyl-orange: 4.0,
+                    litmus: 7.0
+                };
+                
+                if (indicator === 'phenolphthalein') {
+                    resultClass = `${indicator}-neutral`;
+                    resultText = '浅粉色';
+                } else if (indicator === 'methyl-orange' && state.ph > 4) {
+                    resultClass = `${indicator}-base`;
+                    resultText = colors.base.text;
+                } else if (indicator === 'litmus' && state.ph > 6.5) {
+                    resultClass = `${indicator}-base`;
+                    resultText = colors.base.text;
+                } else {
+                    resultClass = `${indicator}-acid`;
+                    resultText = indicator === 'methyl-orange' ? '橙黄色' : '红色';
+                }
+            }
+
+            // 应用样式
+            indicatorResult.className = '';
+            indicatorResult.classList.add(resultClass);
+            indicatorResult.textContent = resultText;
+            
+            // 更新指示剂名称
+            const nameMap = {
+                phenolphthalein: '酚酞',
+                methyl-orange: '甲基橙',
+                litmus: '石蕊'
+            };
+            indicatorName.textContent = `${nameMap[indicator]} - pH=${state.ph.toFixed(1)}`;
+        }
+
+        // 指示剂选择器点击事件
+        document.querySelectorAll('.indicator-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                document.querySelectorAll('.indicator-btn').forEach(b => b.classList.remove('active'));
+                this.classList.add('active');
+                state.indicator = this.dataset.indicator;
+                
+                // 更新指示剂名称显示
+                const nameMap = {
+                    phenolphthalein: '酚酞',
+                    methyl-orange: '甲基橙',
+                    litmus: '石蕊'
+                };
+                indicatorName.textContent = `${nameMap[state.indicator]} - pH=${state.ph.toFixed(1)}`;
+                
+                updateExperiment();
+            });
+        });
+
+        // 滑块事件监听
+        acidSlider.addEventListener('input', updateExperiment);
+        baseSlider.addEventListener('input', updateExperiment);
+
+        // 重置实验
+        function resetExperiment() {
+            acidSlider.value = 0;
+            baseSlider.value = 0;
+            state.acidAdded = 0;
+            state.baseAdded = 0;
+            state.ph = 7.0;
+            updateExperiment();
+        }
+
+        // 初始化
+        updateExperiment();
+    </script>
+</body>
+</html>

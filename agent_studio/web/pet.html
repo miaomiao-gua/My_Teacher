@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>艾琳 · 桌宠</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%23F6E7C6'/%3E%3Cpath d='M5 13l11-5.5L27 13l-11 5.5z' fill='%231F2E4D'/%3E%3Cpath d='M10 16.5V21c0 2.2 2.7 3.6 6 3.6s6-1.4 6-3.6v-4.5' fill='none' stroke='%231F2E4D' stroke-width='2'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/css/pet.css?v=1">
+<style>
+  :root{
+    --cream:#F7EAD0; --cream2:#FFF9EE; --navy:#1F2E4D; --navy2:#2E4370;
+    --gold:#E0A33E; --ink:#16233D; --line:rgba(31,46,77,.16);
+    --ok:#2F7D5B; --warn:#B4762A;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif;
+    color:var(--ink);
+    background:
+      radial-gradient(1200px 600px at 20% -10%, #FFF6E4 0%, rgba(255,246,228,0) 60%),
+      radial-gradient(900px 500px at 100% 110%, #E9F0FF 0%, rgba(233,240,255,0) 60%),
+      linear-gradient(160deg,#FBF6EA 0%,#F1F4FB 100%);
+    display:flex; flex-direction:column; overflow:hidden;
+  }
+  /* 顶栏：状态牌 + 按钮 */
+  header{
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    padding:12px 16px; border-bottom:1px solid var(--line);
+    background:rgba(255,255,255,.55); backdrop-filter:blur(6px);
+  }
+  .brand{display:flex;align-items:center;gap:9px;font-weight:700;letter-spacing:.5px}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--gold);box-shadow:0 0 0 4px rgba(224,163,62,.18)}
+  .chip{
+    font-size:12px; padding:4px 10px; border-radius:999px;
+    border:1px solid var(--line); background:#fff; color:var(--navy2); white-space:nowrap;
+  }
+  .chip[data-tone="ok"]{border-color:rgba(47,125,91,.35);background:rgba(47,125,91,.08);color:var(--ok)}
+  .chip[data-tone="warn"]{border-color:rgba(180,118,42,.4);background:rgba(180,118,42,.1);color:var(--warn)}
+  .chip[data-tone="muted"]{color:#7A8699}
+  .grow{flex:1}
+  button{
+    font:inherit; font-size:13px; padding:7px 13px; border-radius:10px; cursor:pointer;
+    border:1px solid var(--line); background:#fff; color:var(--navy); transition:.15s;
+  }
+  button:hover{transform:translateY(-1px); box-shadow:0 4px 12px rgba(31,46,77,.12)}
+  button.primary{background:var(--navy);color:#fff;border-color:var(--navy)}
+  button.primary:hover{background:var(--navy2)}
+
+  /* 舞台：角色的骨架样式（.pet-body/.pet-canvas/.pet-sprite/.pet-bubble）
+     统一在 static/css/pet.css 里，工作台里的小玩偶用的是同一份。
+     注意：#stage 里**只放角色**（pet_core 会清空它），聊天抽屉放在外面 ——
+     之前把抽屉放进去，结果一开角色就被清掉了（「跟她说句话」直接失灵）。 */
+  #playfield{position:relative; flex:1; min-height:0}
+  #stage{position:absolute; inset:0}
+
+  /* 聊天抽屉 */
+  #chat{
+    position:absolute; right:16px; bottom:16px; width:min(420px,86vw); height:min(58vh,460px);
+    display:none; flex-direction:column; border-radius:16px; overflow:hidden;
+    background:rgba(255,255,255,.96); border:1px solid var(--line);
+    box-shadow:0 18px 44px rgba(31,46,77,.22); z-index:5;
+  }
+  #chat.on{display:flex}
+  #log{flex:1; overflow:auto; padding:14px; font-size:13.5px; line-height:1.65; white-space:pre-wrap; color:#22314F}
+  .askrow{display:flex; gap:8px; padding:10px; border-top:1px solid var(--line); background:var(--cream2)}
+  .askrow input{
+    flex:1; font:inherit; font-size:13.5px; padding:9px 12px; border-radius:10px;
+    border:1px solid var(--line); background:#fff; outline:none;
+  }
+  .askrow input:focus{border-color:var(--gold); box-shadow:0 0 0 3px rgba(224,163,62,.18)}
+
+  footer{
+    padding:8px 16px; font-size:12px; color:#6E7A8F; border-top:1px solid var(--line);
+    background:rgba(255,255,255,.5); display:flex; gap:12px; flex-wrap:wrap; align-items:center;
+  }
+  footer code{background:rgba(31,46,77,.07); padding:1px 6px; border-radius:6px; font-size:11.5px}
+  #diag{color:#96A0B2; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:60vw}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand"><span class="dot"></span>艾琳 · 桌宠</div>
+  <span class="chip" id="mode" data-tone="muted">加载中…</span>
+  <span class="chip" id="action">待机</span>
+  <span class="grow"></span>
+  <button id="save" style="display:none">存到本机（离线可用）</button>
+  <button id="model">换形象</button>
+  <button id="remind">20 分钟后提醒我</button>
+  <button id="chatToggle">跟她说句话</button>
+  <button class="primary" id="open">打开工作台</button>
+</header>
+
+<div id="playfield">
+  <!-- 角色专用容器：里面的东西由 pet_core.js 生成/清空，别往里放别的东西 -->
+  <div id="stage"></div>
+
+  <div id="chat">
+    <div id="log">（这里可以直接跟我说话，用的是同一个老师）</div>
+    <div class="askrow">
+      <input id="ask" placeholder="比如：帮我看看这道题…" autocomplete="off">
+      <button class="primary" id="send">发送</button>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <span>形象顺序：本地运行时 → 网络运行时 → 备用形象</span>
+  <span id="diag"></span>
+</footer>
+
+<script src="/static/js/pet_core.js"></script>
+<script src="/static/js/pet_page.js"></script>
+</body>
+</html>
