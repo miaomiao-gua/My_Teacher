@@ -65,7 +65,7 @@ def settings() -> Dict[str, Any]:
         "windows_voice": int(v.get("tts_windows_voice") or 0),
         "base_url": str(v.get("tts_cloud_base_url") or "https://api.siliconflow.cn/v1"),
         "model": str(v.get("tts_cloud_model") or "FunAudioLLM/CosyVoice2-0.5B"),
-        "voice": str(v.get("tts_cloud_voice") or "FunAudioLLM/CosyVoice2-0.5B:alex"),
+        "voice": str(v.get("tts_cloud_voice") or "anna"),
         "api_key": _secret_or_shared(),
         "speed": float(v.get("tts_speed") or 1.0),
         "volume": int(v.get("tts_volume") or 100),
@@ -135,6 +135,21 @@ def _windows_wav(text: str, cfg: Dict[str, Any]) -> bytes:
     return data
 
 
+def _full_voice(model: Any, voice: Any) -> str:
+    """把音色名补成服务商要的完整写法。
+
+    硅基流动的 CosyVoice2 要 `FunAudioLLM/CosyVoice2-0.5B:anna`（模型:音色），
+    只写 `anna` 会回 400「voice not found」—— 学生照着"音色 anna"填就会踩这个坑。
+    所以：模型看着像 CosyVoice 且音色里没有冒号 → 自动补上模型前缀。
+    OpenAI 那套（alloy/nova…）保持原样。
+    """
+    v = str(voice or "").strip()
+    m = str(model or "").strip()
+    if v and ":" not in v and "cosyvoice" in m.lower():
+        return f"{m}:{v}"
+    return v or "alloy"
+
+
 async def _cloud_audio(text: str, cfg: Dict[str, Any]) -> bytes:
     import httpx
 
@@ -146,7 +161,7 @@ async def _cloud_audio(text: str, cfg: Dict[str, Any]) -> bytes:
     payload: Dict[str, Any] = {
         "model": cfg.get("model") or "tts-1",
         "input": text[:1000],
-        "voice": cfg.get("voice") or "alloy",
+        "voice": _full_voice(cfg.get("model"), cfg.get("voice")),
         "response_format": "mp3",
     }
     try:
@@ -191,7 +206,8 @@ def self_check() -> Dict[str, Any]:
         info["note"] = "本机语音：" + (names[int(cfg["windows_voice"]) % len(names)] if names else "?")
     elif cfg["provider"] == "openai":
         info["ready"] = bool(cfg["api_key"])
-        info["note"] = (f"云端：{cfg['base_url']} / {cfg['model']} / {cfg['voice']}"
+        info["note"] = (f"云端：{cfg['base_url']} / {cfg['model']} / "
+                        f"{_full_voice(cfg['model'], cfg['voice'])}"
                         + ("" if cfg["api_key"] else "（缺 API Key）"))
     else:
         info["note"] = "未开启"

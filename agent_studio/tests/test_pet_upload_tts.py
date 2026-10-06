@@ -176,11 +176,26 @@ def test_tts() -> None:
         sa._cfg_path().write_bytes(snaps)
 
 
+def test_cloud_voice_normalization() -> None:
+    """硅基流动要 `模型:音色`，学生只填 `anna` 时必须自动补全，否则云端直接 400。"""
+    print("\n[5] 云端音色名补全")
+    check("只写 anna → 自动补成 模型:anna",
+          tts._full_voice("FunAudioLLM/CosyVoice2-0.5B", "anna") == "FunAudioLLM/CosyVoice2-0.5B:anna",
+          tts._full_voice("FunAudioLLM/CosyVoice2-0.5B", "anna"))
+    check("已经带冒号的不动",
+          tts._full_voice("FunAudioLLM/CosyVoice2-0.5B", "FunAudioLLM/CosyVoice2-0.5B:alex")
+          == "FunAudioLLM/CosyVoice2-0.5B:alex")
+    check("OpenAI 那套音色原样保留（不硬加前缀）", tts._full_voice("tts-1", "alloy") == "alloy",
+          tts._full_voice("tts-1", "alloy"))
+    check("空音色给个兜底而不是空串", tts._full_voice("tts-1", "") == "alloy")
+
+
 def main() -> int:
     test_upload_ok()
     test_upload_rejects()
     test_delete_only_uploads()
     test_tts()
+    test_cloud_voice_normalization()
     shutil.rmtree(_SCRATCH, ignore_errors=True)
     print("\n" + ("全部通过 ✓" if _failures == 0 else f"失败 {_failures} 项 ✗"))
     return 1 if _failures else 0
