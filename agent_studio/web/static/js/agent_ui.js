@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  const AgentUI = { version: '0.15.0' };
+  const AgentUI = { version: '0.16.0' };
   const HTML_NS = 'http://www.w3.org/1999/xhtml';
 
   /* ==========================================================================
@@ -4815,6 +4815,7 @@
         pet = PetCore.createPet(stage, {
           mode: 'doll', model: model, onStatus: status, speechSeconds: 6,
           dollZoom: zoomFor(model && model.id),
+          speak: speakOn,                    // 设置里的「气泡自动念出来」
         });
         const kind = await pet.start(model);
         if (kind === 'sprite') pet.say('先用备用形象陪你');
@@ -4841,6 +4842,14 @@
 
       // 大小：设置里那个「桌宠大小」直接缩放整个框（形象跟着一起变）
       let scale = 1;
+      // 语音：设置里「气泡自动念出来」+ 语音来源不是关 → 气泡念出来
+      let speakOn = false;
+      function setSpeak(on) {
+        speakOn = !!on && !!window.PetCore;
+        if (window.PetCore) PetCore.setSpeak(speakOn);
+        if (pet) pet.setSpeak(speakOn);
+        return speakOn;
+      }
       function applyScale(s) {
         scale = Math.max(0.6, Math.min(2.6, Number(s) || 1));
         box.style.width = Math.round(210 * scale) + 'px';
@@ -4868,12 +4877,14 @@
           hint.textContent = '读不到形象清单';
         }
         await bootPet();
-        // 大小 / 是否显示：跟设置中心一致（设置里改完会调 applyScale）
+        // 大小 / 是否显示 / 要不要念出来：跟设置中心一致（设置里改完会调 applyScale / setSpeak）
         try {
           const st = await api('/agent/settings/all');
-          applyScale((st.values || {}).pet_scale);
-          applyVisible((st.values || {}).pet_visible !== false);
-        } catch (e) { /* 设置读不到就用默认大小 */ }
+          const v = st.values || {};
+          applyScale(v.pet_scale);
+          applyVisible(v.pet_visible !== false);
+          setSpeak(v.tts_auto_speak && String(v.tts_provider || 'off') !== 'off');
+        } catch (e) { /* 设置读不到就用默认大小、不念 */ }
       })();
 
       function applyVisible(on) {
@@ -4886,6 +4897,8 @@
         switchTo: switchTo,
         applyScale: applyScale,
         applyVisible: applyVisible,
+        setSpeak: setSpeak,
+        get speak() { return speakOn; },
         get scale() { return scale; },
         get pet() { return pet; },
         get model() { return model; },
@@ -5833,6 +5846,15 @@
               petMsg = '，形象也换了';
             } catch (err) { petMsg = '，但形象没换成：' + err.message; }
           }
+          // 语音开关/大小也要**当场**接上（不然学生改完得刷新页面才生效）
+          try {
+            const after = r.state || {};
+            const v2 = after.values || {};
+            if (window.__app && __app.pet) {
+              __app.pet.setSpeak(v2.tts_auto_speak && String(v2.tts_provider || 'off') !== 'off');
+              __app.pet.applyScale(v2.pet_scale);
+            }
+          } catch (e) {}
           status.textContent = '已保存 ✓' + petMsg + '（下一条消息就用新设置）';
           status.style.color = '';
           checkHealth();

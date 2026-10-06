@@ -35,7 +35,7 @@
 
 <link rel="stylesheet" href="/static/css/pet.css?v=1">
 <script src="/static/js/pet_core.js?v=1"></script>
-<script src="/static/js/agent_ui.js?v=0.15.0"></script>
+<script src="/static/js/agent_ui.js?v=0.16.0"></script>
 <script>
   (function () {
     if (!window.AgentUI) {
@@ -50,9 +50,9 @@
     window.__app = app;
 
     // 兜底拦截：如果加载到的是旧版渲染器（浏览器缓存），直接告诉你，省得对着旧界面调试
-    if (AgentUI.version !== '0.15.0') {
+    if (AgentUI.version !== '0.16.0') {
       setTimeout(function () {
-        alert('这个页面加载的是【旧版渲染器 v' + AgentUI.version + '】，最新是 v0.15.0。\n' +
+        alert('这个页面加载的是【旧版渲染器 v' + AgentUI.version + '】，最新是 v0.16.0。\n' +
               '所以界面看起来还是老样子。\n\n请按 Ctrl + F5 强制刷新一次即可（只需一次）。');
       }, 300);
     }

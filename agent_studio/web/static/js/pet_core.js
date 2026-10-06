@@ -161,9 +161,10 @@ window.PetCore = (function () {
   function createPet(host, opts) {
     opts = opts || {};
     const cfg = {
-      mode: opts.mode || 'doll',          // doll=小玩偶（半身、小）｜full=整身（大窗口）
+      mode: opts.mode || 'doll',          // doll=小玩偶（整身、小）｜full=整身（独立窗口）
       model: opts.model || null,          // {url, name, motion_groups, ...}
       bubble: opts.bubble !== false,
+      speak: !!opts.speak,                // 气泡要不要念出来（设置里的「气泡自动念出来」）
       onStatus: opts.onStatus || function () {},
       speechSeconds: opts.speechSeconds || 8,
     };
@@ -212,6 +213,10 @@ window.PetCore = (function () {
       bubbleEl.classList.add('on');
       clearTimeout(st.bubbleTimer);
       st.bubbleTimer = setTimeout(() => bubbleEl.classList.remove('on'), (seconds || cfg.speechSeconds) * 1000);
+      // 开着语音就念出来（气泡和声音同一份文案；失败不影响气泡）
+      if (cfg.speak) {
+        try { speak(text).catch(function () {}); } catch (e) {}
+      }
     }
 
     function setStatus(s) { st.status = s; cfg.onStatus(s); }
@@ -456,6 +461,9 @@ window.PetCore = (function () {
     window.addEventListener('resize', fit);
     const api = {
       start: start, act: act, say: say, fit: fit, setModel: setModel, setZoom: setZoom, destroy: destroy,
+      // 气泡要不要念出来：设置里改完由宿主调它（cfg.speak 是闭包里的，外面直接赋值没用）
+      setSpeak: function (on) { cfg.speak = !!on; return cfg.speak; },
+      get speak() { return !!cfg.speak; },
       get zoom() { return cfg.dollZoom || 1; },
       get status() { return st.status; },
       get kind() { return st.kind; },
@@ -470,6 +478,64 @@ window.PetCore = (function () {
       tap: function () { act('tap'); },
     };
     return api;
+  }
+
+  /* ---------------- 让她把话说出来（TTS） ----------------
+   * 浏览器负责播放（服务端只给音频字节）：静音键、音量、蓝牙耳机都归学生自己的设备管。
+   * 三条经验：
+   *   1. 念之前先把文字**洗一遍**（去掉 markdown / 链接 / emoji、截断到 120 字）——
+   *      不然她会给学生念一串 `**加粗**` 和网址。
+   *   2. 新的一句来了就**打断上一句**（否则几句叠在一起念，像菜市场）。
+   *   3. 「老师在想了…」这类过程提示**不念**：一句话一次就够了，念它只会烦人。
+   */
+  const SPEAK_SKIP = /(想了|正在|加载|稍等|马上)/;
+  let speakOn = false;
+  let currentAudio = null;
+  let speakSeq = 0;
+
+  function cleanForSpeech(text) {
+    let t = String(text || '');
+    t = t.replace(/```[\s\S]*?```/g, ' 代码 ');
+    t = t.replace(/`([^`]*)`/g, '$1');
+    t = t.replace(/!\[[^\]]*\]\([^)]*\)/g, '');
+    t = t.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
+    t = t.replace(/https?:\/\/\S+/g, '');
+    t = t.replace(/[*_#>~|]/g, '');
+    t = t.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '');   // emoji
+    t = t.replace(/\s+/g, ' ').trim();
+    if (t.length > 120) t = t.slice(0, 120) + '…';
+    return t;
+  }
+
+  function setSpeak(on) { speakOn = !!on; return speakOn; }
+
+  async function speak(text) {
+    if (!speakOn) return null;
+    const clean = cleanForSpeech(text);
+    if (!clean || SPEAK_SKIP.test(clean)) return null;
+    const seq = ++speakSeq;
+    if (currentAudio) { try { currentAudio.pause(); } catch (e) {} currentAudio = null; }
+    const resp = await fetch('/agent/tts/say', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: clean }),
+    });
+    if (!resp.ok) {
+      const d = await resp.json().catch(() => ({}));
+      throw new Error(d.detail || ('HTTP ' + resp.status));
+    }
+    if (seq !== speakSeq) return null;                 // 期间又来了新的一句 → 这条作废
+    const blob = await resp.blob();
+    const audio = new Audio(URL.createObjectURL(blob));
+    currentAudio = audio;
+    try {
+      await audio.play();
+    } catch (err) {
+      // 浏览器自动播放策略：用户还没点过页面时会拒绝。这不是故障，记一句就行。
+      console.warn('[pet] 浏览器不让自动播放（点一下页面就好）：' + err.message);
+      return null;
+    }
+    audio.onended = function () { if (currentAudio === audio) currentAudio = null; };
+    return audio;
   }
 
   /* ---------------- 事件（用的是服务端那条桌宠总线） ---------------- */
@@ -641,5 +707,6 @@ window.PetCore = (function () {
     createPet: createPet, loadRuntime: loadRuntime, subscribe: subscribe, actFor: actFor,
     catalog: catalog, setModel: setModel, openPicker: openPicker, pickGroup: pickGroup,
     ACTS: ACTS, GROUP_HINTS: GROUP_HINTS, SPRITE_STATE: SPRITE_STATE, baseParams: baseParams,
+    speak: speak, setSpeak: setSpeak, cleanForSpeech: cleanForSpeech,
   };
 })();

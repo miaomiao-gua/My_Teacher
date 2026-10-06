@@ -129,5 +129,48 @@ const need = ['ParamAngleX', 'ParamAngleY', 'ParamAngleZ', 'ParamEyeLOpen', 'Par
 const lack = need.filter((k) => !seen[k]);
 check('包含关键的几个参数', lack.length === 0, '缺：' + JSON.stringify(lack) + '；有：' + Object.keys(seen).join(','));
 
-console.log('\n' + (fails === 0 ? '全部通过 ✓' : '失败 ' + fails + ' 项 ✗'));
-process.exit(fails ? 1 : 0);
+/* ---------- 6) TTS：念出来的文字要先洗一遍 ---------- */
+console.log('--- TTS 台词清洗 ---');
+const clean = PetCore.cleanForSpeech;
+const c1 = clean('**重点**：看 https://example.com/a 里的 `x^2` 和第 3 题 😀');
+check('去掉 markdown/链接/emoji', c1.indexOf('**') < 0 && c1.indexOf('http') < 0 &&
+  c1.indexOf('`') < 0 && c1.indexOf('😀') < 0, JSON.stringify(c1));
+check('保留了知识点本身', c1.indexOf('重点') >= 0 && c1.indexOf('x^2') >= 0, JSON.stringify(c1));
+check('超长截断（不能给学生念一整篇）', clean('啊'.repeat(300)).length === 121, String(clean('啊'.repeat(300)).length));
+check('代码块变成「代码」不会念一堆符号',
+  clean('看这个：\n```js\nconst a=1;\n```\n就这样').indexOf('const') < 0, JSON.stringify(clean('看这个：```js\nconst a=1;\n```\n就这样')));
+
+/* ---------- 7) 什么时候不该念 ---------- */
+console.log('--- TTS 开关与静默规则 ---');
+const calls = [];
+global.fetch = async function (url, init) {
+  calls.push({ url: String(url), body: init && init.body });
+  return { ok: true, blob: async () => ({ size: 10 }), json: async () => ({}) };
+};
+global.Audio = function () { return { play: async () => {}, pause() {} }; };
+global.URL = global.URL || {}; global.URL.createObjectURL = () => 'blob:x';
+
+(async function () {
+  PetCore.setSpeak(false);
+  calls.length = 0;
+  let r = await PetCore.speak('这句话不该发出去');
+  check('关着的时候一句都不发', calls.length === 0 && r === null);
+
+  PetCore.setSpeak(true);
+  calls.length = 0;
+  r = await PetCore.speak('老师在想了…');
+  check('过程提示（想了/正在…）不念', calls.length === 0 && r === null);
+
+  calls.length = 0;
+  r = await PetCore.speak('**下课啦**，记得做错题本 https://a.b/c');
+  check('正常内容会发一次合成请求', calls.length === 1, JSON.stringify(calls.map((x) => x.url)));
+  check('发的是洗过的文字', String(calls[0].body).indexOf('http') < 0 && String(calls[0].body).indexOf('**') < 0,
+    String(calls[0].body));
+
+  calls.length = 0;
+  await PetCore.speak('   ');
+  check('空白内容不发请求', calls.length === 0);
+
+  console.log('\n' + (fails === 0 ? '全部通过 ✓' : '失败 ' + fails + ' 项 ✗'));
+  process.exit(fails ? 1 : 0);
+})();

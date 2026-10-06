@@ -30,6 +30,7 @@
 | **工作台里的小玩偶**（Live2D，跟着上课演动作） | `/agent/app` 右下角 | 可用：**整身**、无边框、抓哪儿都能拖；控件在她**脚下**（鼠标移上去才出现），右键也有菜单 |
 | **换形象**（含「白-免费版」） | 小玩偶脚下「换形象」/ 右键 / 设置中心 / `/agent/pet` | 可用 |
 | **设置中心**（模型链路 / base_url / API Key / 人格提示词 / 运行参数 / **桌宠大小** / **上传自己的 Live2D** / **TTS 语音**） | 工作台**左下角「⚙ 设置」** | 可用；密钥只进不出，带「测试连接」和「听一下」 |
+| **桌宠会说话（TTS）** | 设置 → 语音（选 Windows 本机语音 + 勾「气泡自动念出来」） | 可用：气泡出现就念出来（念的是洗过的文字） |
 | 桌宠独立小窗口（Live2D 整身 + 气泡 + 小聊天） | `/agent/pet` | 可用 |
 | 桌面版 exe（透明小桌宠 + Edge 应用窗口 + 本地服务） | `MyTeacher.exe` | 可用，本次重打包 |
 | 课程 / 教案 / 材料 等老能力 | 插件 `acid_base_lab` + `course/` | 可用 |
@@ -208,6 +209,10 @@ node ..\data\agent\_app_tests.js _ui_tests.js _calc_tests.js _tools_tests.js _md
 node ..\data\agent\_cdp_doll.js      # 工作台里的小玩偶：事件驱动/换形象/参数演绎
 node ..\data\agent\_cdp_wb_settings.js  # 工作台「设置中心」：入口/字段/密钥不回显/保存生效/桌宠整身无框
 node ..\data\agent\_cdp_doll_verify.js  # 三栏还在 + 抓住角色能拖 + 点击不乱跑 + 位置记得住
+node ..\data\agent\_cdp_pet_v2.js       # 她身上无控件 / 设置里的滑杆·上传·TTS / 试听出音频
+node ..\data\agent\_cdp_tts.js         # TTS 接线：气泡→合成→播放；台词清洗；过程提示不念；不叠着念
+node ..\data\agent\_cdp_wb_settings.js  # 左下角设置中心：字段/密钥不回显/保存生效
+node ..\data\agent\_cdp_pet_head.js    # 她头顶上方没有任何元素
 node ..\data\agent\_cdp_pet.js       # 独立窗口页：气泡/提醒/兜底形象
 node ..\data\agent\_cdp_probe.js     # 三栏布局与分栏线拖动
 node ..\data\agent\_cdp_close.js     # 关掉探针浏览器（只关自己那个实例）
