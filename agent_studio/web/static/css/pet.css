@@ -48,45 +48,34 @@
    现在：透明的、可抓任意位置的、控件只在头顶hover时浮出来。 */
 .au-pet {
   position: fixed; z-index: 60;
-  width: 190px; height: 262px;
+  width: 210px; height: 318px;          /* 整身都在里面，不再截半身 */
   display: flex; flex-direction: column; align-items: center;
-  background: transparent;            /* 不要底色 */
-  border: none;                       /* 不要边框 */
-  box-shadow: none;                   /* 不要卡片阴影（阴影会让人以为是面板） */
+  background: transparent;               /* 不要底色 */
+  border: none;                          /* 不要边框 */
+  box-shadow: none;                      /* 不要卡片阴影（阴影会让人以为是面板） */
   user-select: none;
-  touch-action: none;                 /* 触屏上拖动不要被浏览器抢去滚页面 */
+  touch-action: none;                    /* 触屏上拖动不要被浏览器抢去滚页面 */
   cursor: grab;
   transition: width .18s, height .18s, opacity .18s;
 }
 .au-pet--dragging { cursor: grabbing; opacity: .92; }
-/* 头顶的抓手：几乎看不见，但整条都能按住拖 */
-.au-pet-handle {
-  position: absolute; top: -6px; left: 50%; transform: translateX(-50%);
-  width: 46px; height: 6px; border-radius: 999px;
-  background: rgba(31, 46, 77, .18);
-  transition: background .15s;
-}
-.au-pet:hover .au-pet-handle { background: rgba(31, 46, 77, .38); }
-/* 控件条：平时半透明，鼠标移上去才实 */
-.au-pet-bar {
+/* 控件条在她**脚下**，鼠标移上去才出现（头顶不许有框 —— 学生明确要求过） */
+.au-pet-tools {
   display: flex; align-items: center; gap: 4px;
-  padding: 3px 5px; margin-bottom: 2px;
+  padding: 3px 5px; margin-top: 2px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, .82);
+  background: rgba(255, 255, 255, .88);
   border: 1px solid rgba(31, 46, 77, .12);
   box-shadow: 0 4px 14px rgba(31, 46, 77, .12);
-  opacity: .30; transition: opacity .18s;
-  cursor: grab; flex: 0 0 auto;
+  opacity: 0; transition: opacity .18s;
+  pointer-events: none;                  /* 不透明时也别挡住底下的界面 */
+  flex: 0 0 auto;
 }
-.au-pet:hover .au-pet-bar { opacity: 1; }
-.au-pet--dragging .au-pet-bar { opacity: 1; }
-.au-pet-title {
-  max-width: 68px; font-size: 11.5px; font-weight: 600; color: #2E4370;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
+.au-pet:hover .au-pet-tools,
+.au-pet--dragging .au-pet-tools { opacity: 1; pointer-events: auto; }
 .au-pet-btn {
   font: inherit; font-size: 11.5px; line-height: 1;
-  padding: 3px 6px; border-radius: 999px; cursor: pointer;
+  padding: 3px 7px; border-radius: 999px; cursor: pointer;
   border: 1px solid rgba(31, 46, 77, .16); background: #fff; color: #2E4370;
 }
 .au-pet-btn:hover { background: rgba(0, 103, 192, .1); border-color: rgba(0, 103, 192, .3); }
@@ -97,18 +86,11 @@
 }
 .au-pet-stage .pet-sprite { max-height: 96%; max-width: 96%; }
 .au-pet-stage .pet-bubble {
-  top: auto; bottom: 96%; font-size: 12.5px; padding: 7px 10px; max-width: 220px;
+  top: auto; bottom: 92%; font-size: 12.5px; padding: 7px 10px; max-width: 230px;
 }
-.au-pet-hint {
-  flex: 0 0 auto; padding: 2px 0 0;
-  font-size: 10.5px; color: #96A0B2; opacity: 0; transition: opacity .18s;
-}
-.au-pet:hover .au-pet-hint { opacity: 1; }
 /* 收起：只剩一个小头像 */
-.au-pet--collapsed { width: 52px; height: 52px; }
-.au-pet--collapsed .au-pet-bar,
-.au-pet--collapsed .au-pet-hint,
-.au-pet--collapsed .au-pet-handle { display: none; }
+.au-pet--collapsed { width: 56px; height: 56px; }
+.au-pet--collapsed .au-pet-tools { display: none; }
 .au-pet--collapsed .au-pet-stage { display: flex; align-items: center; justify-content: center; }
 .au-pet--collapsed .pet-sprite { max-height: 94%; max-width: 94%; }
-.au-pet--collapsed .pet-canvas { max-width: 52px; max-height: 52px; }
+.au-pet--collapsed .pet-canvas { max-width: 56px; max-height: 56px; }

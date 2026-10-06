@@ -27,8 +27,9 @@
 | 「＋ 计算器」自己写公式画图 | 工作台右上 | 可用（精确度、画质可调） |
 | 对话自动归档（纯聊天，AI 判断该放哪个文件夹） | 自动 | 后端已验证（`tests/test_live_filing.py`） |
 | 提醒（模型工具 + 桌宠按钮） | `set_reminder` / `/agent/reminder` | 可用 |
-| **工作台里的小玩偶**（Live2D，跟着上课演动作） | `/agent/app` 右下角 | 可用，本次新增 |
-| **换形象**（含「白-免费版」） | 小玩偶标题栏 / `/agent/pet` | 可用，本次新增 |
+| **工作台里的小玩偶**（Live2D，跟着上课演动作） | `/agent/app` 右下角 | 可用：**整身**、无边框、抓哪儿都能拖；控件在她**脚下**（鼠标移上去才出现），右键也有菜单 |
+| **换形象**（含「白-免费版」） | 小玩偶脚下「换形象」/ 右键 / 设置中心 / `/agent/pet` | 可用 |
+| **设置中心**（模型链路 / base_url / API Key / 人格提示词 / 运行参数 / 桌宠形象） | 工作台**左下角「⚙ 设置」** | 可用；密钥只进不出，带「测试连接」 |
 | 桌宠独立小窗口（Live2D 整身 + 气泡 + 小聊天） | `/agent/pet` | 可用 |
 | 桌面版 exe（透明小桌宠 + Edge 应用窗口 + 本地服务） | `MyTeacher.exe` | 可用，本次重打包 |
 | 课程 / 教案 / 材料 等老能力 | 插件 `acid_base_lab` + `course/` | 可用 |
@@ -58,6 +59,20 @@ D:\My_teacher\
 ```
 
 ## 4. 数据在哪（**最容易搞混的一点**）
+
+### 4.01 ⚠️ 这个仓库可能**同时有两个会话在改**（2026-10-06 实测）
+
+用户会开多个对话窗口，两个我可能在改同一批文件 —— 症状是编辑时报
+「file changed since it was read」、`git status` 里冒出自己没写过的文件
+（例如 `_cdp_settings.js`、`_cdp_winshot.js`、`_settings_report.json`、
+`pet_page.js` 里多出一个我没写的「设置面板」）。
+
+对策：
+- 写文件前先 `read`/`grep` 看当前内容，别整文件覆盖（我差点把另一个窗口的
+  `pet_page.js` 设置面板盖掉）；
+- 提交时**只 add 自己动过的路径**，别 `git add -A`（否则会把对方半成品一起提交）；
+- 发现冲突先问用户「是不是另一个窗口在改」。
+
 
 ### 4.0 服务怎么起、怎么判断它还活着（运维常识，踩过）
 
@@ -133,6 +148,15 @@ D:\My_teacher\
 
 **还没做完 / 没实测**
 
+3.5 **设置中心的三条坑（都踩过，别再犯）**：
+   - 弹层挂在 `document.body` 上，**不在 `.au-root` 里** → `var(--au-panel)` 取不到，
+     背景会变透明、底下的对话透上来。所有变量都要写 `var(--x, 兜底值)`。
+   - `config.json` 里没写过的键，界面输入框会是空的；学生一按保存，空值变成 `NaN`，
+     服务端判「要填数字」，**整份设置都存不进去**。现在 `read_state()` 回**实际生效的默认值**，
+     前端也跳过空值（= 不改）。
+   - 人格提示词只替换 `BASE_PERSONA` 那一段；`TOOL_POLICY`（工具使用硬规则）**不开放编辑** ——
+     那不是人格，是功能约束，删了模型就用错工具。界面上写明了。
+
 4. **「已自动归档」提示自动刷新左侧树**：代码写了（`agent_ui.js` 的 `notice` 分支里调 `refreshTree()`），
    **但没在真浏览器里实测过**（node 桩不支持流式事件）。验法：在工作台里聊一个明显属于某学科的话题，
    等这轮跑完，看左边文件夹树是否自己移动。
@@ -156,6 +180,7 @@ py -3.14 tests\test_desktop.py                     # 桌面壳/桌宠
 py -3.14 tests\test_filing.py                      # 自动归档的硬规则
 py -3.14 tests\test_calculator.py tests\test_small_tools.py
 py -3.14 tests\test_pet_models.py                  # 形象扫盘/防穿越/记住选择
+py -3.14 tests\test_settings_api.py                # 设置中心：密钥只进不出/白名单/人格进提示词
 py -3.14 tests\test_pet_page.py --http             # 桌宠页面与接口
 py -3.14 tests\test_course_flow.py tests\test_materials.py tests\test_nudge.py
 py -3.14 tests\test_quiz_flow.py tests\test_quiz_mapper.py tests\test_whereami.py
@@ -167,6 +192,8 @@ node ..\data\agent\_app_tests.js _ui_tests.js _calc_tests.js _tools_tests.js _md
 
 # 真浏览器（先起 Edge：--headless=new --remote-debugging-port=9333 --user-data-dir=data\browser\cdp_pet）
 node ..\data\agent\_cdp_doll.js      # 工作台里的小玩偶：事件驱动/换形象/参数演绎
+node ..\data\agent\_cdp_wb_settings.js  # 工作台「设置中心」：入口/字段/密钥不回显/保存生效/桌宠整身无框
+node ..\data\agent\_cdp_doll_verify.js  # 三栏还在 + 抓住角色能拖 + 点击不乱跑 + 位置记得住
 node ..\data\agent\_cdp_pet.js       # 独立窗口页：气泡/提醒/兜底形象
 node ..\data\agent\_cdp_probe.js     # 三栏布局与分栏线拖动
 node ..\data\agent\_cdp_close.js     # 关掉探针浏览器（只关自己那个实例）

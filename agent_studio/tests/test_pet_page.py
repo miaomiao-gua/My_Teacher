@@ -95,7 +95,9 @@ def test_framing_rules() -> None:
     check("用 internalModel.originalWidth/Height 当基准",
           "originalWidth" in core and "originalHeight" in core)
     check("锚点在脚底 (0.5, 1)", "anchor.set(0.5, 1)" in core)
-    check("小玩偶按「露出画布上方一截」取景（dollFrac）", "dollFrac" in core)
+    # 学生明确要求过「为啥他只有半身」→ 小玩偶必须是**整身**，不许再按比例截半身
+    check("小玩偶是整身取景（不再截半身）",
+          "Math.min(w / baseW, h / baseH) * 0.98 * zoom" in core and "dollFrac" not in core)
     check("不再用 model.width 当缩放基准（那会放大好几倍）",
           not re.search(r"Math\.min\(\s*w\s*/\s*model\.width", core))
     check("画布隐藏时显式给宽高（隐藏元素 clientWidth 是 0）",
@@ -174,13 +176,30 @@ def test_page_and_routes_exist() -> None:
     check("工作台里挂上了小玩偶（mountPetDoll）", "mountPetDoll" in app_js)
     check("小玩偶能换形象（PetCore.openPicker）", "PetCore.openPicker" in app_js)
     check("小玩偶能拖动并且记得位置", "au_pet_pos_v1" in app_js)
+    # 学生要求过「不要在他头顶上加框」：控件必须在脚下，头顶不许有元素
+    check("头顶没有控件条（不再有 .au-pet-bar / .au-pet-handle）",
+          "au-pet-bar" not in app_js and "au-pet-handle" not in app_js)
+    check("控件条在小玩偶脚下（.au-pet-tools）", "au-pet-tools" in app_js)
+    check("右键她也能出菜单", "contextmenu" in app_js and "showMenu" in app_js)
     index_html = (CLIENT_DIR / "index.html").read_text(encoding="utf-8")
     check("工作台页面也引了 pet_core.js 与 pet.css",
           "/static/js/pet_core.js" in index_html and "/static/css/pet.css" in index_html)
 
+    # ---- 设置中心（左下角入口，所有可配置项都在里面）----
+    check("左下角有「设置」按钮", "au-set-btn" in app_js and "⚙ 设置" in app_js)
+    check("有设置面板实现（openSettings）", "function openSettings" in app_js)
+    check("字段是按白名单渲染的（settingsRow / data-key）",
+          "function settingsRow" in app_js and "data-key" in app_js)
+    check("面板里有「测试连接」", "测试连接" in app_js and "/agent/settings/test" in app_js)
+    check("面板里有「人格提示词」和「附加要求」",
+          "data-persona" in app_js and "data-persona-extra" in app_js)
+    check("面板不写死样式变量兜底（弹层在 .au-root 外，不然背景会透明）",
+          "var(--au-panel,#fff)" in app_js)
+
     server_py = (ROOT / "kernel" / "server.py").read_text(encoding="utf-8")
     for route in ("/agent/pet", "/agent/live2d/models", "/agent/live2d/model/{model_id}/{path:path}",
-                  "/agent/pet/model", "/agent/live2d/vendor/{name}"):
+                  "/agent/pet/model", "/agent/live2d/vendor/{name}",
+                  "/agent/settings/all", "/agent/settings/test"):
         check(f"server.py 注册了 {route}", route in server_py)
     # 注册顺序：通配路由必须在具体路由之后，否则会被吃掉（踩过）
     check("通配路由注册在 vendor / model 之后",

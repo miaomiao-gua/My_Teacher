@@ -170,7 +170,20 @@ def build_system_prompt(
     """
     names = {t.get("name") if isinstance(t, dict) else str(t) for t in (tools or [])}
 
-    parts: List[str] = [BASE_PERSONA, TOOL_POLICY]
+    # 人格可以被学生改（设置中心里那块文本框），存在 data/persona.md。
+    # **只替换人格那一段**：下面 TOOL_POLICY 等是功能性约束（教模型别用错工具、
+    # 别瞎编界面），不是"人格"，学生改不到也不该改 —— 删了模型就开始乱来。
+    persona = BASE_PERSONA
+    extra_persona = ""
+    try:
+        from . import settings_api
+
+        persona = settings_api.persona_override() or BASE_PERSONA
+        extra_persona = settings_api.extra_override()
+    except Exception:
+        pass
+
+    parts: List[str] = [persona, TOOL_POLICY]
 
     capability: List[str] = []
     if "search_materials" in names:
@@ -307,6 +320,10 @@ def build_system_prompt(
                     "然后问学生要不要**把它补进课程**（可以调 `prepare_course` 重新备课，"
                     "或在讲完这一节后记为补充内容）—— 不要假装它是课程里的一课。"
                 )
+
+    if extra_persona:
+        # 学生在设置里写的"附加要求"，放在所有规则之后，优先级最高
+        parts.append("学生的附加要求（优先级最高，与上面的规则冲突时以这里为准）：\n" + extra_persona)
 
     if extra:
         parts.append(extra)

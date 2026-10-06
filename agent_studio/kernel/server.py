@@ -206,6 +206,43 @@ async def plugins_reload() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# 设置中心：一个地方改所有可配置项（模型链路 / URL / Key / 运行参数 / 人格提示词）
+# 密钥只进不出：读接口永远不回明文，只回「设没设」。
+# ---------------------------------------------------------------------------
+@app.get("/agent/settings/all")
+async def settings_all() -> Dict[str, Any]:
+    from . import settings_api
+
+    state = settings_api.read_state()
+    state["ok"] = True
+    state["chain"] = [c.label for c in llm_configs()]
+    return state
+
+
+@app.post("/agent/settings/all")
+async def settings_save(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from . import settings_api
+
+    try:
+        result = settings_api.write_state(payload or {})
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"{type(exc).__name__}: {exc}")
+    if result.get("ok"):
+        # 改完立刻生效：下一条消息就走新链路（llm_configs 每次读盘，不用重启）
+        RUNTIME.configs = llm_configs()
+        result["chain"] = [c.label for c in RUNTIME.configs]
+    return result
+
+
+@app.post("/agent/settings/test")
+async def settings_test() -> Dict[str, Any]:
+    """拿当前配置真发一次请求，界面上那个「测试连接」按钮用。"""
+    from . import settings_api
+
+    return await settings_api.test_connection()
+
+
+# ---------------------------------------------------------------------------
 # 会话
 # ---------------------------------------------------------------------------
 @app.get("/agent/session/{session_id}")

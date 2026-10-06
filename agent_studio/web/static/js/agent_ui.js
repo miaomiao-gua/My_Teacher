@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  const AgentUI = { version: '0.13.0' };
+  const AgentUI = { version: '0.14.0' };
   const HTML_NS = 'http://www.w3.org/1999/xhtml';
 
   /* ==========================================================================
@@ -3722,6 +3722,37 @@
   .au-menu-item.au-disabled{color:var(--au-muted);cursor:default}
   .au-menu-item.au-disabled:hover{background:transparent;color:var(--au-muted)}
   .au-menu-hint{font-size:11px;color:var(--au-muted)}
+
+  /* ---------- 设置中心（左下角「⚙ 设置」）----------
+     注意：这个弹层挂在 document.body 上，**不在 .au-root 里面**，
+     所以 CSS 变量（--au-panel 等定义在 .au-root 上）在这里取不到 ——
+     必须写成 var(--x, 兜底值)，否则背景会变成透明的，底下的对话会透上来（实测踩过）。 */
+  .au-set-btn{font:inherit;font-size:11.5px;padding:2px 8px;border-radius:999px;cursor:pointer;
+    border:1px solid var(--au-line);background:#fff;color:var(--au-text)}
+  .au-set-btn:hover{background:var(--au-accent-soft);color:var(--au-accent);border-color:rgba(0,103,192,.3)}
+  .au-modal{position:fixed;inset:0;z-index:9998;background:rgba(20,28,45,.42);
+    display:flex;align-items:center;justify-content:center}
+  .au-modal-card{width:min(780px,94vw);max-height:88vh;display:flex;flex-direction:column;
+    background:var(--au-panel,#fff);color:var(--au-text,#1b1b1b);
+    border-radius:12px;box-shadow:0 24px 60px rgba(0,0,0,.34);overflow:hidden}
+  .au-modal-head{display:flex;align-items:center;gap:10px;padding:12px 16px;
+    border-bottom:1px solid var(--au-line,rgba(0,0,0,.08));font-weight:600}
+  .au-modal-body{padding:14px 16px;overflow:auto;display:flex;flex-direction:column;gap:14px}
+  .au-modal-foot{display:flex;align-items:center;gap:10px;padding:10px 16px;
+    border-top:1px solid var(--au-line,rgba(0,0,0,.08));background:rgba(0,0,0,.02)}
+  .au-set-group{border:1px solid var(--au-line,rgba(0,0,0,.08));border-radius:10px;padding:10px 12px}
+  .au-set-title{font-weight:600;margin-bottom:2px}
+  .au-set-hint{font-size:11.5px;color:var(--au-muted,#616161);margin-bottom:8px;line-height:1.5}
+  .au-field{display:flex;align-items:center;gap:10px;margin:6px 0}
+  .au-field>label{flex:0 0 170px;font-size:12.5px}
+  .au-field input[type=text],.au-field input[type=number],.au-field input[type=password],.au-field select{
+    flex:1;min-width:0;font:inherit;font-size:12.5px;padding:6px 9px;border-radius:7px;
+    border:1px solid var(--au-line,rgba(0,0,0,.08));background:#fff;color:var(--au-text,#1b1b1b)}
+  .au-field input[type=checkbox]{width:16px;height:16px}
+  .au-field textarea{flex:1;min-width:0;min-height:110px;font:inherit;font-size:12.5px;
+    padding:8px 10px;border-radius:7px;border:1px solid var(--au-line,rgba(0,0,0,.08));background:#fff;
+    color:var(--au-text,#1b1b1b);line-height:1.6;resize:vertical}
+  .au-set-note{font-size:12px;color:var(--au-text,#1b1b1b)}
   .au-menu-sep{height:1px;background:var(--au-line);margin:4px 6px}
   .au-inline-edit{width:100%;font:inherit;font-size:12.6px;padding:1px 4px;border:1px solid var(--au-accent);
     border-radius:3px;background:var(--au-panel);color:var(--au-text);outline:none}
@@ -4677,27 +4708,19 @@
       const MINI_KEY = 'au_pet_mini_v1';
 
       const box = el('div', 'au-pet');
-      // 桌宠就该是**一只没有边框的角色**：不给它画窗口壳子（以前做成带标题栏的小窗口，
-      // 结果只能拽那条细边，学生想抓角色本身拖不动 —— 这是设计错误，不是实现问题）。
-      // 控件只在她头顶浮出来一条，默认半透明，鼠标移上去才明显。
-      const bar = el('div', 'au-pet-bar');
-      const title = el('span', 'au-pet-title', '艾琳');
+      // **头顶不许有框**（学生明确要求）：控件不再做成浮在头上的标题栏，
+      // 而是鼠标移上去时出现在她**脚下**的一条小工具，另外右键她也能出同一个菜单。
+      const stage = el('div', 'au-pet-stage');
+      const tools = el('div', 'au-pet-tools');
       const btnModel = el('button', 'au-pet-btn', '换形象');
       const btnBig = el('button', 'au-pet-btn', '放大');
       const btnMini = el('button', 'au-pet-btn', '收起');
       [btnModel, btnBig, btnMini].forEach((b) => { b.type = 'button'; });
-      bar.appendChild(title);
-      bar.appendChild(btnModel);
-      bar.appendChild(btnBig);
-      bar.appendChild(btnMini);
-      const stage = el('div', 'au-pet-stage');
-      const handle = el('div', 'au-pet-handle');      // 头顶那条「抓手」：整条都能拖
-      handle.title = '按住拖动我';
-      const hint = el('div', 'au-pet-hint', '拖我 / 点我一下 / 滚轮缩放');
-      box.appendChild(bar);
-      box.appendChild(handle);
+      tools.appendChild(btnModel);
+      tools.appendChild(btnBig);
+      tools.appendChild(btnMini);
       box.appendChild(stage);
-      box.appendChild(hint);
+      box.appendChild(tools);
       hostRoot.appendChild(box);
 
       // 默认位置：右下角，避开输入框
@@ -4760,11 +4783,24 @@
       function applyMini() {
         box.classList.toggle('au-pet--collapsed', mini);
         btnMini.textContent = mini ? '展开' : '收起';
-        hint.style.display = mini ? 'none' : '';
         try { localStorage.setItem(MINI_KEY, mini ? '1' : '0'); } catch (e) {}
       }
       applyMini();
       btnMini.onclick = function (ev) { ev.stopPropagation(); mini = !mini; applyMini(); };
+
+      // 右键她 = 同一个菜单（免得非程序员不知道脚下那条工具怎么出来）
+      box.addEventListener('contextmenu', function (ev) {
+        ev.preventDefault();
+        const r = box.getBoundingClientRect();
+        showMenu(ev.clientX || r.x, ev.clientY || r.y, [
+          { label: '换个形象', action: function () { btnModel.click(); } },
+          { label: '放大成独立窗口', action: function () { btnBig.click(); } },
+          { label: mini ? '展开' : '收起', action: function () { btnMini.click(); } },
+          { label: '让她待机', action: function () { if (pet) pet.act('idle'); } },
+          { sep: true },
+          { label: '设置…', hint: '模型 / Key / 人格', action: function () { openSettings(); } },
+        ]);
+      });
 
       /* ---- 形象与演绎 ---- */
       let pet = null;
@@ -4788,8 +4824,7 @@
       function status(kind) {
         const names = { live2d_local: 'Live2D（本机）', live2d_cdn: 'Live2D（网络）', sprite: '备用形象' };
         const label = (model && (model.label || model.name)) || '艾琳';
-        title.textContent = label;
-        title.title = label + ' · ' + (names[kind] || '加载中');   // 完整信息放悬浮提示里，窄条上不硬塞
+        box.title = label + ' · ' + (names[kind] || '加载中') + '（拖我 / 右键我）';
         box.dataset.petKind = kind;
         box.dataset.petModel = (model && model.id) || '';
       }
@@ -5392,12 +5427,288 @@
       }
     });
 
-    /* ---------- 底部状态：模型 / 工具数 / 版本 ---------- */
+    /* ======================================================================
+     * 设置中心 —— 左下角「⚙ 设置」打开
+     * ----------------------------------------------------------------------
+     * 把**所有可配置项**收在一个地方：模型链路（含 base_url / API Key）、运行参数、
+     * 人格提示词、桌宠形象；另外放一块「关于」。
+     *
+     * 两条纪律：
+     *   · 密钥只进不出：输入框永远不回填明文，只显示「已设置 …abcd」；留空=不改。
+     *   · 工具规则不给改：那是功能约束（改了模型就用错工具），界面上写明白为什么。
+     * ==================================================================== */
+    function settingsRow(key, meta, values, secrets) {
+      const kind = (meta.types || {})[key] || 'str';
+      const label = (meta.labels || {})[key] || key;
+      const row = el('div', 'au-field');
+      const lab = el('label', '', label);
+      lab.title = key;
+      row.appendChild(lab);
+
+      let input;
+      if (kind === 'bool') {
+        input = el('input');
+        input.type = 'checkbox';
+        input.checked = !!values[key];
+        input.dataset.key = key;
+        input.dataset.kind = 'bool';
+      } else if (kind === 'int' || kind === 'float') {
+        input = el('input');
+        input.type = 'number';
+        input.step = kind === 'int' ? '1' : '0.1';
+        const rng = (meta.ranges || {})[key] || [];
+        if (rng[0] != null) input.min = rng[0];
+        if (rng[1] != null) input.max = rng[1];
+        input.value = values[key] != null ? values[key] : '';
+        input.dataset.key = key;
+        input.dataset.kind = kind;
+      } else if (key === 'llm_provider') {
+        input = el('select');
+        [['cloud', 'cloud（云端 API）'], ['local', 'local（本机 Ollama）'], ['auto', 'auto（云端优先，本地兜底）']]
+          .forEach(function (pair) {
+            const o = el('option', '', pair[1]);
+            o.value = pair[0];
+            if (String(values[key]) === pair[0]) o.selected = true;
+            input.appendChild(o);
+          });
+        input.dataset.key = key;
+        input.dataset.kind = 'str';
+      } else {
+        input = el('input');
+        input.type = (secrets && secrets[key]) ? 'password' : 'text';
+        input.dataset.key = key;
+        input.dataset.kind = 'str';
+        if (secrets && secrets[key]) {
+          // 密钥：不回填明文。留空=不改，旁边给个「清除」
+          const info = secrets[key];
+          input.placeholder = info.set ? ('已设置 ' + (info.tail || '') + '（留空=不改）') : '还没设置';
+          input.dataset.secret = '1';
+          const clear = el('button', 'au-btn au-btn-mini', '清除');
+          clear.type = 'button';
+          clear.onclick = function () {
+            input.value = '';
+            input.dataset.clear = '1';
+            input.placeholder = '已标记清除（保存后生效）';
+          };
+          row.appendChild(input);
+          row.appendChild(clear);
+          return row;
+        }
+        input.value = values[key] != null ? values[key] : '';
+      }
+      row.appendChild(input);
+      return row;
+    }
+
+    function collectSettings(card) {
+      const patch = {};
+      card.querySelectorAll('[data-key]').forEach(function (input) {
+        const key = input.dataset.key;
+        const kind = input.dataset.kind;
+        if (input.dataset.secret) {
+          if (input.dataset.clear) { patch[key + '_clear'] = true; return; }
+          if (input.value && input.value.trim()) patch[key] = input.value.trim();
+          return;
+        }
+        if (kind === 'bool') patch[key] = !!input.checked;
+        else if (kind === 'int' || kind === 'float') {
+          // 空输入框 **跳过不提交**（= 不改）。不然 parseFloat('') 是 NaN，
+          // 提交上去会被服务端判成「要填数字」，整份设置都存不进去（实测踩过）。
+          const raw = String(input.value == null ? '' : input.value).trim();
+          if (!raw) { input.value = input.dataset.fallback || ''; return; }
+          const num = kind === 'int' ? parseInt(raw, 10) : parseFloat(raw);
+          if (!isFinite(num)) return;
+          patch[key] = num;
+        } else patch[key] = input.value;
+      });
+      const persona = card.querySelector('[data-persona]');
+      if (persona) patch.persona = persona.value;
+      const extra = card.querySelector('[data-persona-extra]');
+      if (extra) patch.persona_extra = extra.value;
+      return patch;
+    }
+
+    async function openSettings() {
+      let meta;
+      try {
+        meta = await api('/agent/settings/all');
+      } catch (err) {
+        window.alert('读不到设置：' + err.message + '\n（服务在跑吗？）');
+        return;
+      }
+      const overlay = el('div', 'au-modal');
+      const card = el('div', 'au-modal-card');
+      card.innerHTML =
+        '<div class="au-modal-head"><span>⚙ 设置</span>' +
+        '<span class="au-set-hint" style="flex:1">改完点右下角「保存」，立刻生效（不用重启）</span>' +
+        '<button class="au-btn au-btn-mini" data-act="close">关闭</button></div>';
+      const body = el('div', 'au-modal-body');
+      card.appendChild(body);
+
+      (meta.groups || []).forEach(function (g) {
+        const box = el('div', 'au-set-group');
+        box.appendChild(el('div', 'au-set-title', g.title));
+        if (g.hint) box.appendChild(el('div', 'au-set-hint', g.hint));
+        (g.fields || []).forEach(function (key) {
+          box.appendChild(settingsRow(key, meta, meta.values || {}, meta.secrets || {}));
+        });
+        body.appendChild(box);
+      });
+
+      // ---- 人格提示词 ----
+      const pbox = el('div', 'au-set-group');
+      pbox.appendChild(el('div', 'au-set-title', '人格提示词（老师是谁、怎么教）'));
+      pbox.appendChild(el('div', 'au-set-hint',
+        (meta.persona && meta.persona.note) || '') );
+      const prow = el('div', 'au-field');
+      prow.appendChild(el('label', '', '人格'));
+      const pta = el('textarea');
+      pta.dataset.persona = '1';
+      pta.value = (meta.persona && meta.persona.text) || '';
+      pta.placeholder = (meta.persona && meta.persona.default) || '';
+      prow.appendChild(pta);
+      pbox.appendChild(prow);
+      const erow = el('div', 'au-field');
+      erow.appendChild(el('label', '', '附加要求'));
+      const eta = el('textarea');
+      eta.dataset.personaExtra = '1';
+      eta.value = (meta.persona && meta.persona.extra) || '';
+      eta.placeholder = '例如：每次课结束都留一道思考题；回答尽量短';
+      erow.appendChild(eta);
+      pbox.appendChild(erow);
+      const phint = el('div', 'au-set-hint');
+      phint.textContent = (meta.persona && meta.persona.is_default)
+        ? '现在用的是内置人格（清空输入框 = 恢复内置）' : '现在用的是你自定义的人格';
+      pbox.appendChild(phint);
+      body.appendChild(pbox);
+
+      // ---- 桌宠形象 ----
+      const petBox = el('div', 'au-set-group');
+      petBox.appendChild(el('div', 'au-set-title', '桌宠形象'));
+      petBox.appendChild(el('div', 'au-set-hint', '小玩偶用哪个 Live2D 模型（清单是扫你电脑上的模型得到的）'));
+      const petRow = el('div', 'au-field');
+      petRow.appendChild(el('label', '', '当前形象'));
+      const petSel = el('select');
+      petSel.dataset.petModel = '1';
+      petRow.appendChild(petSel);
+      petBox.appendChild(petRow);
+      body.appendChild(petBox);
+      if (window.PetCore) {
+        PetCore.catalog().then(function (cat) {
+          (cat.models || []).forEach(function (m) {
+            const o = el('option', '', (m.label || m.name) + (m.has_motions ? '（自带动作）' : '（程序演绎）'));
+            o.value = m.id;
+            if (cat.current && cat.current.id === m.id) o.selected = true;
+            petSel.appendChild(o);
+          });
+        }).catch(function () {
+          petSel.appendChild(el('option', '', '（读不到形象清单）'));
+        });
+      }
+
+      // ---- 关于 ----
+      const abox = el('div', 'au-set-group');
+      abox.appendChild(el('div', 'au-set-title', '关于'));
+      const about = meta.about || {};
+      const lines = [
+        ['版本', about.version],
+        ['工具数', about.tools],
+        ['可用形象', about.pet_models],
+        ['数据目录', about.data_root],
+        ['服务版本', (meta.chain || []).join(' → ')],
+      ];
+      lines.forEach(function (kv) {
+        if (kv[1] == null || kv[1] === '') return;
+        const r = el('div', 'au-field');
+        r.appendChild(el('label', '', kv[0]));
+        const v = el('div', 'au-set-note', String(kv[1]));
+        v.style.flex = '1';
+        v.style.wordBreak = 'break-all';
+        r.appendChild(v);
+        abox.appendChild(r);
+      });
+      body.appendChild(abox);
+
+      const foot = el('div', 'au-modal-foot');
+      const status = el('span', 'au-set-hint');
+      status.style.flex = '1';
+      const btnTest = el('button', 'au-btn', '测试连接');
+      const btnSave = el('button', 'au-btn au-btn-primary', '保存');
+      [btnTest, btnSave].forEach(function (b) { b.type = 'button'; });
+      foot.appendChild(status);
+      foot.appendChild(btnTest);
+      foot.appendChild(btnSave);
+      card.appendChild(foot);
+      overlay.appendChild(card);
+      document.body.appendChild(overlay);
+
+      function close() { overlay.remove(); document.removeEventListener('keydown', onKey); }
+      function onKey(ev) { if (ev.key === 'Escape') close(); }
+      document.addEventListener('keydown', onKey);
+      overlay.addEventListener('mousedown', function (ev) { if (ev.target === overlay) close(); });
+      card.querySelector('[data-act="close"]').onclick = close;
+
+      btnTest.onclick = async function () {
+        status.textContent = '正在测试…（会给模型发一句话）';
+        btnTest.disabled = true;
+        try {
+          const r = await api('/agent/settings/test', { method: 'POST', body: {} });
+          const parts = (r.results || []).map(function (x) {
+            return (x.label || x.provider || '?') + (x.ok ? ' ✓' : (' ✗ ' + (x.error || '')));
+          });
+          status.textContent = (r.ok ? '通了：' : '没通：') + (parts.join(' | ') || r.error || '');
+          status.style.color = r.ok ? '' : '#c62b1c';   // 弹层在 .au-root 外，取不到 --au-err
+        } catch (err) {
+          status.textContent = '测试失败：' + err.message;
+        }
+        btnTest.disabled = false;
+      };
+
+      btnSave.onclick = async function () {
+        status.textContent = '保存中…';
+        btnSave.disabled = true;
+        try {
+          const patch = collectSettings(card);
+          // 桌宠形象单独走它自己的接口（保存位置不同）
+          const petId = petSel.value;
+          const r = await api('/agent/settings/all', { method: 'POST', body: patch });
+          if (!r.ok) {
+            status.textContent = '没保存：' + (r.errors || []).join('；');
+            status.style.color = '#c62b1c';
+            btnSave.disabled = false;
+            return;
+          }
+          let petMsg = '';
+          if (petId && window.PetCore) {
+            try {
+              await PetCore.setModel(petId);
+              if (window.__app && __app.pet && __app.pet.switchTo) {
+                const cat = await PetCore.catalog();
+                const info = (cat.models || []).filter(function (m) { return m.id === petId; })[0];
+                if (info) await __app.pet.switchTo(info);
+              }
+              petMsg = '，形象也换了';
+            } catch (err) { petMsg = '，但形象没换成：' + err.message; }
+          }
+          status.textContent = '已保存 ✓' + petMsg + '（下一条消息就用新设置）';
+          status.style.color = '';
+          checkHealth();
+        } catch (err) {
+          status.textContent = '保存失败：' + err.message;
+          status.style.color = '#c62b1c';
+        }
+        btnSave.disabled = false;
+      };
+    }
+
+
     navFoot.innerHTML =
       '<div class="au-nav-stat">正在读取…</div>' +
-      '<div class="au-nav-meta"><span class="au-model-chip" title="点击切换云端/本地模型">模型 …</span>' +
+      '<div class="au-nav-meta"><button class="au-set-btn" type="button" title="模型 / API Key / 人格提示词 / 运行参数">⚙ 设置</button>' +
+      '<span class="au-model-chip" title="点击切换云端/本地模型">模型 …</span>' +
       '<span class="au-ver" title="渲染器版本（页面缓存旧版时比一比）">v' + esc(AgentUI.version) + '</span></div>';
     const modelChip = navFoot.querySelector('.au-model-chip');
+    navFoot.querySelector('.au-set-btn').addEventListener('click', function () { openSettings(); });
     modelChip.addEventListener('click', async function () {
       try {
         const cur = await api('/agent/settings');

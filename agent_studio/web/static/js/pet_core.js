@@ -229,18 +229,15 @@ window.PetCore = (function () {
       const baseH = im.originalHeight || m.height;
       if (!baseW || !baseH) return;
       if (cfg.mode === 'doll') {
-        // 小玩偶：只露出**画布上方那一截**（头 + 肩），左右允许裁掉一些 ——
-        // 玩偶特写本来就是这样的取景。用「画布顶边贴住框顶 + 露出比例」来算，
-        // 不去猜每个模型的留白（不同模型的画布比例差很多，实测 2500×2500 ~ 4000×6000）。
-        const frac = cfg.dollFrac || 0.32;        // 想露出画布上方这一截（越小越特写）
+        // 小玩偶：**整身**放进框里（学生问过「为啥他只有半身」，所以要全身）。
+        // 想只看上半身就滚轮放大 —— 取景比例由用户定，不由我替他猜。
+        // 锚点仍放脚底：整身贴地站着最自然。
         const zoom = cfg.dollZoom || 1.0;
-        const sByH = h / (frac * baseH);
-        const sByW = (w * 1.5) / baseW;           // 最多裁掉两侧各 1/3
-        const s = Math.min(sByH, sByW) * zoom;
+        const s = Math.min(w / baseW, h / baseH) * 0.98 * zoom;
         m.scale.set(s);
         m.anchor.set(0.5, 1);
         m.x = w / 2;
-        m.y = baseH * s;                 // 画布顶边 = y − baseH*s = 0
+        m.y = h;                         // 脚底贴住框底；放大时上面超出部分自然裁掉
       } else {
         const s = Math.min(w / baseW, h / baseH) * 0.98;
         m.scale.set(s);
