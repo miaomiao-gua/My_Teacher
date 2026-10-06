@@ -49,6 +49,25 @@ FIELDS: Dict[str, Tuple[Any, Optional[float], Optional[float], bool]] = {
     "agent_python_timeout": (float, 2, 600, False),
     "agent_num_ctx": (int, 1024, 262144, False),
     "agent_num_predict": (int, 128, 65536, False),
+    # 桌宠
+    "pet_scale": (float, 0.6, 2.6, False),
+    "pet_visible": (bool, None, None, False),
+    # 语音（TTS）
+    "tts_provider": (str, None, None, False),
+    "tts_windows_voice": (int, 0, 64, False),
+    "tts_cloud_base_url": (str, None, None, False),
+    "tts_cloud_model": (str, None, None, False),
+    "tts_cloud_voice": (str, None, None, False),
+    "tts_cloud_api_key": (str, None, None, True),
+    "tts_speed": (float, 0.5, 2.0, False),
+    "tts_volume": (int, 0, 100, False),
+    "tts_auto_speak": (bool, None, None, False),
+}
+
+# 只能取固定几个值的字段（界面上渲染成下拉框，服务端也校验）
+CHOICES: Dict[str, List[str]] = {
+    "llm_provider": ["cloud", "local", "auto"],
+    "tts_provider": ["off", "windows", "openai"],
 }
 
 SECRET_FIELDS = {k for k, v in FIELDS.items() if v[3]}
@@ -72,6 +91,13 @@ GROUPS: List[Dict[str, Any]] = [
      "fields": ["agent_max_steps", "agent_run_timeout", "agent_tool_timeout",
                 "agent_python_timeout", "agent_num_ctx", "agent_num_predict"],
      "hint": "一般不用改。卡住或太慢时再调"},
+    {"key": "pet", "title": "桌宠",
+     "fields": ["pet_scale", "pet_visible"],
+     "hint": "大小 1.0 是默认；形象在下面选，也可以上传自己的 Live2D"},
+    {"key": "tts", "title": "语音（让她把话念出来）",
+     "fields": ["tts_provider", "tts_windows_voice", "tts_speed", "tts_volume", "tts_auto_speak",
+                "tts_cloud_base_url", "tts_cloud_model", "tts_cloud_voice", "tts_cloud_api_key"],
+     "hint": "「Windows 本机语音」最省事（离线、不用 key）；云端要填 OpenAI 兼容的 /audio/speech 服务"},
 ]
 
 LABELS: Dict[str, str] = {
@@ -93,6 +119,17 @@ LABELS: Dict[str, str] = {
     "agent_python_timeout": "跑代码超时秒数",
     "agent_num_ctx": "上下文长度",
     "agent_num_predict": "单次最多生成",
+    "pet_scale": "桌宠大小（1.0 默认）",
+    "pet_visible": "显示桌宠",
+    "tts_provider": "用哪种语音",
+    "tts_windows_voice": "本机嗓子（序号）",
+    "tts_cloud_base_url": "云端语音地址 base_url",
+    "tts_cloud_model": "云端语音模型",
+    "tts_cloud_voice": "音色 voice",
+    "tts_cloud_api_key": "云端语音 API Key（留空则复用上面那把）",
+    "tts_speed": "语速",
+    "tts_volume": "音量（0-100）",
+    "tts_auto_speak": "气泡自动念出来",
 }
 
 
@@ -181,6 +218,17 @@ DEFAULTS: Dict[str, Any] = {
     "agent_python_timeout": 20,
     "agent_num_ctx": 32768,
     "agent_num_predict": 4096,
+    # 桌宠与语音
+    "pet_scale": 1.0,
+    "pet_visible": True,
+    "tts_provider": "off",
+    "tts_windows_voice": 0,
+    "tts_cloud_base_url": "https://api.siliconflow.cn/v1",
+    "tts_cloud_model": "FunAudioLLM/CosyVoice2-0.5B",
+    "tts_cloud_voice": "FunAudioLLM/CosyVoice2-0.5B:alex",
+    "tts_speed": 1.0,
+    "tts_volume": 100,
+    "tts_auto_speak": False,
 }
 
 
@@ -222,6 +270,7 @@ def read_state() -> Dict[str, Any]:
     return {
         "values": values,
         "defaults": dict(DEFAULTS),
+        "choices": {k: list(v) for k, v in CHOICES.items()},
         "secrets": secrets,
         "groups": GROUPS,
         "labels": LABELS,
@@ -283,6 +332,9 @@ def write_state(patch: Dict[str, Any]) -> Dict[str, Any]:
                 settings[key] = str(value)
             else:
                 settings[key] = bool(value)
+            continue
+        if key in CHOICES and str(value) not in CHOICES[key]:
+            errors.append(f"「{LABELS.get(key, key)}」只能是 " + " / ".join(CHOICES[key]))
             continue
         if key not in FIELDS:
             continue                                   # 白名单外的键：安静忽略
@@ -389,6 +441,12 @@ def about() -> Dict[str, Any]:
         info["pet_models"] = len(pet_models.scan_models())
         cur = pet_models.current_model()
         info["pet_current"] = (cur or {}).get("label") or (cur or {}).get("name")
+    except Exception:
+        pass
+    try:
+        from . import tts
+
+        info["tts"] = tts.self_check()
     except Exception:
         pass
     return info

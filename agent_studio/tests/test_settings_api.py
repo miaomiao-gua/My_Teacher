@@ -14,12 +14,26 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "course"))
+
+# ★ 关键：这个测试会**往配置里写假密钥**。绝不能写到学生真正在用的那份 config.json 上 ——
+#   服务进程和另一个会话都在读那个文件，写进去会让云端链路当场 401。
+#   所以先切到一个临时数据目录（把现有配置复制过去，行为一致），测完删掉。
+_SCRATCH = ROOT / "data" / "_settings_test"
+shutil.rmtree(_SCRATCH, ignore_errors=True)
+_SCRATCH.mkdir(parents=True, exist_ok=True)
+for _name in ("config.json", ".secret_key", "settings.json"):
+    _src = ROOT / "data" / _name
+    if _src.is_file():
+        shutil.copy2(_src, _SCRATCH / _name)
+os.environ["AGENT_STUDIO_DATA"] = str(_SCRATCH)
 
 from kernel import settings_api as sa  # noqa: E402
 
@@ -34,7 +48,7 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 
 def backup() -> dict:
-    """把现有配置整体备份，测完还原（绝不能把学生的 Key/人格弄丢）"""
+    """临时目录里的快照（测完还原，保证同一进程里后续用例互不影响）"""
     snaps = {}
     for p in (sa._cfg_path(), sa._settings_path(), sa._persona_path(), sa._extra_path()):
         snaps[str(p)] = p.read_bytes() if p.is_file() else None
@@ -167,12 +181,42 @@ def test_chain_switch() -> None:
         restore(snaps)
 
 
+def test_writing_settings_keeps_keys_intact() -> None:
+    """★ 写设置**不能把已存的密钥弄坏**。
+
+    这条是被一次真实故障逼出来的：改运行参数时 `_write_json(cfg)` 用的 cfg 是
+    `_read_json()` 的原始字典（里面是 enc$ 密文），只要哪次不小心用**解密后的**值去写，
+    磁盘上的密文就被明文覆盖了 —— 表面上"设置保存成功"，实际上密钥已经废了。
+    """
+    print("\n[6] 写设置之后，已存的密钥仍然可解")
+    snaps = backup()
+    try:
+        from kernel.config import load_app_config
+        from kernel.crypto_utils import is_encrypted
+
+        before = load_app_config().get("chat_api_key") or ""
+        check("初始状态能解出 key", bool(before) and not is_encrypted(before), f"{len(before)} 字符")
+
+        sa.write_state({"agent_max_steps": 15, "pet_scale": 1.3, "tts_provider": "windows"})
+        after = load_app_config().get("chat_api_key") or ""
+        check("改完参数后仍然能解出 key", bool(after) and not is_encrypted(after), f"{len(after)} 字符")
+        check("值没变（没被明文覆盖）", after == before)
+
+        raw = json.loads(sa._cfg_path().read_text(encoding="utf-8"))
+        check("磁盘上依然是密文", str(raw.get("chat_api_key", "")).startswith("enc$"))
+    finally:
+        restore(snaps)
+
+
 def main() -> int:
     test_read_hides_secrets()
     test_write_whitelist_and_ranges()
     test_secret_roundtrip_and_encryption()
     test_persona_flows_into_prompt()
     test_chain_switch()
+    test_writing_settings_keeps_keys_intact()
+    # 收尾：删掉临时数据目录（学生的真实配置全程没被碰过）
+    shutil.rmtree(_SCRATCH, ignore_errors=True)
     print("\n" + ("全部通过 ✓" if _failures == 0 else f"失败 {_failures} 项 ✗"))
     return 1 if _failures else 0
 

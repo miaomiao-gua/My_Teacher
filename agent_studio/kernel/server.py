@@ -243,6 +243,68 @@ async def settings_test() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# 学生上传自己的 Live2D 模型 / 试听语音
+# ---------------------------------------------------------------------------
+@app.post("/agent/pet/model/upload")
+async def pet_model_upload(request: Request) -> Dict[str, Any]:
+    """上传一个 Live2D 模型目录（前端用 <input webkitdirectory> 选整个文件夹）。
+
+    为什么用 multipart 收一堆文件而不是让用户打包 zip：对非程序员来说
+    「选中模型文件夹」比「先压缩再上传」少两步，而且 zip 还得在服务端解压（多一层风险）。
+    """
+    from . import pet_models
+
+    form = await request.form()
+    folder = str(form.get("folder") or "my_model")
+    pairs = []
+    for key, value in form.multi_items():
+        if key != "files":
+            continue
+        name = getattr(value, "filename", None)
+        if not name:
+            continue
+        rel = str(form.get("paths_" + name) or name)
+        pairs.append((rel, await value.read()))
+    try:
+        result = pet_models.save_upload(folder, pairs)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return result
+
+
+@app.post("/agent/pet/model/delete")
+async def pet_model_delete(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """删掉一个**上传的**形象（自己电脑上的模型目录一律不动）"""
+    from . import pet_models
+
+    mid = str(payload.get("id") or "")
+    ok = pet_models.delete_upload(mid)
+    if not ok:
+        raise HTTPException(status_code=400, detail="只能删「上传」的形象")
+    return {"ok": True}
+
+
+@app.get("/agent/tts/voices")
+async def tts_voices() -> Dict[str, Any]:
+    from . import tts
+
+    return {"ok": True, "voices": tts.voices(), "current": tts.self_check()}
+
+
+@app.post("/agent/tts/say")
+async def tts_say(payload: Dict[str, Any]) -> Any:
+    """把一句文本合成成音频返回（试听 / 桌宠念气泡都用它）"""
+    from . import tts
+
+    text = str(payload.get("text") or "").strip()
+    try:
+        data, mime = await tts.synthesize(text)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc))
+    return Response(content=data, media_type=mime, headers={"Cache-Control": "no-store"})
+
+
+# ---------------------------------------------------------------------------
 # 会话
 # ---------------------------------------------------------------------------
 @app.get("/agent/session/{session_id}")

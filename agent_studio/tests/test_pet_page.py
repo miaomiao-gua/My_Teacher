@@ -174,13 +174,16 @@ def test_page_and_routes_exist() -> None:
     app = CLIENT_DIR / "static" / "js" / "agent_ui.js"
     app_js = app.read_text(encoding="utf-8") if app.is_file() else ""
     check("工作台里挂上了小玩偶（mountPetDoll）", "mountPetDoll" in app_js)
-    check("小玩偶能换形象（PetCore.openPicker）", "PetCore.openPicker" in app_js)
+    check("换形象走设置面板（switchTo + 形象下拉）",
+          "function switchTo" in app_js and "petSel.dataset.petModel" in app_js)
     check("小玩偶能拖动并且记得位置", "au_pet_pos_v1" in app_js)
-    # 学生要求过「不要在他头顶上加框」：控件必须在脚下，头顶不许有元素
-    check("头顶没有控件条（不再有 .au-pet-bar / .au-pet-handle）",
-          "au-pet-bar" not in app_js and "au-pet-handle" not in app_js)
-    check("控件条在小玩偶脚下（.au-pet-tools）", "au-pet-tools" in app_js)
-    check("右键她也能出菜单", "contextmenu" in app_js and "showMenu" in app_js)
+    # 学生要求过：「不要在他头顶/身上加控件」（脚下的「换形象 / 放大」也去掉了）
+    check("她身上一个控件都没有（没有 .au-pet-tools / 按钮）",
+          "au-pet-tools" not in app_js and "au-pet-bar" not in app_js and "au-pet-handle" not in app_js)
+    check("右键她出菜单（换个形象 / 收起 / 待机 / 设置）",
+          "contextmenu" in app_js and "showMenu" in app_js)
+    check("没有独立桌宠网页的入口了（学生不需要单独网页）",
+          not re.search(r"window\.open\('/agent/pet'", app_js) and "openModelPicker" not in app_js)
     index_html = (CLIENT_DIR / "index.html").read_text(encoding="utf-8")
     check("工作台页面也引了 pet_core.js 与 pet.css",
           "/static/js/pet_core.js" in index_html and "/static/css/pet.css" in index_html)
@@ -195,11 +198,22 @@ def test_page_and_routes_exist() -> None:
           "data-persona" in app_js and "data-persona-extra" in app_js)
     check("面板不写死样式变量兜底（弹层在 .au-root 外，不然背景会透明）",
           "var(--au-panel,#fff)" in app_js)
+    # 学生这次新提的三件事：调大小 / 上传自己的模型 / 配 TTS
+    check("设置里有桌宠大小滑杆", "key === 'pet_scale'" in app_js and "type = 'range'" in app_js)
+    check("大小滑杆要能当场生效（applyScale）", "applyScale" in app_js and "pet.fit()" in app_js)
+    check("设置里能上传自己的 Live2D（选整个文件夹）",
+          "webkitdirectory" in app_js and "/agent/pet/model/upload" in app_js)
+    check("设置里有语音：试听 + 系统嗓子下拉",
+          "/agent/tts/say" in app_js and "tts_windows_voice" in app_js)
+    check("语音来源是下拉（选项由服务端 choices 决定）",
+          "(meta.choices || {})[key]" in app_js and "choices.forEach" in app_js)
 
     server_py = (ROOT / "kernel" / "server.py").read_text(encoding="utf-8")
     for route in ("/agent/pet", "/agent/live2d/models", "/agent/live2d/model/{model_id}/{path:path}",
                   "/agent/pet/model", "/agent/live2d/vendor/{name}",
-                  "/agent/settings/all", "/agent/settings/test"):
+                  "/agent/settings/all", "/agent/settings/test",
+                  "/agent/pet/model/upload", "/agent/pet/model/delete",
+                  "/agent/tts/voices", "/agent/tts/say"):
         check(f"server.py 注册了 {route}", route in server_py)
     # 注册顺序：通配路由必须在具体路由之后，否则会被吃掉（踩过）
     check("通配路由注册在 vendor / model 之后",

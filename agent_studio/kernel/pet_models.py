@@ -29,12 +29,18 @@ _SCAN_TTL = 60.0
 _cache: Dict[str, Any] = {"at": 0.0, "items": []}
 
 
+def upload_root() -> Path:
+    """学生自己上传的形象放这儿（可写、跟着 data/ 走，exe 形态也有效）"""
+    return data_root() / "live2d_models"
+
+
 def _roots() -> List[Path]:
     """到哪里找模型。按「越可能常用越靠前」排。"""
     from .config import CLIENT_DIR, LEGACY_ROOT
 
     home = Path.home()
     out = [
+        upload_root(),                             # 学生自己上传的，排最前
         CLIENT_DIR / "static" / "models",          # 项目自带的（打包进 exe，最稳）
         LEGACY_ROOT / "client" / "static" / "models",   # 用户自己上传的（含 白-免费版）
         LEGACY_ROOT / "Open-LLM-VTuber" / "live2d-models",
@@ -168,7 +174,8 @@ def scan_models(force: bool = False) -> List[Dict[str, Any]]:
 
     items: List[Dict[str, Any]] = []
     seen_dirs = set()
-    for root in _roots():
+    roots = _roots()
+    for root_index, root in enumerate(roots):
         base_depth = len(root.parts)
         try:
             candidates = [p for p in root.rglob("*.model3.json") if len(p.parts) - base_depth <= _MAX_DEPTH]
@@ -185,11 +192,13 @@ def scan_models(force: bool = False) -> List[Dict[str, Any]]:
             info = _describe(model_file)
             info["id"] = _slug(model_file.parent, model_file)
             info["root"] = str(root)
+            info["root_index"] = root_index          # 排清单时用：越靠前的目录越优先
             info["url"] = f"/agent/live2d/model/{info['id']}/{model_file.name}"
             items.append(info)
 
-    # id 撞车就加序号（保证唯一，且顺序稳定 —— 排序后再去重）
-    items.sort(key=lambda x: (x["id"], x["dir"].lower()))
+    # id 撞车就加序号（保证唯一）；排序时**保留目录优先级**：
+    # 「学生自己上传的」永远排最前（他刚传完就该在下拉里第一眼看到）。
+    items.sort(key=lambda x: (x.get("root_index", 99), x["id"], x["dir"].lower()))
     used: Dict[str, int] = {}
     for it in items:
         base = it["id"]
@@ -200,6 +209,10 @@ def scan_models(force: bool = False) -> List[Dict[str, Any]]:
         else:
             used[base] = 0
         it["label"] = _friendly(it["id"], it["name"])
+        try:
+            it["uploaded"] = str(upload_root().resolve()).lower() in str(it["dir"]).lower()
+        except Exception:
+            it["uploaded"] = False
     _cache.update({"at": now, "items": items})
     return items
 
@@ -303,6 +316,85 @@ def current_model() -> Optional[Dict[str, Any]]:
     return find_model(mid) if mid else None
 
 
+# ---------------------------------------------------------------------------
+# 学生上传自己的 Live2D 模型
+# ---------------------------------------------------------------------------
+MAX_UPLOAD_BYTES = 300 * 1024 * 1024      # 整个模型目录的上限
+MAX_FILE_BYTES = 64 * 1024 * 1024         # 单个文件的上限（moc3 大的能到 10MB 以上）
+
+
+def save_upload(folder: str, files: List[tuple]) -> Dict[str, Any]:
+    """把学生选的模型目录写进 `data/live2d_models/<folder>/`。
+
+    `files` 是 [(相对路径, 字节)]。规则：
+    - **每个相对路径都要清洗**（去掉盘符、`..`、绝对路径）——这是上传接口，必须防穿越；
+    - 必须包含 `.model3.json`，否则这堆文件不是模型，直接拒掉（别写一堆垃圾进磁盘）；
+    - 总量/单文件都有上限，超了报清楚。
+    返回 {ok, folder, files, model} 或抛 ValueError（消息给学生看）。
+    """
+    from .session import safe_relpath
+
+    name = re.sub(r"[^\w\u4e00-\u9fff.\- ]+", "_", str(folder or "").strip()) or "my_model"
+    name = name.strip(". ")[:60] or "my_model"
+    base = (upload_root() / name).resolve()
+    if upload_root().resolve() not in base.parents:
+        raise ValueError("目录名不合法")
+
+    if not files:
+        raise ValueError("没有收到文件")
+
+    total = 0
+    written: List[str] = []
+    model_json = None
+    for rel, data in files:
+        rel = safe_relpath(str(rel).replace("\\", "/"))
+        if len(data) > MAX_FILE_BYTES:
+            raise ValueError(f"单个文件太大：{rel}（{len(data)/1048576:.1f} MB）")
+        total += len(data)
+        if total > MAX_UPLOAD_BYTES:
+            raise ValueError(f"整个模型太大（超过 {MAX_UPLOAD_BYTES // 1048576} MB）")
+        target = (base / rel).resolve()
+        if base not in target.parents:
+            raise ValueError(f"路径不合法：{rel}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        written.append(rel)
+        if rel.lower().endswith(".model3.json"):
+            model_json = target
+
+    if model_json is None:
+        raise ValueError("这些文件里没有 .model3.json —— 请选**整个模型文件夹**（里面要有 .model3.json、.moc3 和贴图）")
+    if not model_json.is_file():
+        raise ValueError("模型主文件没写成功")
+
+    scan_models(force=True)
+    item = None
+    for it in scan_models():
+        try:
+            if Path(it["dir"]).resolve() == base or Path(it["file"]).resolve() == model_json.resolve():
+                item = it
+                break
+        except Exception:
+            continue
+    return {"ok": True, "folder": name, "dir": str(base), "files": len(written), "model": item}
+
+
+def delete_upload(model_id: str) -> bool:
+    """删掉一个**上传的**形象（只允许删 data/live2d_models 里的，用户自己的模型一律不动）"""
+    import shutil
+
+    item = find_model(model_id)
+    if not item:
+        return False
+    target = Path(item["dir"]).resolve()
+    root = upload_root().resolve()
+    if root not in target.parents:
+        return False                                  # 不是上传目录里的 → 拒绝删
+    shutil.rmtree(target, ignore_errors=True)
+    scan_models(force=True)
+    return True
+
+
 def catalogue() -> Dict[str, Any]:
     """给界面用的完整清单：当前选了谁 + 有哪些可选。"""
     items = scan_models()
@@ -320,6 +412,7 @@ def catalogue() -> Dict[str, Any]:
                 "expressions": it["expressions"],
                 "size_mb": it["size_mb"],
                 "dir": it["dir"],
+                "uploaded": str(upload_root().resolve()).lower() in it["dir"].lower(),
             }
             for it in items
         ],

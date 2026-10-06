@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  const AgentUI = { version: '0.14.0' };
+  const AgentUI = { version: '0.15.0' };
   const HTML_NS = 'http://www.w3.org/1999/xhtml';
 
   /* ==========================================================================
@@ -4661,16 +4661,8 @@
       // （我一开始多写了个 scrollIntoView(最后一个)，反而把视野滚回到底部那张旧图上了。）
     };
     sideTools.appendChild(calcBtn);
-    // 「桌宠」：网页版桌宠（/agent/pet）独立开一个小窗口 —— Live2D 形象 + 气泡 + 小聊天。
-    // 功能做好了却没人知道入口在哪儿，等于没做（这边已经被说过一次了），所以给个明面上的按钮。
-    const petBtn = el('button', 'au-btn au-btn-mini', '🐾 桌宠');
-    petBtn.type = 'button';
-    petBtn.title = '打开桌宠小窗口（Live2D 形象 / 气泡提醒 / 直接跟她说句话）';
-    petBtn.onclick = function () {
-      const w = window.open('/agent/pet', 'au_pet', 'width=560,height=780,menubar=no,toolbar=no');
-      if (!w) window.open('/agent/pet', '_blank');       // 被拦截就退化成新标签页
-    };
-    sideTools.appendChild(petBtn);
+    // 这里以前有个「🐾 桌宠」按钮，用来开独立桌宠网页。学生说不需要单独网页展示，
+    // 于是入口撤掉了（桌宠就活在界面右下角；形象/大小/语音全在左下角「⚙ 设置」里）。
     const sideChip = el('span', 'au-wchip', '⇔ 宽度');
     sideChip.title = '点一下换一档工作台宽度（也可以直接拖动左边那条竖线，双击恢复默认）';
     sideTools.appendChild(sideChip);
@@ -4708,19 +4700,10 @@
       const MINI_KEY = 'au_pet_mini_v1';
 
       const box = el('div', 'au-pet');
-      // **头顶不许有框**（学生明确要求）：控件不再做成浮在头上的标题栏，
-      // 而是鼠标移上去时出现在她**脚下**的一条小工具，另外右键她也能出同一个菜单。
+      // **她身上和头顶都不许有控件**（学生要求：去掉脚下的「换形象 / 放大」）。
+      // 想换形象 / 收起 / 改设置：**右键她**（菜单在光标处弹出），所有设置都在左下角「⚙ 设置」里。
       const stage = el('div', 'au-pet-stage');
-      const tools = el('div', 'au-pet-tools');
-      const btnModel = el('button', 'au-pet-btn', '换形象');
-      const btnBig = el('button', 'au-pet-btn', '放大');
-      const btnMini = el('button', 'au-pet-btn', '收起');
-      [btnModel, btnBig, btnMini].forEach((b) => { b.type = 'button'; });
-      tools.appendChild(btnModel);
-      tools.appendChild(btnBig);
-      tools.appendChild(btnMini);
       box.appendChild(stage);
-      box.appendChild(tools);
       hostRoot.appendChild(box);
 
       // 默认位置：右下角，避开输入框
@@ -4777,28 +4760,25 @@
       box.addEventListener('pointercancel', onUp);
       window.addEventListener('resize', function () { place({ x: box.offsetLeft, y: box.offsetTop }); });
 
-      // 收起 / 展开（收起后只剩一个小头像，点它回来）
+      // 收起 / 展开（收起后只剩一个小头像，点它回来）。没有按钮了，走右键菜单。
       let mini = false;
       try { mini = localStorage.getItem(MINI_KEY) === '1'; } catch (e) {}
       function applyMini() {
         box.classList.toggle('au-pet--collapsed', mini);
-        btnMini.textContent = mini ? '展开' : '收起';
         try { localStorage.setItem(MINI_KEY, mini ? '1' : '0'); } catch (e) {}
       }
       applyMini();
-      btnMini.onclick = function (ev) { ev.stopPropagation(); mini = !mini; applyMini(); };
 
-      // 右键她 = 同一个菜单（免得非程序员不知道脚下那条工具怎么出来）
+      // 右键她 = 她的菜单（身上一个控件都不放，符合「不要在她身上/头顶加东西」）
       box.addEventListener('contextmenu', function (ev) {
         ev.preventDefault();
         const r = box.getBoundingClientRect();
         showMenu(ev.clientX || r.x, ev.clientY || r.y, [
-          { label: '换个形象', action: function () { btnModel.click(); } },
-          { label: '放大成独立窗口', action: function () { btnBig.click(); } },
-          { label: mini ? '展开' : '收起', action: function () { btnMini.click(); } },
+          { label: '换个形象', hint: '也可以上传自己的', action: function () { openSettings('pet'); } },
+          { label: mini ? '展开' : '收起', action: function () { mini = !mini; applyMini(); } },
           { label: '让她待机', action: function () { if (pet) pet.act('idle'); } },
           { sep: true },
-          { label: '设置…', hint: '模型 / Key / 人格', action: function () { openSettings(); } },
+          { label: '设置…', hint: '大小 / 形象 / 语音', action: function () { openSettings(); } },
         ]);
       });
 
@@ -4849,14 +4829,6 @@
         saveZoom(model && model.id, z);
       }, { passive: false });
 
-      btnModel.onclick = function (ev) {
-        ev.stopPropagation();
-        PetCore.openPicker(btnModel, {
-          current: model && model.id,
-          onPick: function (current) { switchTo(current); },
-        });
-      };
-
       // 换形象：清单里拿到完整信息（动作组等）再重建，别只拿 id
       async function switchTo(current) {
         const cat = await PetCore.catalog().catch(function () { return null; });
@@ -4866,11 +4838,17 @@
         if (pet) pet.say('换好啦：' + ((model && (model.label || model.name)) || ''));
         return model;
       }
-      btnBig.onclick = function (ev) {
-        ev.stopPropagation();
-        const w = window.open('/agent/pet', 'au_pet', 'width=580,height=800,menubar=no,toolbar=no');
-        if (!w) window.open('/agent/pet', '_blank');
-      };
+
+      // 大小：设置里那个「桌宠大小」直接缩放整个框（形象跟着一起变）
+      let scale = 1;
+      function applyScale(s) {
+        scale = Math.max(0.6, Math.min(2.6, Number(s) || 1));
+        box.style.width = Math.round(210 * scale) + 'px';
+        box.style.height = Math.round(318 * scale) + 'px';
+        if (pet) { try { pet.fit(); } catch (e) {} }
+        place({ x: box.offsetLeft, y: box.offsetTop });
+        return scale;
+      }
       // 点她一下（抚触反应）由上面的 onUp 统一处理：那里区分了「点一下」和「拖动」，
       // 这里不能再挂一个 click，否则拖完松手也会被当成点了一下。
 
@@ -4890,12 +4868,25 @@
           hint.textContent = '读不到形象清单';
         }
         await bootPet();
+        // 大小 / 是否显示：跟设置中心一致（设置里改完会调 applyScale）
+        try {
+          const st = await api('/agent/settings/all');
+          applyScale((st.values || {}).pet_scale);
+          applyVisible((st.values || {}).pet_visible !== false);
+        } catch (e) { /* 设置读不到就用默认大小 */ }
       })();
+
+      function applyVisible(on) {
+        box.style.display = on ? '' : 'none';
+      }
 
       return {
         show: function (text) { if (pet) pet.say(text); },
         act: function (k) { if (pet) pet.act(k); },
         switchTo: switchTo,
+        applyScale: applyScale,
+        applyVisible: applyVisible,
+        get scale() { return scale; },
         get pet() { return pet; },
         get model() { return model; },
         box: box,
@@ -5437,21 +5428,68 @@
      *   · 密钥只进不出：输入框永远不回填明文，只显示「已设置 …abcd」；留空=不改。
      *   · 工具规则不给改：那是功能约束（改了模型就用错工具），界面上写明白为什么。
      * ==================================================================== */
-    function settingsRow(key, meta, values, secrets) {
+    function settingsRow(key, meta, values, secrets, extra) {
       const kind = (meta.types || {})[key] || 'str';
       const label = (meta.labels || {})[key] || key;
+      const choices = (meta.choices || {})[key];
       const row = el('div', 'au-field');
       const lab = el('label', '', label);
       lab.title = key;
       row.appendChild(lab);
 
       let input;
-      if (kind === 'bool') {
+      if (choices) {
+        // 只能取固定几个值的字段 → 下拉框（服务端也会校验同样的白名单）
+        input = el('select');
+        choices.forEach(function (val) {
+          const names = {
+            cloud: 'cloud（云端 API）', local: 'local（本机 Ollama）', auto: 'auto（云端优先，本地兜底）',
+            off: '关闭（不出声）', windows: 'Windows 本机语音（离线，推荐）', openai: '云端语音（OpenAI 兼容）',
+          };
+          const o = el('option', '', names[val] || val);
+          o.value = val;
+          if (String(values[key]) === val) o.selected = true;
+          input.appendChild(o);
+        });
+        input.dataset.key = key;
+        input.dataset.kind = 'str';
+      } else if (key === 'tts_windows_voice' && extra && extra.voices) {
+        // 系统的嗓子 → 用下拉列出来（让学生看见 "Microsoft Huihui 中文" 而不是一个数字）
+        input = el('select');
+        (extra.voices.windows || []).forEach(function (v) {
+          const o = el('option', '', v.name);
+          o.value = String(v.id);
+          if (String(values[key]) === String(v.id)) o.selected = true;
+          input.appendChild(o);
+        });
+        input.dataset.key = key;
+        input.dataset.kind = 'int';
+      } else if (kind === 'bool') {
         input = el('input');
         input.type = 'checkbox';
         input.checked = !!values[key];
         input.dataset.key = key;
         input.dataset.kind = 'bool';
+      } else if (key === 'pet_scale') {
+        // 桌宠大小：用滑杆（拖一下就能看出效果），旁边显示当前倍数。
+        // ★ 这一支必须放在「int/float」那一支**前面** —— pet_scale 是 float，
+        //   否则会被数值分支先接走，渲染成一个普通数字框（学生要的是"调大小"的手感）。
+        const wrap = el('div', 'au-field-range');
+        input = el('input');
+        input.type = 'range';
+        input.min = '0.6'; input.max = '2.6'; input.step = '0.05';
+        input.value = values[key] != null ? values[key] : 1;
+        input.dataset.key = key;
+        input.dataset.kind = 'float';
+        const shown = el('span', 'au-set-note', Number(input.value).toFixed(2) + '×');
+        input.addEventListener('input', function () {
+          shown.textContent = Number(input.value).toFixed(2) + '×';
+          if (window.__app && __app.pet) __app.pet.applyScale(input.value);   // 当场就能看到大小变化
+        });
+        wrap.appendChild(input);
+        wrap.appendChild(shown);
+        row.appendChild(wrap);
+        return row;
       } else if (kind === 'int' || kind === 'float') {
         input = el('input');
         input.type = 'number';
@@ -5463,6 +5501,7 @@
         input.dataset.key = key;
         input.dataset.kind = kind;
       } else if (key === 'llm_provider') {
+        // （老分支，留着兼容；现在 choices 那条已经不走到这里了）
         input = el('select');
         [['cloud', 'cloud（云端 API）'], ['local', 'local（本机 Ollama）'], ['auto', 'auto（云端优先，本地兜底）']]
           .forEach(function (pair) {
@@ -5528,14 +5567,16 @@
       return patch;
     }
 
-    async function openSettings() {
+    async function openSettings(focus) {
       let meta;
+      let ttsInfo = { voices: { windows: [], cloud: [] } };
       try {
         meta = await api('/agent/settings/all');
       } catch (err) {
         window.alert('读不到设置：' + err.message + '\n（服务在跑吗？）');
         return;
       }
+      try { ttsInfo = await api('/agent/tts/voices'); } catch (e) { /* 语音读不到也不挡其它设置 */ }
       const overlay = el('div', 'au-modal');
       const card = el('div', 'au-modal-card');
       card.innerHTML =
@@ -5545,15 +5586,141 @@
       const body = el('div', 'au-modal-body');
       card.appendChild(body);
 
+      const groupBoxes = {};
       (meta.groups || []).forEach(function (g) {
         const box = el('div', 'au-set-group');
         box.appendChild(el('div', 'au-set-title', g.title));
         if (g.hint) box.appendChild(el('div', 'au-set-hint', g.hint));
         (g.fields || []).forEach(function (key) {
-          box.appendChild(settingsRow(key, meta, meta.values || {}, meta.secrets || {}));
+          box.appendChild(settingsRow(key, meta, meta.values || {}, meta.secrets || {}, ttsInfo));
         });
+        groupBoxes[g.key] = box;
         body.appendChild(box);
       });
+
+      // ---- 桌宠：形象下拉 + 上传自己的 Live2D（都在「桌宠」这一组里）----
+      let petSel = null;
+      if (groupBoxes.pet && window.PetCore) {
+        const petBox = groupBoxes.pet;
+        const petRow = el('div', 'au-field');
+        petRow.appendChild(el('label', '', '当前形象'));
+        petSel = el('select');
+        petSel.dataset.petModel = '1';
+        petRow.appendChild(petSel);
+        petBox.appendChild(petRow);
+        petBox.appendChild(el('div', 'au-set-hint', '清单是扫你电脑上的模型得到的（含桌面上的免费模型）'));
+        PetCore.catalog().then(function (cat) {
+          (cat.models || []).forEach(function (m) {
+            const o = el('option', '', (m.label || m.name) + (m.uploaded ? '（上传的）' : '') +
+              (m.has_motions ? '（自带动作）' : '（程序演绎）'));
+            o.value = m.id;
+            if (cat.current && cat.current.id === m.id) o.selected = true;
+            petSel.appendChild(o);
+          });
+        }).catch(function () {
+          petSel.appendChild(el('option', '', '（读不到形象清单）'));
+        });
+
+        const upRow = el('div', 'au-field');
+        upRow.appendChild(el('label', '', '上传自己的模型'));
+        const pick = el('input');
+        pick.type = 'file';
+        pick.multiple = true;
+        pick.setAttribute('webkitdirectory', '');   // 直接选**整个模型文件夹**，不用先打包
+        pick.style.flex = '1';
+        upRow.appendChild(pick);
+        const upBtn = el('button', 'au-btn au-btn-mini', '上传');
+        upBtn.type = 'button';
+        upRow.appendChild(upBtn);
+        petBox.appendChild(upRow);
+        petBox.appendChild(el('div', 'au-set-hint',
+          '选中整个模型文件夹（里面要有 .model3.json、.moc3 和贴图）。上传后会自动切成它。'));
+        const upMsg = el('div', 'au-set-hint');
+        petBox.appendChild(upMsg);
+        upBtn.onclick = async function () {
+          const files = pick.files ? Array.prototype.slice.call(pick.files) : [];
+          if (!files.length) { upMsg.textContent = '先点左边选一个模型文件夹'; return; }
+          if (!files.some(function (f) { return /\.model3\.json$/i.test(f.name); })) {
+            upMsg.textContent = '这个文件夹里没有 .model3.json —— 请选模型自己的文件夹（不是它的上一层）';
+            return;
+          }
+          const folder = String(files[0].webkitRelativePath || files[0].name).split('/')[0] || 'my_model';
+          const fd = new FormData();
+          fd.append('folder', folder);
+          files.forEach(function (f) {
+            fd.append('files', f, f.name);
+            fd.append('paths_' + f.name, f.webkitRelativePath || f.name);
+          });
+          upMsg.textContent = '正在上传 ' + files.length + ' 个文件…';
+          upBtn.disabled = true;
+          try {
+            const resp = await fetch((AgentUI.base || '') + '/agent/pet/model/upload', { method: 'POST', body: fd });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.detail || ('HTTP ' + resp.status));
+            upMsg.textContent = '上传成功：' + files.length + ' 个文件 → 正在切换形象…';
+            // 重新拉清单，把新模型加进下拉并选中它
+            const cat = await PetCore.catalog();
+            const fresh = (cat.models || []).filter(function (m) { return m.uploaded; });
+            const added = (data.model && data.model.id) || (fresh[fresh.length - 1] || {}).id;
+            petSel.innerHTML = '';
+            (cat.models || []).forEach(function (m) {
+              const o = el('option', '', (m.label || m.name) + (m.uploaded ? '（上传的）' : '') +
+                (m.has_motions ? '' : '（程序演绎）'));
+              o.value = m.id;
+              if (m.id === added) o.selected = true;
+              petSel.appendChild(o);
+            });
+            if (added && window.__app && __app.pet) {
+              const info = (cat.models || []).filter(function (m) { return m.id === added; })[0];
+              if (info) await __app.pet.switchTo(info);
+            }
+            upMsg.textContent = '已换成你上传的模型 ✓';
+          } catch (err) {
+            upMsg.textContent = '上传失败：' + err.message;
+          }
+          upBtn.disabled = false;
+        };
+      }
+
+      // ---- 语音：试听 ----
+      if (groupBoxes.tts) {
+        const ttsBox = groupBoxes.tts;
+        const row = el('div', 'au-field');
+        row.appendChild(el('label', '', '试听'));
+        const sayInput = el('input');
+        sayInput.type = 'text';
+        sayInput.value = '你好呀，我是艾琳老师。';
+        sayInput.style.flex = '1';
+        const sayBtn = el('button', 'au-btn au-btn-mini', '听一下');
+        sayBtn.type = 'button';
+        row.appendChild(sayInput);
+        row.appendChild(sayBtn);
+        ttsBox.appendChild(row);
+        const ttsMsg = el('div', 'au-set-hint',
+          (ttsInfo.current && ttsInfo.current.note) || '');
+        ttsBox.appendChild(ttsMsg);
+        sayBtn.onclick = async function () {
+          ttsMsg.textContent = '正在合成…（本机语音通常 1 秒内）';
+          sayBtn.disabled = true;
+          try {
+            const resp = await fetch((AgentUI.base || '') + '/agent/tts/say', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text: sayInput.value }),
+            });
+            if (!resp.ok) {
+              const d = await resp.json().catch(function () { return {}; });
+              throw new Error(d.detail || ('HTTP ' + resp.status));
+            }
+            const blob = await resp.blob();
+            const audio = new Audio(URL.createObjectURL(blob));
+            await audio.play();
+            ttsMsg.textContent = '播放中…（' + Math.round(blob.size / 1024) + ' KB）';
+          } catch (err) {
+            ttsMsg.textContent = '没播出来：' + err.message;
+          }
+          sayBtn.disabled = false;
+        };
+      }
 
       // ---- 人格提示词 ----
       const pbox = el('div', 'au-set-group');
@@ -5581,30 +5748,6 @@
         ? '现在用的是内置人格（清空输入框 = 恢复内置）' : '现在用的是你自定义的人格';
       pbox.appendChild(phint);
       body.appendChild(pbox);
-
-      // ---- 桌宠形象 ----
-      const petBox = el('div', 'au-set-group');
-      petBox.appendChild(el('div', 'au-set-title', '桌宠形象'));
-      petBox.appendChild(el('div', 'au-set-hint', '小玩偶用哪个 Live2D 模型（清单是扫你电脑上的模型得到的）'));
-      const petRow = el('div', 'au-field');
-      petRow.appendChild(el('label', '', '当前形象'));
-      const petSel = el('select');
-      petSel.dataset.petModel = '1';
-      petRow.appendChild(petSel);
-      petBox.appendChild(petRow);
-      body.appendChild(petBox);
-      if (window.PetCore) {
-        PetCore.catalog().then(function (cat) {
-          (cat.models || []).forEach(function (m) {
-            const o = el('option', '', (m.label || m.name) + (m.has_motions ? '（自带动作）' : '（程序演绎）'));
-            o.value = m.id;
-            if (cat.current && cat.current.id === m.id) o.selected = true;
-            petSel.appendChild(o);
-          });
-        }).catch(function () {
-          petSel.appendChild(el('option', '', '（读不到形象清单）'));
-        });
-      }
 
       // ---- 关于 ----
       const abox = el('div', 'au-set-group');
