@@ -335,7 +335,9 @@ def wait_pet_window_closed(base: str, timeout_absent: float = 45.0,
 def main(argv: Optional[list] = None) -> int:
     ap = argparse.ArgumentParser(description="艾琳老师 · 桌面版")
     ap.add_argument("--port", type=int, default=int(os.environ.get("AGENT_PORT", "5001")))
-    ap.add_argument("--no-pet", action="store_true", help="不起桌宠小窗（排查窗口问题时用）")
+    ap.add_argument("--no-pet", action="store_true", help="不起桌宠（排查问题时用）")
+    ap.add_argument("--pet-window", action="store_true",
+                    help="桌宠用老的 Edge 小窗（默认是真·透明分层窗口，没有窗口框）")
     ap.add_argument("--no-window", action="store_true", help="不自动打开应用窗口")
     ap.add_argument("--data", help="指定数据目录（默认按 runtime_paths 的规则找）")
     ap.add_argument("--log-level", default="warning")
@@ -431,9 +433,9 @@ def main(argv: Optional[list] = None) -> int:
                 time.sleep(1)
         except KeyboardInterrupt:
             pass
-    else:
-        # 桌面小窗 = 同一只 Live2D（/agent/pet?win=1）。
-        # 关掉小窗就一起收摊：不然启动器会变成一个看不见的常驻进程。
+    elif args.pet_window:
+        # 老做法：桌宠是**一个 Edge 小窗**（有窗口框、不透明）。
+        # 留着是为了出问题时能对照排查，默认不用它。
         info = start_pet_window(base, data_dir)
         _log(data_dir, f"桌宠小窗已就位（{info['mode']}）：{info['url']} "
                        f"位置={info['pos']} 尺寸={info['size']} 置顶={info['always_top']}")
@@ -445,6 +447,30 @@ def main(argv: Optional[list] = None) -> int:
                     time.sleep(1)
         except KeyboardInterrupt:
             pass
+    else:
+        # 默认：**真·透明桌宠** —— 无头 Edge 渲染 Live2D → CDP 抓带 alpha 的帧
+        # → 逐像素透明的分层窗口贴在桌面上（没有窗口框、没有底）。
+        # 主窗口最小化后它依然在（它本来就不是那个窗口的一部分）。
+        from desktop import livepet
+
+        prefs = core.load_window_prefs(data_dir)
+        sw, sh = _screen_size()
+        pos = (int(prefs.get("x") or (sw - 340)), int(prefs.get("y") or (sh - 500)))
+        try:
+            core.save_pos(core._lock_path(data_dir), {"pet": True})   # 记一笔"起了桌宠"
+        except Exception:
+            pass
+        pet = livepet.LivePet(base, data_dir, pos, size=(340, 460),
+                              on_open_app=lambda: open_app_window(base, profile=data_dir / "browser"),
+                              on_quit=lambda: None)
+        pet.on_quit = lambda: (pet.window.stop() if pet.window else None)
+        _log(data_dir, f"透明桌宠启动中（位置={pos}）；形象稍后写进日志")
+        try:
+            pet.run()                      # 阻塞：窗口消息循环
+        except KeyboardInterrupt:
+            pass
+        finally:
+            _log(data_dir, "透明桌宠已退出")
 
     if server is not None:
         server.should_exit = True

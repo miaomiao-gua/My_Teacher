@@ -66,6 +66,11 @@ HIDDEN = [
     "pywintypes",
     "win32api",
     "win32timezone",
+    # ★ 桌宠抓帧：desktop/frames.py 用 websockets 连 CDP（无头 Edge 渲染 Live2D）。
+    #   它是在函数里 import 的，PyInstaller 对"动态+非顶层"的依赖经常漏 —— 漏了桌宠就只剩备用形象。
+    "websockets",
+    "websockets.legacy",
+    "websockets.legacy.client",
 ]
 
 # 明确排除的重家伙：这些只被「可选 OCR / 数据分析」用到，

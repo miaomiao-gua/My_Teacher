@@ -110,6 +110,12 @@
   }
   footer code{background:rgba(31,46,77,.07); padding:1px 6px; border-radius:6px; font-size:11.5px}
   #diag{color:#96A0B2; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:60vw}
+
+  /* 抓帧模式：只留角色（桌面版把它贴到桌面上当天透明桌宠）。
+     顶栏、页脚、聊天、设置全干掉 —— 抓进去就变成"宠物身上挂着按钮"，很难看。 */
+  body.frames{background:transparent !important}
+  body.frames header, body.frames footer, body.frames #chat, body.frames #settings{display:none !important}
+  body.frames #playfield{flex:1}
 </style>
 </head>
 <body>
@@ -189,5 +195,17 @@
 
 <script src="/static/js/pet_core.js"></script>
 <script src="/static/js/pet_page.js"></script>
+<script>
+  /* 模式：?frames=1 = 给桌面版"抓帧"用的纯角色模式。
+     桌面宠物是这么做的：无头 Edge 渲染这一页 → CDP 抓**带透明通道**的 PNG
+     → 我们自己的分层窗口贴到桌面上（这样才有真透明，浏览器窗口本身做不到）。
+     所以这个模式下必须：页面底色透明 + 干掉所有界面元素，只留角色和气泡。 */
+  (function () {
+    if (/(^|[?&])frames=1/.test(location.search)) {
+      document.documentElement.style.background = 'transparent';
+      document.body.classList.add('frames');
+    }
+  })();
+</script>
 </body>
 </html>
