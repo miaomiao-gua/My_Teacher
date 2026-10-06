@@ -519,63 +519,116 @@ window.PetCore = (function () {
     return data;
   }
 
-  /* 换形象的小弹层：两个界面共用（自己带一点内联样式，免得依赖各自的 CSS） */
+  /* 换形象的小弹层：两个界面共用（自己带一点内联样式，免得依赖各自的 CSS）
+   *
+   * 每一行要**足够让学生自己判断**，不然清单就是一串看不出差别的外文目录名：
+   *   ← 人话名字（label）+ ✓ 当前选的
+   *   ← 自带动作 / 程序演绎动作（决定它会不会自己动）
+   *   ← 体积（12.5MB vs 14.2MB，下不下得动、占不占地方）
+   * 名字和提示都靠 DOM 文本节点写进去（不用 innerHTML 拼），所以模型名里带
+   * `-`、空格、中文、甚至 `<` 都不会出问题。
+   */
+  function modelRow(m, cur, onPick) {
+    const row = document.createElement('div');
+    row.className = 'pet-pick-row' + (m.id === cur ? ' on' : '');
+    row.dataset.modelId = m.id;
+    row.style.cssText = 'display:flex;gap:10px;align-items:center;padding:8px;border-radius:9px;cursor:pointer';
+    row.onmouseenter = () => { row.style.background = 'rgba(0,103,192,.08)'; };
+    row.onmouseleave = () => { row.style.background = ''; };
+
+    const nm = document.createElement('div');
+    nm.style.cssText = 'flex:1;min-width:0';
+    const top = document.createElement('div');
+    top.className = 'pet-pick-name';
+    top.style.cssText = 'font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+    top.textContent = m.label || m.name || m.id;
+    if (m.id === cur) {
+      const tick = document.createElement('span');
+      tick.className = 'pet-pick-now';
+      tick.textContent = ' ✓ 当前';
+      tick.style.cssText = 'color:#2F7D5B;font-weight:700';
+      top.appendChild(tick);
+    }
+    const meta = document.createElement('div');
+    meta.className = 'pet-pick-meta';
+    meta.style.cssText = 'font-size:11.5px;color:#6E7A8F';
+    // 「自带动作」= 模型里有动作文件，会按组名播；「程序演绎」= 没动作，靠参数驱动（呼吸/眨眼/嘴动）
+    meta.textContent = (m.has_motions ? '自带动作' : '程序演绎动作') +
+      (m.has_motions && (m.motion_groups || []).length ? '（' + m.motion_groups.length + ' 组）' : '') +
+      ' · ' + (m.size_mb || 0) + 'MB';
+    nm.appendChild(top);
+    nm.appendChild(meta);
+    row.appendChild(nm);
+    row.title = m.dir || '';                      // 鼠标停一下能看到它在硬盘哪儿（排查用）
+
+    row.onclick = async () => {
+      if (m.id === cur) { boxRemove(); return; }   // 点当前这个 = 什么都不用做
+      row.style.opacity = '.5';
+      try {
+        const res = await setModel(m.id);
+        boxRemove();
+        if (onPick) onPick(res.current || m, m);
+      } catch (e) {
+        row.style.opacity = '1';
+        alert('换形象没成功：' + (e.message || e));
+      }
+    };
+    return row;
+  }
+
   function openPicker(anchor, opts) {
     opts = opts || {};
     const old = document.getElementById('pet-picker');
     if (old) old.remove();
     const box = document.createElement('div');
     box.id = 'pet-picker';
-    box.style.cssText = 'position:fixed;z-index:99;min-width:250px;max-width:330px;max-height:56vh;overflow:auto;' +
+    box.style.cssText = 'position:fixed;z-index:99;min-width:262px;max-width:340px;max-height:60vh;overflow:auto;' +
       'background:#fff;color:#16233D;border:1px solid rgba(31,46,77,.18);border-radius:12px;' +
       'box-shadow:0 14px 34px rgba(31,46,77,.22);padding:8px;font:13px/1.5 "Microsoft YaHei",system-ui,sans-serif';
     const r = anchor.getBoundingClientRect();
     box.style.left = Math.max(8, Math.min(window.innerWidth - 300, r.left)) + 'px';
     box.style.top = Math.max(8, Math.min(window.innerHeight - 260, r.bottom + 6)) + 'px';
     const title = document.createElement('div');
-    title.textContent = '换个形象';
+    title.textContent = opts.title || '换个形象';
     title.style.cssText = 'font-weight:700;padding:4px 6px 8px';
     box.appendChild(title);
 
+    const list = document.createElement('div');
+    list.className = 'pet-pick-list';
+    box.appendChild(list);
+
+    // 关掉弹层。函数声明会提升，所以上面 modelRow 里调它没问题。
+    function boxRemove() { box.remove(); }
+    box.dismiss = boxRemove;
+
     catalog().then((data) => {
       const cur = (data.current && data.current.id) || opts.current || '';
-      (data.models || []).forEach((m) => {
-        const row = document.createElement('div');
-        row.style.cssText = 'display:flex;gap:8px;align-items:center;padding:7px 8px;border-radius:8px;cursor:pointer';
-        row.onmouseenter = () => { row.style.background = 'rgba(0,103,192,.08)'; };
-        row.onmouseleave = () => { row.style.background = ''; };
-        const nm = document.createElement('div');
-        nm.style.cssText = 'flex:1;min-width:0';
-        nm.innerHTML = '<div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' +
-          (m.label || m.name) + (m.id === cur ? ' ✓' : '') + '</div>' +
-          '<div style="font-size:11.5px;color:#6E7A8F">' + (m.has_motions ? '自带动作' : '程序演绎动作') +
-          ' · ' + m.size_mb + 'MB</div>';
-        row.appendChild(nm);
-        row.title = m.dir;
-        row.onclick = async () => {
-          row.style.opacity = '.5';
-          try {
-            const res = await setModel(m.id);
-            box.remove();
-            if (opts.onPick) opts.onPick(res.current || m, m);
-          } catch (e) {
-            row.style.opacity = '1';
-            alert('换形象没成功：' + (e.message || e));
-          }
-        };
-        box.appendChild(row);
-      });
+      const models = (data.models || []).slice();
+      // 当前选中的排最前面：学生点开多半是想确认「现在用的是哪个」
+      models.sort((a, b) => (a.id === cur ? -1 : 0) - (b.id === cur ? -1 : 0));
+      models.forEach((m) => list.appendChild(modelRow(m, cur, opts.onPick)));
+      if (!models.length) {
+        const none = document.createElement('div');
+        none.textContent = '没扫到任何 Live2D 形象。';
+        none.style.cssText = 'padding:8px;color:#96A0B2';
+        list.appendChild(none);
+      }
       const tip = document.createElement('div');
-      tip.textContent = '清单是扫你电脑上的 Live2D 模型得到的（含桌面上的免费模型）';
+      tip.className = 'pet-pick-tip';
+      tip.textContent = '清单是扫你电脑上的 Live2D 模型得到的（项目里、桌面、下载都算）。要加目录：' +
+        'data/pet_model_dirs.json 一行一个路径。';
       tip.style.cssText = 'font-size:11.5px;color:#96A0B2;padding:6px 8px 2px';
       box.appendChild(tip);
     }).catch((e) => {
-      box.appendChild(document.createTextNode('读不到形象清单：' + (e.message || e)));
+      const err = document.createElement('div');
+      err.style.cssText = 'padding:8px;color:#B4762A';
+      err.textContent = '读不到形象清单：' + (e.message || e) + '（服务没在跑？双击 start_agent.cmd）';
+      box.appendChild(err);
     });
 
     document.body.appendChild(box);
     setTimeout(() => {
-      const off = (ev) => {
+      off = (ev) => {
         if (!box.contains(ev.target) && ev.target !== anchor) {
           box.remove(); document.removeEventListener('mousedown', off);
         }

@@ -148,7 +148,12 @@ def _describe(model_file: Path) -> Dict[str, Any]:
 # 已知形象的「人话名字」：目录名是 female_01Arkit_6 / my_teacher，界面上不该这么显示
 _FRIENDLY = {
     "my_teacher": "艾琳（老师）",
+    "1786973032__-___": "白（免费版）",     # 中文目录名拿不了当 id，用的是路径哈希兜底
 }
+
+# 「白-免费版」这个形象：仓库里的目录名是中文，没法当 id（见 _slug），
+# 所以按**显示名**认它 —— 换机器/重扫之后目录名可能不一样，靠名字认最稳。
+_DEFAULT_MARKERS = ("白-免费版", "白 - 免费版", "白免费版")
 
 
 def _friendly(model_id: str, name: str) -> str:
@@ -224,28 +229,44 @@ def _state_path() -> Path:
     return data_root() / "pet_model.json"
 
 
+def pick_default(items: List[Dict[str, Any]], bundled_dir: Optional[Path] = None) -> str:
+    """从扫到的清单里挑「没选过形象时用哪个」——**纯函数**，好脱离磁盘直接测。
+
+    顺序（对应 default_model_id 的注释）：
+      ① 项目自带的（打包进 exe，最稳）→ ② 「白-免费版」→ ③ 目录名 my_teacher → ④ 第一个
+    """
+    if not items:
+        return ""
+    if bundled_dir is not None:
+        try:
+            bundled = Path(bundled_dir).resolve()
+            for it in items:
+                if bundled in Path(it["dir"]).resolve().parents:
+                    return it["id"]
+        except Exception:
+            pass
+    for it in items:
+        if any(m in str(it.get("name") or "") for m in _DEFAULT_MARKERS):
+            return it["id"]
+    for it in items:
+        if Path(it["dir"]).name.lower() == "my_teacher":
+            return it["id"]
+    return items[0]["id"]
+
+
 def default_model_id() -> str:
-    """默认形象：① 项目自带的（打包后一定在）→ ② 目录名就叫 my_teacher 的 → ③ 第一个。
+    """默认形象：① 项目自带的 → ② 「白-免费版」→ ③ my_teacher → ④ 第一个。
+
+    ② 是学生点名要的：白-免费版体积小（12.5MB）、没有动作文件，靠程序演绎参数就够了。
+    它只在**从没选过形象**时起作用 —— 选过之后 `current_model_id()` 读 data/pet_model.json，
+    默认值就不参与（所以老用户不会被悄悄换脸）。
 
     踩过的坑：一开始用「路径里含 my_teacher」当条件，结果**所有**模型都命中 ——
     因为项目根目录本身就叫 `D:\\My_teacher`。判断要落在最后一级目录上。
     """
     from .config import CLIENT_DIR
 
-    items = scan_models()
-    if not items:
-        return ""
-    bundled = (CLIENT_DIR / "static" / "models").resolve()
-    for it in items:
-        try:
-            if bundled in Path(it["dir"]).resolve().parents:
-                return it["id"]
-        except Exception:
-            continue
-    for it in items:
-        if Path(it["dir"]).name.lower() == "my_teacher":
-            return it["id"]
-    return items[0]["id"]
+    return pick_default(scan_models(), CLIENT_DIR / "static" / "models")
 
 
 def current_model_id() -> str:

@@ -132,8 +132,47 @@ def test_current_choice() -> None:
           bool(pm.catalogue().get("current")) and len(pm.catalogue().get("models") or []) == len(items))
 
 
+def test_default_pick() -> None:
+    """默认形象怎么挑（纯函数，不碰磁盘）。
+
+    为什么要锁死：默认形象是**学生第一眼看到的那只**，也是「从没选过」时的兜底。
+    踩过的坑是「用路径里含 my_teacher 判断」——项目根目录就叫 D:\\My_teacher，
+    结果所有模型都命中。所以这里明确写死优先级，改错了立刻红。
+    """
+    print("\n[4] 默认形象的挑选顺序")
+    from pathlib import Path as _P
+
+    bundled = {
+        "id": "bundled_one", "name": "项目自带", "dir": "D:\\x\\client\\static\\models\\bundled_one",
+    }
+    white = {"id": "mdeadbeef", "name": "白-免费版", "dir": "D:\\x\\uploads\\mdeadbeef\\白-免费版"}
+    teacher = {"id": "my_teacher", "name": "my_teacher", "dir": "D:\\x\\models\\my_teacher"}
+    other = {"id": "hiyori", "name": "hiyori_free_t08", "dir": "D:\\x\\hiyori_free\\runtime"}
+
+    check("一个都没有 → 空串", pm.pick_default([]) == "")
+    check("谁都没有时用第一个", pm.pick_default([other]) == "hiyori",
+          pm.pick_default([other]))
+    check("有 my_teacher 时优先它", pm.pick_default([other, teacher]) == "my_teacher",
+          pm.pick_default([other, teacher]))
+    # **本次需求的核心**：白-免费版要排在 my_teacher 前面
+    check("「白-免费版」优先于 my_teacher",
+          pm.pick_default([other, teacher, white]) == white["id"],
+          pm.pick_default([other, teacher, white]))
+    check("项目自带的最优先（打包后一定在）",
+          pm.pick_default([other, teacher, white, bundled], _P(bundled["dir"]).parent) == bundled["id"])
+
+    # 真的磁盘上也该是白-免费版（这条会受 data/pet_model.json 影响，所以只看默认值本身）
+    real_items = pm.scan_models(force=True)
+    if real_items:
+        real_default = pm.default_model_id()
+        picked = next((it for it in real_items if it["id"] == real_default), None)
+        check("本机扫到的默认形象解析得出来", picked is not None, f"default={real_default}")
+        if picked:
+            print("      本机默认形象：" + picked["name"] + f"（{picked['id']}）")
+
+
 def test_fake_models_in_temp() -> None:
-    print("\n[4] 临时目录里的假模型（不动用户真实文件）")
+    print("\n[5] 临时目录里的假模型（不动用户真实文件）")
     with tempfile.TemporaryDirectory(dir=str(ROOT / "data")) as tmp:
         base = Path(tmp)
         make_fake_model(base, "中文名字-免费版", "中文名字-免费版", motions={})
@@ -170,6 +209,7 @@ def main() -> int:
     test_scan_and_ids()
     test_traversal_and_readonly()
     test_current_choice()
+    test_default_pick()
     test_fake_models_in_temp()
     print("\n" + ("全部通过 ✓" if _failures == 0 else f"失败 {_failures} 项 ✗"))
     return 1 if _failures else 0

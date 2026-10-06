@@ -107,6 +107,15 @@ def test_framing_rules() -> None:
     check("没有动作文件的模型靠程序驱动参数", "ParamBreath" in core and "ParamMouthOpenY" in core)
     check("滚轮缩放取景（每个模型留白不同）", "setZoom" in core)
 
+    # 换形象的清单行：学生得能自己判断「这个是什么、会不会动、多大」
+    check("清单行带模型 id（写进 DOM 才测得出来、也方便排查）", "row.dataset.modelId" in core)
+    check("清单行标出当前选中", "pet-pick-now" in core and "✓ 当前" in core)
+    check("清单行写清「自带动作 / 程序演绎动作」+ 体积",
+          "程序演绎动作" in core and "size_mb" in core)
+    check("清单行不再用 innerHTML 拼模型名（名字里可能有特殊字符）",
+          "nm.innerHTML" not in core and "top.textContent" in core)
+    check("清单行标出模型在硬盘哪儿（title）", "row.title = m.dir" in core)
+
 
 # ---------------------------------------------------------------------------
 # 3) 降级路径：先显示角色、硬超时、迟到的成功也要接住
@@ -140,6 +149,11 @@ def test_page_and_routes_exist() -> None:
         check("页面引入了共用的 pet.css", "/static/css/pet.css" in body)
         for el in ("#stage", "#chat", "#mode", "#save", "#model", "#ask", "#log"):
             check(f"页面里有 {el}", f'id="{el[1:]}"' in body)
+        # 设置面板：换形象 / 提醒清单 / 窗口开关 —— 缺一个面板就是残的
+        for el in ("#settings", "#settingsBtn", "#curModel", "#pickModel", "#ask2", "#remindList",
+                   "#alwaysTop", "#hideHeader"):
+            check(f"设置面板里有 {el}", f'id="{el[1:]}"' in body)
+        check("顶栏那个「换形象」还在（探针 _cdp_pet.js 会点它，别删）", 'id="remind"' in body)
 
     css = CLIENT_DIR / "static" / "css" / "pet.css"
     check("web/static/css/pet.css 存在（两个界面共用一份样式）", css.is_file())
@@ -212,6 +226,20 @@ def test_http(base: str = "http://127.0.0.1:5001") -> None:
     r = get("/agent/pet/status")
     check("GET /agent/pet/status 有订阅者字段",
           hasattr(r, "status_code") and r.status_code == 200 and "subscribers" in r.text, str(r)[:80])
+
+    # 设置面板里的「还有哪些提醒」靠这个接口（只 POST 没有 GET 的话面板就没法列出来）
+    r = get("/agent/reminder")
+    ok_shape = False
+    n = -1
+    if hasattr(r, "status_code") and r.status_code == 200:
+        try:
+            data = r.json()
+            ok_shape = isinstance(data.get("reminders"), list) and isinstance(data.get("count"), int)
+            n = data.get("count")
+        except Exception:
+            ok_shape = False
+    check("GET /agent/reminder 能列出待发提醒（含 count）", ok_shape, str(r)[:100])
+    print(f"      当前待发提醒：{n} 条")
 
 
 def main() -> int:

@@ -70,6 +70,29 @@
   }
   .askrow input:focus{border-color:var(--gold); box-shadow:0 0 0 3px rgba(224,163,62,.18)}
 
+  /* 设置面板：形象 / 提醒 / 窗口 三组。默认收起，点顶栏「设置」展开。
+     放这里（而不是塞进顶栏一排按钮）是因为「换形象」这件事学生得**一边看一边选**，
+     顶栏那一行根本摆不下清单和说明。 */
+  #settings{
+    position:absolute; right:16px; top:12px; width:min(340px,88vw); z-index:6;
+    display:none; flex-direction:column; gap:10px; padding:14px;
+    border-radius:16px; background:rgba(255,255,255,.97); border:1px solid var(--line);
+    box-shadow:0 18px 44px rgba(31,46,77,.22); max-height:calc(100% - 24px); overflow:auto;
+  }
+  #settings.on{display:flex}
+  #settings h3{margin:0 0 6px; font-size:13px; color:var(--navy2); letter-spacing:.4px}
+  .sgroup{padding-bottom:10px; border-bottom:1px dashed var(--line)}
+  .sgroup:last-child{border-bottom:0; padding-bottom:0}
+  .srow{display:flex; gap:8px; flex-wrap:wrap; align-items:center}
+  .srow button{font-size:12.5px; padding:6px 11px}
+  .snote{font-size:11.5px; color:#7A8699; margin-top:6px; line-height:1.6}
+  .slist{margin:6px 0 0; padding:0; list-style:none; font-size:12.5px; color:#22314F}
+  .slist li{padding:3px 0; border-top:1px solid rgba(31,46,77,.07)}
+  #ask2{font:inherit; font-size:12.5px; padding:6px 9px; border-radius:9px;
+        border:1px solid var(--line); background:#fff; outline:none; flex:1; min-width:120px}
+  .switch{display:flex; align-items:center; gap:7px; font-size:12.5px; color:var(--navy); cursor:pointer}
+  .switch input{width:15px; height:15px; accent-color:var(--navy)}
+
   footer{
     padding:8px 16px; font-size:12px; color:#6E7A8F; border-top:1px solid var(--line);
     background:rgba(255,255,255,.5); display:flex; gap:12px; flex-wrap:wrap; align-items:center;
@@ -89,6 +112,7 @@
   <button id="model">换形象</button>
   <button id="remind">20 分钟后提醒我</button>
   <button id="chatToggle">跟她说句话</button>
+  <button id="settingsBtn">⚙ 设置</button>
   <button class="primary" id="open">打开工作台</button>
 </header>
 
@@ -101,6 +125,41 @@
     <div class="askrow">
       <input id="ask" placeholder="比如：帮我看看这道题…" autocomplete="off">
       <button class="primary" id="send">发送</button>
+    </div>
+  </div>
+
+  <!-- 设置面板：「换脸」的正式入口就在这儿（网页版和桌面小窗共用这一份） -->
+  <div id="settings" role="dialog" aria-label="桌宠设置">
+    <div class="sgroup">
+      <h3>形象</h3>
+      <div class="srow">
+        <span class="chip" id="curModel">读取中…</span>
+        <button id="pickModel">换形象 / 换模型</button>
+      </div>
+      <div class="snote">清单是扫你电脑上的 Live2D 模型得到的（项目里、桌面、下载都算）。
+        换完立刻生效，工作台里的小玩偶也会跟着换 —— 两边读的是**同一个**选择。</div>
+    </div>
+
+    <div class="sgroup">
+      <h3>提醒</h3>
+      <div class="srow">
+        <input id="ask2" placeholder="提醒我干什么…（默认：该复习啦）" autocomplete="off">
+      </div>
+      <div class="srow" style="margin-top:8px">
+        <button data-min="10">10 分钟后</button>
+        <button data-min="20">20 分钟后</button>
+        <button data-min="60">1 小时后</button>
+        <button id="remindCustom">自定义…</button>
+        <button id="remindRefresh">刷新</button>
+      </div>
+      <ul class="slist" id="remindList"><li>还没有提醒。</li></ul>
+    </div>
+
+    <div class="sgroup">
+      <h3>窗口</h3>
+      <label class="switch"><input type="checkbox" id="alwaysTop"> 让这个小窗一直在最前面</label>
+      <label class="switch" style="margin-top:6px"><input type="checkbox" id="hideHeader"> 收起顶栏（只留角色）</label>
+      <div class="snote">这两个开关存在本机浏览器里；桌面版启动小窗时会照它来。</div>
     </div>
   </div>
 </div>

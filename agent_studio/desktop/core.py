@@ -227,3 +227,86 @@ def save_pos(path: Path, patch: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         pass
     return data
+
+
+# ---------------------------------------------------------------------------
+# 桌面小窗（Live2D 桌宠窗）——尺寸、位置、以及网页里那两个开关
+# ---------------------------------------------------------------------------
+# 这一版桌面小窗不再是 Pillow 画的那只，而是**同一只 Live2D**（/agent/pet?win=1）。
+# 于是「窗口多大、放哪儿、要不要置顶」这些事，逻辑上必须跟网页共用一份，
+# 否则又变成两套：网页里勾了「一直在最前面」，桌面版却不认。
+PET_WIN_W, PET_WIN_H = 420, 620          # 默认窗口尺寸（缩放后的逻辑像素）
+PET_WIN_EDGE_GAP = 24                    # 距屏幕右下角的留白
+PET_WIN_MIN_W, PET_WIN_MIN_H = 300, 380  # 太小就看不清角色了
+
+
+def pet_window_url(base: str, *, win: bool = True) -> str:
+    """桌面小窗打开的地址（`?win=1` 让页面按小窗形态收紧一点）"""
+    return base.rstrip("/") + "/agent/pet" + ("?win=1" if win else "")
+
+
+def default_pet_window_pos(screen_w: int, screen_h: int,
+                           w: int = PET_WIN_W, h: int = PET_WIN_H) -> Tuple[int, int]:
+    """默认落在右下角（不挡视线，又能一眼看到）"""
+    return (max(0, int(screen_w) - w - PET_WIN_EDGE_GAP),
+            max(0, int(screen_h) - h - PET_WIN_EDGE_GAP * 3))
+
+
+def pet_window_prefs_path(data_dir: Path) -> Path:
+    return Path(data_dir) / "pet_window.json"
+
+
+def load_window_prefs(data_dir: Path) -> Dict[str, Any]:
+    """读「窗口」那一组开关（网页里勾的，桌面版启动时照它来）。
+
+    网页和桌面小窗读的是**同一份文件**：不然学生在网页里勾了「一直在最前面」，
+    桌面版起来还是不懂，等于那个开关是假的。
+    """
+    data = load_pos(pet_window_prefs_path(data_dir))
+    return {
+        "always_top": bool(data.get("alwaysTop", data.get("always_top", False))),
+        "hide_header": bool(data.get("hideHeader", data.get("hide_header", False))),
+        "x": data.get("x"),
+        "y": data.get("y"),
+        "w": int(data.get("w") or PET_WIN_W),
+        "h": int(data.get("h") or PET_WIN_H),
+    }
+
+
+def save_window_prefs(data_dir: Path, patch: Dict[str, Any]) -> Dict[str, Any]:
+    """写回窗口偏好。尺寸会被夹到合理范围（太小看不清、太大挡住整个屏幕）。"""
+    clean: Dict[str, Any] = {}
+    if "always_top" in patch:
+        clean["always_top"] = bool(patch["always_top"])
+    if "hide_header" in patch:
+        clean["hide_header"] = bool(patch["hide_header"])
+    for key in ("x", "y"):
+        if patch.get(key) is not None:
+            try:
+                clean[key] = int(patch[key])
+            except Exception:
+                pass
+    for key, lo, hi in (("w", PET_WIN_MIN_W, 2000), ("h", PET_WIN_MIN_H, 2000)):
+        if patch.get(key):
+            try:
+                clean[key] = max(lo, min(hi, int(patch[key])))
+            except Exception:
+                pass
+    return save_pos(pet_window_prefs_path(data_dir), clean)
+
+
+def pet_window_args(browser: str, url: str, profile_dir: Path, *,
+                    pos: Optional[Tuple[int, int]] = None,
+                    size: Tuple[int, int] = (PET_WIN_W, PET_WIN_H),
+                    always_top: bool = False) -> List[str]:
+    """桌面小窗的浏览器参数（在通用应用窗参数上补位置/尺寸/置顶）。
+
+    位置必须用 `--window-position` 传：Edge 的 `--app=` 窗口**不认** `window.moveTo()`
+    （那是网页层的，浏览器会忽略），所以「记住上次放哪儿」只能在启动时给进去。
+    """
+    args = app_window_args(browser, url, profile_dir, size=size)
+    if pos is not None:
+        args.append(f"--window-position={int(pos[0])},{int(pos[1])}")
+    if always_top:
+        args.append("--always-on-top")     # 认这个开关的浏览器才置顶，不认就当没写
+    return args

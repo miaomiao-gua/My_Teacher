@@ -59,6 +59,20 @@ D:\My_teacher\
 
 ## 4. 数据在哪（**最容易搞混的一点**）
 
+### 4.0 服务怎么起、怎么判断它还活着（运维常识，踩过）
+
+- **用户那条路**：双击 `start_agent.cmd`（或仓库根 `start_pet.cmd`、或 `MyTeacher.exe`）。
+- **我调试时那条路**：`py -3.14 agent_studio/run.py --port 5001`。
+- ⚠️ **我起的后台服务会被环境回收**：DSH 环境重启时，后台 job 会被杀（Windows 强杀表现为
+  `exit code 1`，**不是代码崩了**，日志里看不到任何异常）。而且有时**只有外层 shell 被杀、
+  python 子进程活下来变成孤儿**——所以：
+  **判断服务是否活着，只看 `curl /agent/health`，不要看 job 状态。**
+- 为了避免学生「双击两次看到端口占用就以为坏了」，`agent_studio/run.py` 现在会先探一下
+  端口上是不是已经有自己的服务：是的话打印「已经有一个在跑了」并直接退出（0），
+  不会抛 `address already in use`。（`tests/test_launcher.py` 有验证）
+- 想让服务活得久：让用户自己双击 `start_agent.cmd`（那个黑窗口就是服务的寿命）。
+
+### 4.1 两个 data 目录
 有两个 `data/`，**不是同一份**：
 
 - `agent_studio/data/` ← 新项目用这个。`sessions/`、`workspaces/`、`config.json`（API Key）、
@@ -137,6 +151,7 @@ py -3.14 run_agent.py --port 5001
 
 # 离线测试：13 套全绿（本次会话都跑过）
 cd agent_studio; py -3.14 tests\test_paths.py      # 数据目录选择（17 条）
+py -3.14 tests\test_launcher.py                    # ★启动器必须指向新项目（别改回旧包）
 py -3.14 tests\test_desktop.py                     # 桌面壳/桌宠
 py -3.14 tests\test_filing.py                      # 自动归档的硬规则
 py -3.14 tests\test_calculator.py tests\test_small_tools.py

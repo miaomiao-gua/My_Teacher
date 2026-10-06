@@ -542,6 +542,57 @@ async def make_reminder(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": True, "reminder": item, "pending": len(pending_reminders())}
 
 
+@app.get("/agent/reminder")
+async def list_reminders() -> Dict[str, Any]:
+    """看还有哪些提醒没到点（设置面板里要列出来，否则学生定了提醒就再也看不见了）。
+
+    只回未到点的，按时间排好，并顺手给一个「还有几分钟」——
+    页面上不该自己算时间差（服务器和浏览器的钟未必一致）。
+    """
+    import time as _time
+
+    from .pet_bus import pending_reminders
+
+    now = _time.time()
+    items = []
+    for r in pending_reminders():
+        try:
+            due = float(r.get("due") or 0)
+        except Exception:
+            due = 0.0
+        items.append({
+            "id": r.get("id"), "text": r.get("text") or "该复习啦",
+            "due": due, "in_minutes": round(max(0.0, due - now) / 60.0, 1),
+            "source": r.get("source") or "",
+        })
+    items.sort(key=lambda x: x["due"])
+    return {"ok": True, "count": len(items), "reminders": items}
+
+
+@app.get("/agent/pet/window")
+async def get_pet_window() -> Dict[str, Any]:
+    """桌面小窗的窗口偏好（置顶 / 收起顶栏 / 位置 / 尺寸）。
+
+    为什么存在服务端而不是只放浏览器的 localStorage：**桌面版启动小窗时要先读到它**
+    才知道窗口放哪儿、要不要置顶。localStorage 是浏览器配置目录里的东西，
+    启动器和它是两个进程，读不到 —— 走服务端才是最省事又一定对的做法。
+    """
+    from desktop import core as dcore
+    from runtime_paths import data_root
+
+    return {"ok": True, "prefs": dcore.load_window_prefs(data_root())}
+
+
+@app.post("/agent/pet/window")
+async def set_pet_window(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """网页里改窗口偏好 → 存到 data/pet_window.json（桌面小窗下次启动照它来）"""
+    from desktop import core as dcore
+    from runtime_paths import data_root
+
+    dcore.save_window_prefs(data_root(), payload or {})
+    return {"ok": True, "prefs": dcore.load_window_prefs(data_root())}
+
+
 @app.get("/agent/pet/status")
 async def pet_status() -> Dict[str, Any]:
     """桌宠/桌面壳自检用：总线有几个订阅者、还有几条提醒"""
