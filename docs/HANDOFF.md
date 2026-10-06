@@ -46,9 +46,15 @@ D:\My_teacher\
 │  ├─ tools\                  自检小工具（见第 7 节）
 │  ├─ tests\                  18 套测试（13 套离线 + 5 套 live_* 要模型）
 │  ├─ data\                   ★ 新项目的运行数据（会话/工作区/密钥/形象选择/提醒）
+│  ├─ start.cmd               在这个目录里双击 = 启动新服务（对的那个）
 │  └─ MyTeacher.exe           打包产物（dist_desktop\ 里是同一份）
+├─ run_agent.py               仓库根的启动器 → **转给 agent_studio/run.py**（见第 6 节坑 0）
+├─ start_agent.cmd            用户常双击的那个（调 run_agent.py）
+├─ start_pet.cmd              开桌宠页面（服务没起会顺手拉起来）
+├─ agent\                     ⚠️ **旧包，已废弃**（2026-09-23 的 16 工具版本，别再改）
 ├─ client\  server\  data\     老 Flask 项目（老数据在**仓库根 data\**：app.db、users、config.json）
-└─ docs\superpowers\specs\     设计记录（踩坑都写在这里）
+│  └─ client\agent.html       老前端副本（v0.3.0），历史遗留，别当现行界面
+└─ docs\superpowers\specs\     设计记录 + docs\HANDOFF.md（本文件）
 ```
 
 ## 4. 数据在哪（**最容易搞混的一点**）
@@ -84,13 +90,27 @@ D:\My_teacher\
 
 ## 6. 待办 / 需要用户拍板的
 
+**坑（本次会话最后一刻发现，已修）**
+
+0. **启动器指向了旧包**：仓库根的 `run_agent.py` 原本写的是 `agent.server:app`，
+   那是九月的旧包 `agent/`（**16 个工具**、没有桌宠/自动归档/新界面）。
+   也就是说：**双击 `start_agent.cmd` 会打开老界面，新做的东西一个都看不到**。
+   之所以一直没暴露，是因为我调试时手动跑的是 `agent_studio/run.py`，
+   用户浏览器一直连着我这个进程。
+   现已改为转给 `agent_studio/run.py`（`uvicorn.run("kernel.server:app")`），
+   并实测确认：**34 个工具**、`/agent/pet` 与 `/agent/live2d/models` 都是 200。
+   → 以后新增功能后，**务必用用户那条入口（双击 start_agent.cmd）验一次**，别只在自己起的进程上验。
+
 **风险（建议尽快处理）**
 
-1. **全部代码没进 git**：`agent_studio/`、`docs/`、`start_agent.cmd` 等都是 untracked。
-   建议先提交一次"现状快照"（`:!agent_studio/MyTeacher.exe`、`:!agent_studio/data/` 要忽略，
-   `.gitignore` 里补 `data/`、`*.exe`、`__pycache__`）。**改坏了没有后悔药。**
+1. ~~全部代码没进 git~~ → **已提交快照** `a8ae36e8`（177 个文件，1.9 MB；
+   `agent_studio/data/`、`dist_desktop/`、`*.exe`、探针截图与浏览器配置都已 ignore）。
+   以后改完记得提交，改坏了才有后悔药。
 2. `agent_ui.js` 已经 4888 行，改一处要通读上下文。下次要动它之前，先考虑把渲染器拆成
    独立文件（`js/renderers/*.js`），否则每次改动都在赌运气。
+3. 仓库根的 `agent/` 是**死包**（旧版内核）。留着会让下一个人改错地方，建议要么删、
+   要么在 `agent/__init__.py` 顶上写三行「已废弃，现行代码在 agent_studio/」。**不要**在没确认
+   老前端有没有用它之前就删（`client/agent.html` 是老界面副本，可能还指着它）。
 
 **等用户回答**
 
