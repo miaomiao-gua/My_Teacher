@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  const AgentUI = { version: '0.16.0' };
+  const AgentUI = { version: '0.17.0' };
   const HTML_NS = 'http://www.w3.org/1999/xhtml';
 
   /* ==========================================================================
@@ -5698,6 +5698,11 @@
       // ---- 语音：试听 ----
       if (groupBoxes.tts) {
         const ttsBox = groupBoxes.tts;
+        // 音色是**输入框**（要支持自定义音色），所以给一句提示 + 常用名字的示例
+        const voiceInput = card.querySelector('[data-key="tts_cloud_voice"]');
+        if (voiceInput) {
+          voiceInput.placeholder = '常用：anna / bella / alex / charles；自定义就填服务商文档里的名字';
+        }
         const row = el('div', 'au-field');
         row.appendChild(el('label', '', '试听'));
         const sayInput = el('input');
@@ -5710,15 +5715,33 @@
         row.appendChild(sayBtn);
         ttsBox.appendChild(row);
         const ttsMsg = el('div', 'au-set-hint',
-          (ttsInfo.current && ttsInfo.current.note) || '');
+          '「听一下」用的是你**正在编辑**的音色/语速（不用先保存）——填个自定义音色马上就能试。'
+          + ((ttsInfo.current && ttsInfo.current.note) ? ('　当前：' + ttsInfo.current.note) : ''));
         ttsBox.appendChild(ttsMsg);
         sayBtn.onclick = async function () {
           ttsMsg.textContent = '正在合成…（本机语音通常 1 秒内）';
           sayBtn.disabled = true;
           try {
+            // 把界面上正在编辑的值一起发过去 → 试听的就是"你现在选的"，不用先保存
+            const ov = {};
+            ['tts_provider', 'tts_windows_voice', 'tts_cloud_base_url', 'tts_cloud_model',
+             'tts_cloud_voice', 'tts_speed', 'tts_volume'].forEach(function (k) {
+              const node = card.querySelector('[data-key="' + k + '"]');
+              if (!node) return;
+              const short = k.replace(/^tts_/, '').replace(/^cloud_/, '');
+              let v = node.value;
+              if (node.type === 'number' || node.type === 'range') v = Number(v);
+              if (short === 'windows_voice') ov.windows_voice = Number(v);
+              else if (short === 'provider') ov.provider = v;
+              else if (short === 'base_url') ov.base_url = v;
+              else if (short === 'volume') ov.volume = Number(v);
+              else if (short === 'speed') ov.speed = Number(v);
+              else if (short === 'model') ov.model = v;
+              else if (short === 'voice') ov.voice = v;
+            });
             const resp = await fetch((AgentUI.base || '') + '/agent/tts/say', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ text: sayInput.value }),
+              body: JSON.stringify({ text: sayInput.value, override: ov }),
             });
             if (!resp.ok) {
               const d = await resp.json().catch(function () { return {}; });
@@ -5727,7 +5750,8 @@
             const blob = await resp.blob();
             const audio = new Audio(URL.createObjectURL(blob));
             await audio.play();
-            ttsMsg.textContent = '播放中…（' + Math.round(blob.size / 1024) + ' KB）';
+            ttsMsg.textContent = '播放中…（' + Math.round(blob.size / 1024) + ' KB，用的音色：'
+              + (ov.voice || '本机嗓子') + '）';
           } catch (err) {
             ttsMsg.textContent = '没播出来：' + err.message;
           }

@@ -149,7 +149,39 @@ D:\My_teacher\
 
 **还没做完 / 没实测**
 
-3.5 **设置中心的三条坑（都踩过，别再犯）**：
+6. **打包后「悄悄少功能」的三个真原因（2026-10-06 全踩过一遍）**：
+   - **插件 import 了旧包**：`plugins/acid_base_lab/handler.py` 里写的是
+     `from agent.registry import ...`（仓库根那个九月的旧包）。源码里跑得通（老包还在），
+     打包后老包不存在 → 插件**静默加载失败**（`/agent/plugins` 里能看到 `No module named 'agent'`），
+     桌面版就少了「酸碱盐虚拟实验室」。已改成 `from kernel.registry import ...`。
+     **规律：插件是给内核用的，只认 `kernel` 这个包名。**
+   - **pywin32 的动态部分**：TTS 用 `win32com` 调 SAPI，PyInstaller 静态分析看不见 →
+     必须写进 `build_exe.py` 的 `HIDDEN`（win32com.client / pythoncom / pywintypes / win32api / win32timezone）。
+     不写的话：源码里语音好用，exe 里一点声音都没有。
+   - **exe 的「项目根」按它自己所在目录算**（`config.py` 的 LEGACY_ROOT = exe_dir().parent）：
+     所以 `agent_studio\MyTeacher.exe` 能看到 `client/` 里的模型（7 个），
+     `dist_desktop\MyTeacher.exe` 只看到桌面上那几个（3 个）。
+     **验 exe 就要验用户双击的那份**（`tools/verify_exe.py` 已默认这份）。
+   - 自检工具：`tools/verify_exe.py`（起 exe → 打接口 → 关掉，含 TTS/密钥/插件）、
+     `tools/diff_exe_vs_source.py`（源码 vs exe 逐个比工具与形象，专抓"少功能"）。
+
+   - **插件 import 了旧包**：`plugins/acid_base_lab/handler.py` 里写的是
+     `from agent.registry import ...`（仓库根那个九月的旧包）。源码里跑得通（老包还在），
+     打包后老包不存在 → 插件**静默加载失败**（`/agent/plugins` 里能看到 `No module named 'agent'`），
+     桌面版就少了「酸碱盐虚拟实验室」。已改成 `from kernel.registry import ...`。
+     **规律：插件是给内核用的，只认 `kernel` 这个包名。**
+   - **pywin32 的动态部分**：TTS 用 `win32com` 调 SAPI，PyInstaller 静态分析看不见 →
+     必须写进 `build_exe.py` 的 `HIDDEN`（win32com.client / pythoncom / pywintypes / win32api / win32timezone）。
+     不写的话：源码里语音好用，exe 里一点声音都没有。
+   - **exe 的「项目根」按它自己所在目录算**（`config.py` 的 LEGACY_ROOT = exe_dir().parent）：
+     所以 `agent_studio\MyTeacher.exe` 能看到 `client/` 里的模型（7 个），
+     `dist_desktop\MyTeacher.exe` 只看到桌面上那几个（3 个）。
+     **验 exe 就要验用户双击的那份**（`tools/verify_exe.py` 已默认这份）。
+   - 自检工具：`tools/verify_exe.py`（起 exe → 打接口 → 关掉，含 TTS/密钥/插件）、
+     `tools/diff_exe_vs_source.py`（源码 vs exe 逐个比工具与形象，专抓"少功能"）。
+
+**7. 设置中心的几个坑（都踩过，别再犯）**
+
    - 弹层挂在 `document.body` 上，**不在 `.au-root` 里** → `var(--au-panel)` 取不到，
      背景会变透明、底下的对话透上来。所有变量都要写 `var(--x, 兜底值)`。
    - `config.json` 里没写过的键，界面输入框会是空的；学生一按保存，空值变成 `NaN`，
@@ -159,18 +191,14 @@ D:\My_teacher\
      那不是人格，是功能约束，删了模型就用错工具。界面上写明了。
    - `pet_scale` 是 float，**它的滑杆分支必须排在「int/float 数值分支」前面**，
      否则会被数值分支先接走，渲染成普通数字框（学生要的是滑杆手感）。
+   - **音色是输入框，不是下拉**（学生明确要求）：要支持自定义音色，只能填名字。
+     所以「听一下」必须把**界面上正在编辑、还没保存**的值一起发给
+     `/agent/tts/say` 的 `override` —— 否则每换一个音色都要先保存才能试听。
    - 测试**不许往学生真实的 `data/config.json` 写假密钥**（服务进程和另一个会话都在读它）。
      `test_settings_api.py` / `test_pet_upload_tts.py` 都切到 `data/_*_test` 临时目录；
      临时目录里如果带着复制的 `enc$` 密文，会刷一排「密钥解密失败」的噪音 —— 直接不复制密文字段。
      真实配置是否健康，用 `tools/diag_keys.py` 现场验（它会明说"拿到的还是不是 enc$ 密文"——
      注意 `bool(key)` 判断是错的，密文也是真值）。
-   - 弹层挂在 `document.body` 上，**不在 `.au-root` 里** → `var(--au-panel)` 取不到，
-     背景会变透明、底下的对话透上来。所有变量都要写 `var(--x, 兜底值)`。
-   - `config.json` 里没写过的键，界面输入框会是空的；学生一按保存，空值变成 `NaN`，
-     服务端判「要填数字」，**整份设置都存不进去**。现在 `read_state()` 回**实际生效的默认值**，
-     前端也跳过空值（= 不改）。
-   - 人格提示词只替换 `BASE_PERSONA` 那一段；`TOOL_POLICY`（工具使用硬规则）**不开放编辑** ——
-     那不是人格，是功能约束，删了模型就用错工具。界面上写明了。
 
 4. **「已自动归档」提示自动刷新左侧树**：代码写了（`agent_ui.js` 的 `notice` 分支里调 `refreshTree()`），
    **但没在真浏览器里实测过**（node 桩不支持流式事件）。验法：在工作台里聊一个明显属于某学科的话题，

@@ -57,6 +57,15 @@ HIDDEN = [
     # 但既然机器上有，就带上 —— 找教材、读讲义要用。
     "docx",
     "pypdf",
+    # ★ 语音（TTS）：kernel/tts.py 用 win32com 调 Windows 自带嗓子（SAPI）。
+    #   这几个是 pywin32 的**动态**部分，PyInstaller 静态分析看不见 ——
+    #   不写进来，打包后「本机语音」会在 exe 里直接报错（源码里却一切正常）。
+    "win32com",
+    "win32com.client",
+    "pythoncom",
+    "pywintypes",
+    "win32api",
+    "win32timezone",
 ]
 
 # 明确排除的重家伙：这些只被「可选 OCR / 数据分析」用到，

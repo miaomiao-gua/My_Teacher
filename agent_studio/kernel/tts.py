@@ -180,12 +180,21 @@ async def _cloud_audio(text: str, cfg: Dict[str, Any]) -> bytes:
     return r.content
 
 
-async def synthesize(text: str) -> Tuple[bytes, str]:
-    """合成一句话，返回 (音频字节, mime)。provider=off 或没文字时抛 RuntimeError。"""
+async def synthesize(text: str, override: Dict[str, Any] | None = None) -> Tuple[bytes, str]:
+    """合成一句话，返回 (音频字节, mime)。
+
+    `override` 用来**试听还没保存的设置**：学生在设置里填了个自定义音色，
+    点「听一下」应该听到那个音色，而不是要先保存再听（那样每换一个音色都要存一次）。
+    provider=off 或没文字时抛 RuntimeError。
+    """
     text = (text or "").strip()
     if not text:
         raise RuntimeError("没有要念的文字")
     cfg = settings()
+    if override:
+        for key in ("provider", "windows_voice", "base_url", "model", "voice", "speed", "volume", "api_key"):
+            if override.get(key) not in (None, ""):
+                cfg[key] = override[key]
     provider = str(cfg.get("provider") or "off")
     if provider not in PROVIDERS:
         provider = "off"

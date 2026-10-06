@@ -1,6 +1,6 @@
 """酸碱盐虚拟实验室插件 —— 工具实现。
 
-一个插件 = 一个目录（清单 + 处理函数 + 前端界面），见 `agent/plugins.py` 的说明。
+一个插件 = 一个目录（清单 + 处理函数 + 前端界面），见 `kernel/plugins.py` 的说明。
 这个处理函数很薄：校验参数 → 拼界面 URL → 返回 UI 规格 + 一句给模型看的说明。
 
 **为什么参数要走 URL**：界面在沙箱 iframe 里跑（拿不到宿主的任何东西），
@@ -12,14 +12,18 @@ from __future__ import annotations
 import urllib.parse
 from typing import Any, Dict
 
+# 从**当前内核**导入。这里原来写的是 `agent.registry`（仓库根那个九月的旧包）——
+# 源码里跑得通（老包还在），但打包成 exe 后老包不存在，
+# 于是这个插件在桌面版里**静默加载失败**（/agent/plugins 里能看到 "No module named 'agent'"）。
+# 插件是"给内核用的"，就该认 kernel 这个包名。
 try:
-    from agent.registry import ToolContext, ToolResult
-except ImportError:  # 插件是被按路径加载的，兜底把项目根加进 sys.path
+    from kernel.registry import ToolContext, ToolResult
+except ImportError:  # 插件是按路径加载的，兜底把 agent_studio 加进 sys.path
     import sys
     from pathlib import Path
 
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-    from agent.registry import ToolContext, ToolResult  # type: ignore
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from kernel.registry import ToolContext, ToolResult  # type: ignore
 
 PLUGIN_NAME = "acid_base_lab"
 UI_ENTRY = "ui/index.html"

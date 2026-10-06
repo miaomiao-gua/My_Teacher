@@ -293,12 +293,19 @@ async def tts_voices() -> Dict[str, Any]:
 
 @app.post("/agent/tts/say")
 async def tts_say(payload: Dict[str, Any]) -> Any:
-    """把一句文本合成成音频返回（试听 / 桌宠念气泡都用它）"""
+    """把一句文本合成成音频返回（试听 / 桌宠念气泡都用它）。
+
+    可以带 `override`：试听时用**界面上正在编辑、还没保存**的音色/语速，
+    这样学生填一个自定义音色就能马上试，不用先保存（换一个音色存一次太烦）。
+    """
     from . import tts
 
     text = str(payload.get("text") or "").strip()
+    override = payload.get("override") or {}
+    if not isinstance(override, dict):
+        override = {}
     try:
-        data, mime = await tts.synthesize(text)
+        data, mime = await tts.synthesize(text, override)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=str(exc))
     return Response(content=data, media_type=mime, headers={"Cache-Control": "no-store"})

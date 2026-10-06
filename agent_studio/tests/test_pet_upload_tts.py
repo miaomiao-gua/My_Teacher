@@ -190,12 +190,40 @@ def test_cloud_voice_normalization() -> None:
     check("空音色给个兜底而不是空串", tts._full_voice("tts-1", "") == "alloy")
 
 
+def test_tts_override_preview() -> None:
+    """试听要用**界面上正在编辑、还没保存**的音色（自定义音色填了就能听）。"""
+    print("\n[5] 试听可以用未保存的音色（override）")
+    import asyncio
+
+    from kernel import settings_api as sa
+
+    snaps = sa._cfg_path().read_bytes()
+    try:
+        # 先把保存的设置设成「关」，然后只靠 override 出声 —— 证明 override 真的生效
+        sa.write_state({"tts_provider": "off"})
+        try:
+            asyncio.run(tts.synthesize("你好", {}))
+            check("保存的是 off 时，不带 override 就没声音", False, "居然合成成功了")
+        except RuntimeError as exc:
+            check("保存的是 off 时，不带 override 就没声音", "语音没开" in str(exc))
+
+        data, mime = asyncio.run(tts.synthesize("你好", {"provider": "windows", "windows_voice": 0}))
+        check("带 override 就能用本机嗓子合成（不用先保存）",
+              mime == "audio/wav" and data[:4] == b"RIFF", f"{mime} {len(data)}B")
+
+        check("override 里没给的键仍然用保存的值",
+              tts.settings()["provider"] == "off", tts.settings()["provider"])
+    finally:
+        sa._cfg_path().write_bytes(snaps)
+
+
 def main() -> int:
     test_upload_ok()
     test_upload_rejects()
     test_delete_only_uploads()
     test_tts()
     test_cloud_voice_normalization()
+    test_tts_override_preview()
     shutil.rmtree(_SCRATCH, ignore_errors=True)
     print("\n" + ("全部通过 ✓" if _failures == 0 else f"失败 {_failures} 项 ✗"))
     return 1 if _failures else 0
