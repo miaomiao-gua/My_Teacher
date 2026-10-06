@@ -408,6 +408,21 @@ def main(argv: Optional[list] = None) -> int:
         opened_as = open_app_window(base, profile=data_dir / "browser")
         _log(data_dir, f"应用窗口已打开（{opened_as}{'：无地址栏' if opened_as == 'app' else '：退回了默认浏览器'}）")
 
+    # 全局快捷键「看一眼屏幕」：跑在**主进程**的一条消息循环线程里，不创建任何窗口
+    # （学生说过"别开那么多窗口"）。注册不上只写日志，不影响其它功能。
+    try:
+        from desktop import hotkey as hotkey_mod
+
+        from kernel.config import load_app_config
+
+        app_cfg = load_app_config()
+        hot = str(app_cfg.get("vision_hotkey") or "ctrl+shift+t")
+        enabled = str(app_cfg.get("vision_provider") or "local") != "off"
+        watcher = hotkey_mod.start_watcher(base, data_dir, hot, enabled=enabled)
+        _log(data_dir, f"看屏幕快捷键：{hot} —— " + ("已就绪（按一下她就会看你的屏幕）" if watcher else "没起来，见上面的日志"))
+    except Exception as exc:  # noqa: BLE001
+        _log(data_dir, f"快捷键线程启动失败：{type(exc).__name__}: {exc}")
+
     rc = 0
     if args.no_pet:
         _log(data_dir, "（--no-pet：不起桌宠）按 Ctrl+C 结束")

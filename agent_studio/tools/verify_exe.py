@@ -81,8 +81,12 @@ def main() -> int:
 
     import httpx
 
-    print(f"启动 {exe.name}（{exe.stat().st_size / 1048576:.1f} MB）…")
-    proc = subprocess.Popen([str(exe)], cwd=str(exe.parent))
+    print(f"启动 {exe.name}（{exe.stat().st_size / 1048576:.1f} MB，用 --no-window --no-pet："
+          f"**不会弹任何窗口**，只起服务）…")
+    # ★ 学生明确说过「别开那么多窗口」。exe 默认会开「应用窗口 + 桌宠小窗」两个 Edge 窗口，
+    #   验收时完全没必要：--no-window 不开应用窗口，--no-pet 不开桌宠小窗，
+    #   服务照起、接口照打。要人眼看界面时才手动双击。
+    proc = subprocess.Popen([str(exe), "--no-window", "--no-pet"], cwd=str(exe.parent))
     try:
         port = find_port(exe)
         if not port:
@@ -130,6 +134,38 @@ def main() -> int:
                   f"HTTP {resp.status_code} {len(resp.content)}B {resp.content[:4]}")
         except Exception as exc:  # noqa: BLE001
             check("★ 在 exe 里用 Windows 本机嗓子合成（离线语音）", False, f"{type(exc).__name__}: {exc}")
+
+        # ★ 看图：exe 里必须能截屏（PIL.ImageGrab）并调到视觉模型。
+        #   用一张**内容已知**的测试图，答出那个数字才算通 —— 不然"有回答"也可能是瞎猜。
+        try:
+            import base64
+            import io
+
+            from PIL import Image, ImageDraw, ImageFont
+
+            img = Image.new("RGB", (800, 400), "white")
+            dr = ImageDraw.Draw(img)
+            dr.ellipse((40, 40, 240, 240), fill=(220, 30, 30))
+            try:
+                font = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", 56)
+            except Exception:
+                font = None
+            dr.text((300, 150), "本题答案 = 47", fill="black", font=font)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            resp = httpx.post(base + "/agent/vision/ask", timeout=300.0,
+                              json={"image": b64, "question": "图里写的本题答案是多少？只回数字。"})
+            data = resp.json()
+            got = str(data.get("answer") or "")
+            check("★ exe 里能看图（视觉模型读出图里的数字）", resp.status_code == 200 and "47" in got,
+                  f"{data.get('model')} {str(data.get('ms'))}ms answer={got[:60]}")
+        except Exception as exc:  # noqa: BLE001
+            check("★ exe 里能看图（视觉模型读出图里的数字）", False, f"{type(exc).__name__}: {exc}")
+
+        r = get("/agent/vision/status")
+        check("看图配置接口可用", hasattr(r, "status_code") and r.status_code == 200,
+              f"HTTP {getattr(r, 'status_code', '?')}")
 
         for path, name in (("/agent/pet", "桌宠独立页(路由)"),
                            ("/static/js/pet_core.js", "桌宠核心 JS"),

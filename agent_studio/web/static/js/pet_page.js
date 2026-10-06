@@ -72,8 +72,50 @@
   }
 
   /* ---------------- 小聊天：和主界面同一个 agent ---------------- */
+  // 当前会话 id（看屏幕那条链路也要用它当上下文）
+  let currentSession = null;
+  async function latestSession() {
+    if (currentSession) return currentSession;
+    try {
+      const r = await fetch('/agent/sessions');
+      const data = await r.json();
+      let best = null;
+      (data.tree || []).forEach((s) => (s.textbooks || []).forEach((b) => (b.sessions || []).forEach((x) => {
+        if (!best || (x.updated_at || 0) > (best.updated_at || 0)) best = x;
+      })));
+      currentSession = best && best.id;
+    } catch (e) { /* 没有历史就用新对话 */ }
+    return currentSession;
+  }
+
+  /* 看一眼屏幕：把问题（可空）发给服务端，服务端自己截屏 + 交给视觉模型。
+     服务端会把答案推到桌宠总线上，所以气泡会自己出现 —— 这里只负责把对话记进日志。 */
+  async function lookAtScreen(question) {
+    const log = el('log');
+    const q = (question || '').trim();
+    log.textContent += (q ? ('我（带屏幕截图）：' + q) : '我：看一眼我的屏幕\n');
+    if (state.pet) state.pet.act('think');
+    try {
+      const sid = await latestSession();
+      const r = await fetch('/agent/vision/ask', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sid ? { question: q, session_id: sid } : { question: q }),
+      });
+      const data = await r.json();
+      log.textContent += '老师：' + (data.answer || '（没答上来）') + '\n\n';
+      if (state.pet) state.pet.act(data.ok ? 'speak' : 'surprise');
+      if (data.answer && state.pet) state.pet.say(data.answer);
+    } catch (err) {
+      log.textContent += '（看屏幕失败：' + err.message + '）\n\n';
+    }
+    log.scrollTop = log.scrollHeight;
+  }
+
   async function send(text) {
     if (!text.trim()) return;
+    // 勾了「带屏幕截图」→ 走看图那条链路（学生要的就是"打字+回车自动截图"）
+    const withShot = el('withShot');
+    if (withShot && withShot.checked) { await lookAtScreen(text); el('ask').value = ''; return; }
     const log = el('log');
     log.textContent += '我：' + text + '\n';
     el('ask').value = '';
@@ -291,6 +333,8 @@
   function bind() {
     el('send').onclick = () => send(el('ask').value);
     el('ask').addEventListener('keydown', (e) => { if (e.key === 'Enter') send(el('ask').value); });
+    const look = el('lookNow');
+    if (look) look.onclick = () => lookAtScreen(el('ask') && el('ask').value);
     el('open').onclick = () => window.open('/agent/app', '_blank');
     el('model').onclick = () => {
       PetCore.openPicker(el('model'), {
@@ -366,9 +410,19 @@
       el('diag').textContent = '读不到形象清单：' + (e.message || e);
     }
     state.model = model;
+    // 语音：跟设置中心一致。桌面小窗跑的就是这一页，所以这里也必须接上，
+    // 否则会出现「工作台里的小玩偶会说话、桌面小窗里同一只却不会」这种怪事。
+    let speakOn = false;
+    try {
+      const st = await fetch('/agent/settings/all').then((r) => r.json());
+      const v = st.values || {};
+      speakOn = !!v.tts_auto_speak && String(v.tts_provider || 'off') !== 'off';
+    } catch (e) { /* 读不到设置就不念 */ }
+    if (window.PetCore) PetCore.setSpeak(speakOn);
     state.pet = PetCore.createPet(el('stage'), {
       mode: 'full', model: model, onStatus: setStatus,
       speechSeconds: 9,
+      speak: speakOn,
     });
     const kind = await state.pet.start(model);
     if (kind && kind.indexOf('live2d') === 0) {

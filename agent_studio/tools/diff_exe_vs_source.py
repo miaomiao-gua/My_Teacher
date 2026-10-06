@@ -66,8 +66,8 @@ def main() -> int:
     print("先看源码服务（5001）…")
     src = snapshot("http://127.0.0.1:5001")
 
-    print("起一个 exe 实例…")
-    proc = subprocess.Popen([str(EXE)], cwd=str(EXE.parent))
+    print("起一个 exe 实例（--no-window --no-pet：不起窗口，只比接口）…")
+    proc = subprocess.Popen([str(EXE), "--no-window", "--no-pet"], cwd=str(EXE.parent))
     try:
         port = wait_port(EXE)
         if not port:

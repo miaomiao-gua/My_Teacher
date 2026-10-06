@@ -62,12 +62,18 @@ FIELDS: Dict[str, Tuple[Any, Optional[float], Optional[float], bool]] = {
     "tts_speed": (float, 0.5, 2.0, False),
     "tts_volume": (int, 0, 100, False),
     "tts_auto_speak": (bool, None, None, False),
+    # 看图（按快捷键读屏）
+    "vision_provider": (str, None, None, False),
+    "vision_model": (str, None, None, False),
+    "vision_prompt": (str, None, None, False),
+    "vision_hotkey": (str, None, None, False),
 }
 
 # 只能取固定几个值的字段（界面上渲染成下拉框，服务端也校验）
 CHOICES: Dict[str, List[str]] = {
     "llm_provider": ["cloud", "local", "auto"],
     "tts_provider": ["off", "windows", "openai"],
+    "vision_provider": ["off", "local", "cloud"],
 }
 
 SECRET_FIELDS = {k for k, v in FIELDS.items() if v[3]}
@@ -98,6 +104,10 @@ GROUPS: List[Dict[str, Any]] = [
      "fields": ["tts_provider", "tts_windows_voice", "tts_speed", "tts_volume", "tts_auto_speak",
                 "tts_cloud_base_url", "tts_cloud_model", "tts_cloud_voice", "tts_cloud_api_key"],
      "hint": "「Windows 本机语音」最省事（离线、不用 key）；云端要填 OpenAI 兼容的 /audio/speech 服务"},
+    {"key": "vision", "title": "看图（按快捷键读屏幕）",
+     "fields": ["vision_provider", "vision_model", "vision_hotkey", "vision_prompt"],
+     "hint": "主链路（DeepSeek-V3）看不见图，所以这条要单独选一个**能看图**的模型："
+             "本机 qwen3.5:9b，或云端 Qwen2.5-VL 之类。快捷键格式：ctrl+alt+s"},
 ]
 
 LABELS: Dict[str, str] = {
@@ -130,6 +140,10 @@ LABELS: Dict[str, str] = {
     "tts_speed": "语速",
     "tts_volume": "音量（0-100）",
     "tts_auto_speak": "气泡自动念出来",
+    "vision_provider": "看图用哪条链路",
+    "vision_model": "视觉模型名",
+    "vision_prompt": "看图时对她说的话（可改）",
+    "vision_hotkey": "读屏快捷键",
 }
 
 
@@ -229,6 +243,11 @@ DEFAULTS: Dict[str, Any] = {
     "tts_speed": 1.0,
     "tts_volume": 100,
     "tts_auto_speak": False,
+    # 看图：默认走本机（免费、离线）；本机模型不支持看图时学生会看到明确提示
+    "vision_provider": "local",
+    "vision_model": "qwen2.5vl:7b",
+    "vision_prompt": "",
+    "vision_hotkey": "ctrl+shift+t",
 }
 
 

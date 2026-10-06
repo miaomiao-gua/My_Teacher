@@ -21,6 +21,67 @@ PET_MARGIN = 10          # 画布留边，给小动作（上下浮动）用
 
 
 # ---------------------------------------------------------------------------
+# 全局快捷键解析（"看一眼屏幕"用）
+# ---------------------------------------------------------------------------
+HOTKEY_ID = 0xA31E       # 固定的注册 id：只给自己用，避免和别的程序撞
+
+
+def parse_hotkey(spec: str) -> Optional[Tuple[int, int, int]]:
+    """把 "ctrl+alt+s" 解析成 Windows RegisterHotKey 要的 (modifiers, vk, id)。
+
+    为什么自己解析：学生会在设置里改快捷键，写成 "ctrl+alt+s" / "Ctrl+Shift+A" /
+    "win+alt+q" 都得认。**必须带修饰键**（不然会把一个普通按键抢掉，学生打字都受影响），
+    解析不出来就返回 None（调用方跳过注册，不报错）。
+    """
+    if not spec:
+        return None
+    parts = [p.strip().lower() for p in str(spec).replace("＋", "+").split("+") if p.strip()]
+    if not parts:
+        return None
+    mods_map = {"ctrl": 0x0002, "control": 0x0002, "alt": 0x0001, "shift": 0x0004,
+                "win": 0x0008, "super": 0x0008, "cmd": 0x0008}
+    special = {"space": 0x20, "enter": 0x0D, "tab": 0x09, "esc": 0x1B, "escape": 0x1B,
+               "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73, "f5": 0x74, "f6": 0x75,
+               "f7": 0x76, "f8": 0x77, "f9": 0x78, "f10": 0x79, "f11": 0x7A, "f12": 0x7B,
+               "`": 0xC0, "-": 0xBD, "=": 0xBB, "[": 0xDB, "]": 0xDD, "\\": 0xDC,
+               ";": 0xBA, "'": 0xDE, ",": 0xBC, ".": 0xBE, "/": 0xBF}
+    mods = 0
+    key = ""
+    for p in parts:
+        if p in mods_map:
+            mods |= mods_map[p]
+        else:
+            key = p
+    if not key or not mods:
+        return None
+    if len(key) == 1 and (key.isalpha() or key.isdigit()):
+        vk = ord(key.upper())
+    else:
+        vk = special.get(key, 0)
+    if not vk:
+        return None
+    return mods, vk, HOTKEY_ID
+
+
+def hotkey_label(spec: str) -> str:
+    """给人看的写法：ctrl+alt+s → Ctrl+Alt+S"""
+    parts = [p.strip() for p in str(spec or "").split("+") if p.strip()]
+    return "+".join(p.capitalize() if len(p) > 1 else p.upper() for p in parts) or "未设置"
+
+
+def log_line(data_dir: Path, msg: str) -> None:
+    """往 data/logs/desktop.log 追加一行（桌面版没有控制台，只能靠日志）。"""
+    try:
+        p = Path(data_dir) / "logs" / "desktop.log"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%H:%M:%S")
+        with p.open("a", encoding="utf-8") as f:
+            f.write(f"[{stamp}] {msg}\n")
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # 端口 / 单实例
 # ---------------------------------------------------------------------------
 

@@ -291,6 +291,65 @@ async def tts_voices() -> Dict[str, Any]:
     return {"ok": True, "voices": tts.voices(), "current": tts.self_check()}
 
 
+@app.get("/agent/vision/status")
+async def vision_status() -> Dict[str, Any]:
+    from . import vision
+
+    return {"ok": True, "vision": vision.self_check()}
+
+
+@app.post("/agent/vision/ask")
+async def vision_ask(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """看一眼屏幕：可带图（base64）+ 问题，交给能看图的模型。
+
+    两种用法：
+    - **按快捷键**：不带图、不带问题 → 服务端自己截屏 + 用设置里那句默认要求；
+    - **打字问**（"套索工具咋用，在哪里"）→ 带问题（图仍由服务端截，省得两边都写截屏）；
+    也可以显式带 `image`（比如以后要"截某个区域"）。
+
+    `session_id` 有的话会把最近几轮对话当上下文（学生要的就是"根据上下文解答"）。
+    **不抛异常**：出错就把错误当回答返回，桌宠直接把错误显示在气泡里。
+    """
+    from . import vision
+
+    image = str(payload.get("image") or "").strip()
+    question = str(payload.get("question") or "")
+    if not image:
+        try:
+            image, _meta = vision.prepare_image(vision.grab_screen())
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "answer": f"截屏失败：{type(exc).__name__}: {exc}"}
+    if len(image) > 12_000_000:                       # ≈9MB 的图，太大了
+        return {"ok": False, "answer": "图太大了，先压缩一下再发"}
+    sess = None
+    sid = str(payload.get("session_id") or "")
+    if sid:
+        sess = STORE.get(sid)
+    result = await vision.ask(image, question, session=sess)
+    # 推给桌宠总线：网页版小玩偶 + 桌面小窗的气泡都会显示同一句话（一份文案两处显示）
+    try:
+        from .pet_bus import publish_with_text
+
+        if result.get("answer"):
+            publish_with_text({"type": "notice", "data": {
+                "text": ("（看屏幕）" + str(result["answer"]))[:160]}})
+    except Exception:
+        pass
+    return result
+
+
+@app.post("/agent/pet/notice")
+async def pet_notice(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """让桌宠气泡说一句话（服务端的其它组件也能借它说话：快捷键线程、看图结果等）"""
+    from .pet_bus import publish_with_text
+
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text 不能为空")
+    publish_with_text({"type": "notice", "data": {"text": text[:200]}})
+    return {"ok": True}
+
+
 @app.post("/agent/tts/say")
 async def tts_say(payload: Dict[str, Any]) -> Any:
     """把一句文本合成成音频返回（试听 / 桌宠念气泡都用它）。

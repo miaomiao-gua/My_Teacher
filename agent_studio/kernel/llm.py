@@ -132,7 +132,20 @@ def build_messages(provider: str, messages: List[Dict[str, Any]]) -> List[Dict[s
                     }
                 )
         else:
-            out.append({"role": role, "content": m.get("content") or ""})
+            # 带图的消息（"看一眼屏幕"功能）：两家协议的写法不一样 ——
+            # ollama 是 `images: [base64...]`；OpenAI 兼容是 content 数组 + data URL。
+            imgs = m.get("images") or []
+            if imgs and role == "user":
+                if provider == "ollama":
+                    out.append({"role": "user", "content": m.get("content") or "", "images": list(imgs)})
+                else:
+                    parts: List[Dict[str, Any]] = [{"type": "text", "text": m.get("content") or ""}]
+                    for b64 in imgs:
+                        url = b64 if str(b64).startswith("data:") else "data:image/jpeg;base64," + str(b64)
+                        parts.append({"type": "image_url", "image_url": {"url": url}})
+                    out.append({"role": "user", "content": parts})
+            else:
+                out.append({"role": role, "content": m.get("content") or ""})
     return out
 
 

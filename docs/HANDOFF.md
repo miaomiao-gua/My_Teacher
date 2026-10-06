@@ -31,6 +31,7 @@
 | **换形象**（含「白-免费版」） | 小玩偶脚下「换形象」/ 右键 / 设置中心 / `/agent/pet` | 可用 |
 | **设置中心**（模型链路 / base_url / API Key / 人格提示词 / 运行参数 / **桌宠大小** / **上传自己的 Live2D** / **TTS 语音**） | 工作台**左下角「⚙ 设置」** | 可用；密钥只进不出，带「测试连接」和「听一下」 |
 | **桌宠会说话（TTS）** | 设置 → 语音（选 Windows 本机语音 + 勾「气泡自动念出来」） | 可用：气泡出现就念出来（念的是洗过的文字） |
+| **看一眼屏幕（读屏问答）** | 快捷键 `Ctrl+Shift+T`，或小玩偶聊天框**打字+回车**（默认带截图） | 可用：本机 qwen2.5vl:7b 实测 9.3s，云端 Qwen3-VL 2.4~3.2s |
 | 桌宠独立小窗口（Live2D 整身 + 气泡 + 小聊天） | `/agent/pet` | 可用 |
 | 桌面版 exe（透明小桌宠 + Edge 应用窗口 + 本地服务） | `MyTeacher.exe` | 可用，本次重打包 |
 | 课程 / 教案 / 材料 等老能力 | 插件 `acid_base_lab` + `course/` | 可用 |
@@ -181,7 +182,6 @@ D:\My_teacher\
      `tools/diff_exe_vs_source.py`（源码 vs exe 逐个比工具与形象，专抓"少功能"）。
 
 **7. 设置中心的几个坑（都踩过，别再犯）**
-
    - 弹层挂在 `document.body` 上，**不在 `.au-root` 里** → `var(--au-panel)` 取不到，
      背景会变透明、底下的对话透上来。所有变量都要写 `var(--x, 兜底值)`。
    - `config.json` 里没写过的键，界面输入框会是空的；学生一按保存，空值变成 `NaN`，
@@ -194,8 +194,7 @@ D:\My_teacher\
    - **音色是输入框，不是下拉**（学生明确要求）：要支持自定义音色，只能填名字。
      所以「听一下」必须把**界面上正在编辑、还没保存**的值一起发给
      `/agent/tts/say` 的 `override` —— 否则每换一个音色都要先保存才能试听。
-   - 测试**不许往学生真实的 `data/config.json` 写假密钥**（服务进程和另一个会话都在读它）。
-     `test_settings_api.py` / `test_pet_upload_tts.py` 都切到 `data/_*_test` 临时目录；
+   - 测试**不许往学生真实的 `data/config.json` 写假密钥**（服务进程和另一个会话都在读它）。     `test_settings_api.py` / `test_pet_upload_tts.py` 都切到 `data/_*_test` 临时目录；
      临时目录里如果带着复制的 `enc$` 密文，会刷一排「密钥解密失败」的噪音 —— 直接不复制密文字段。
      真实配置是否健康，用 `tools/diag_keys.py` 现场验（它会明说"拿到的还是不是 enc$ 密文"——
      注意 `bool(key)` 判断是错的，密文也是真值）。
@@ -255,14 +254,33 @@ py -3.14 tools\cleanup_test_sessions.py --apply   # 清掉测试留下的对话
 
 打包：`py -3.14 agent_studio\desktop\build_exe.py --clean`（1~3 分钟，产物 42.9 MB）。
 
-## 8. 设计记录（踩坑细节）
+## 8. 「看一眼屏幕」这条链路的要点（2026-10-06 新增）
+
+- **主链路（DeepSeek-V3）看不见图**，所以看图要单独选一条视觉链路：
+  `vision_provider` = off/local/cloud，`vision_model` 默认 `qwen2.5vl:7b`（这台机器上就有，免费离线）。
+  实测（`tools/bench_vision.py`）：本机 qwen2.5vl:7b 看 1400px 截图 **9.3s**
+  （首次要等模型加载，约 40s）；云端 Qwen3-VL-8B 3.2s、Qwen3-VL-30B-A3B 2.4s（花钱、要联网）。
+- **截屏在服务端做**（`vision.grab_screen()`），不在前端：这样「按快捷键」和「网页里点按钮」
+  走同一条路，只有一份实现。`POST /agent/vision/ask` 的 `image` 可以不带（服务端自己截）。
+- **答案走桌宠总线**：服务端 publish 一条 `notice` → 网页版小玩偶和桌面小窗的气泡同时显示
+  （一份文案两处显示，别写两套）。
+- **全局快捷键在 `desktop/hotkey.py`**：主进程里一条 Win32 消息循环线程，**不创建任何窗口**
+  （学生明确说过「别开那么多窗口」）。注册不上只写日志（被别的软件占用很常见），
+  界面上还有「👀 看一眼屏幕」按钮可以手点。快捷键解析在 `core.parse_hotkey`
+  —— **必须带修饰键**，否则会抢掉普通按键。
+- **带上下文**：`vision.ask(..., session=...)` 会把最近 6 轮对话一起发过去。
+  学生先问「我在用 PS」，再问「套索在哪」，没有上下文模型不知道「那个」指什么。
+- 自检：`tests\test_vision.py --live`（画一张已知内容的图，问它图里的数字，答对才算通）；
+  `tools\try_vision.py "问一句"`（对真屏幕打一次接口）。
+
+## 9. 设计记录（踩坑细节）
 
 - `docs/superpowers/specs/2026-10-04-desktop-pet-design.md`：桌面壳与桌宠、打包 8 个坑
 - `docs/superpowers/specs/2026-10-06-pet-doll-and-model-switch.md`：小玩偶与换形象，
   含 Live2D 取景三个坑、`afterMotionUpdate` 参数钩子、canvas 上下文不能复用、
   以及"`#stage` 里只能放角色，否则聊天抽屉被清掉"
 
-## 9. 新窗口第一句话可以这么说
+## 10. 新窗口第一句话可以这么说
 
 > 读一下 `docs/HANDOFF.md` 和两份 spec，然后我们继续。
 > （要做什么就直说；不确定的先问我。）

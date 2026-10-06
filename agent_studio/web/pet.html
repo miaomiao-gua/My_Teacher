@@ -132,10 +132,17 @@
   <div id="stage"></div>
 
   <div id="chat">
-    <div id="log">（这里可以直接跟我说话，用的是同一个老师）</div>
+    <div id="log">（这里可以直接跟我说话；勾上「带屏幕截图」，我就会边看你的屏幕边答）</div>
     <div class="askrow">
-      <input id="ask" placeholder="比如：帮我看看这道题…" autocomplete="off">
+      <input id="ask" placeholder="比如：套索工具咋用，在哪里" autocomplete="off">
       <button class="primary" id="send">发送</button>
+    </div>
+    <div class="askrow" style="border-top:none;padding-top:0">
+      <label class="switch" style="flex:1">
+        <input type="checkbox" id="withShot" checked>
+        <span>按回车时带上屏幕截图（她会看着你的屏幕回答）</span>
+      </label>
+      <button id="lookNow" title="不用打字，直接让她看一眼屏幕">👀 看一眼屏幕</button>
     </div>
   </div>
 

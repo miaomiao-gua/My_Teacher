@@ -105,6 +105,16 @@ class PetConfig:
     on_quit: Callable[[], None]
     pet_scale: float = 1.0
     palette_name: str = "原色"
+    hotkey: str = "ctrl+alt+s"          # 看一眼屏幕的全局快捷键
+
+    @property
+    def hotkey_label(self) -> str:
+        """给人看的写法：ctrl+alt+s → Ctrl+Alt+S"""
+        parts = [p.strip() for p in str(self.hotkey or "").split("+") if p.strip()]
+        return "+".join(p.capitalize() if len(p) > 1 else p.upper() for p in parts) or "未设置"
+
+
+HOTKEY_ID = 0xA31E          # 随便选的固定 id：只给自己用，避免和别的程序撞
 
 
 class PetApp:
@@ -149,6 +159,25 @@ class PetApp:
         # 起手打个招呼（顺便证明它活着）
         self.root.after(900, lambda: self.say("我在呢，双击我打开工作台"))
 
+    def look_at_screen(self, question: str = "") -> None:
+        """「看一眼屏幕」：截屏在**服务端**做（它就在同一台机器上），这里只发一个请求。
+
+        答案会通过桌宠总线回到气泡里（服务端 publish），所以这里不用等结果。
+        全局快捷键在 desktop/hotkey.py（主进程里的消息循环线程，不开窗口）。
+        """
+        self.say("我看看屏幕上是什么…", 30)
+
+        def job() -> None:
+            try:
+                import httpx
+
+                httpx.post(f"{self.cfg.api_base}/agent/vision/ask",
+                           json={"question": question}, timeout=180.0)
+            except Exception as exc:  # noqa: BLE001
+                self.events.put({"type": "alert", "data": {"text": f"看屏幕失败：{exc}"}})
+
+        threading.Thread(target=job, daemon=True, name="pet-look").start()
+
     # ---------------- 窗口 ----------------
     def _build_window(self) -> None:
         w = tk.Toplevel(self.root)
@@ -176,6 +205,7 @@ class PetApp:
         m = tk.Menu(self.root, tearoff=0)
         m.add_command(label="打开工作台", command=self.cfg.on_open_app)
         m.add_command(label="跟艾琳说句话…", command=self.open_chat)
+        m.add_command(label=f"看一眼屏幕（{self.cfg.hotkey_label}）", command=self.look_at_screen)
         m.add_separator()
         m.add_command(label="20 分钟后提醒我", command=lambda: self.set_reminder(20))
         m.add_command(label="1 小时后提醒我", command=lambda: self.set_reminder(60))
