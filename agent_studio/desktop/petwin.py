@@ -81,6 +81,56 @@ def hit_test(alpha_at: Callable[[int, int], int], x: int, y: int, threshold: int
     return HTCLIENT if a >= threshold else HTTRANSPARENT
 
 
+_DPI_MODE = ""
+
+
+def make_process_dpi_aware() -> str:
+    """把进程设成「每个显示器独立 DPI」（PER_MONITOR_AWARE_V2），返回实际用上的方式。
+
+    ★ 必须在**算屏幕坐标之前**调用。DPI 不感知时 `GetSystemMetrics` 给的是缩放后的逻辑值，
+      感知之后给物理值 —— 同一个进程里这两套数字混用，窗口就会落到别的地方。
+      2026-10-07 实测（2560×1600 屏、150% 缩放）：
+          起窗口前 不感知 → 1707×1067；起窗口后 感知 → 2560×1600。
+      探针 probe_petwin / probe_livepet 就栽在这上面：起窗口前算好区域、截了"底图"，
+      起窗口后进程变成感知的，再截的图已经是另一个坐标空间 → 两张图整块都不一样，
+      于是探针一会报 9.5%、一会报 99%（全是假故障）。
+
+    幂等；已经设过就返回上次的方式。
+    """
+    global _DPI_MODE
+    if _DPI_MODE:
+        return _DPI_MODE
+    import ctypes
+
+    try:
+        # ★ 两处必须写对，否则会**静默退回 V1**（页面在混合 DPI 的多显示器上会被系统再拉一遍，糊）：
+        #   ① `SetProcessDpiAwarenessContext` 在 **user32** 里，不在 shcore
+        #      （shcore 只有 `SetProcessDpiAwareness`）。早先写成 shcore.xxx → AttributeError
+        #      被 except 吞掉，一直走的是下面的 V1 分支（实测 2026-10-07）。
+        #   ② 参数是**伪句柄**（-4 = PER_MONITOR_AWARE_V2），按 `c_void_p` 传才稳妥
+        #      （句柄宽度跟指针一致；按默认的 32 位 int 传容易出岔子）。
+        user32 = ctypes.windll.user32
+        user32.SetProcessDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        user32.SetProcessDpiAwarenessContext.restype = ctypes.c_int
+        if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            _DPI_MODE = "per-monitor-v2"
+            return _DPI_MODE
+    except Exception:
+        pass
+    try:
+        if ctypes.windll.shcore.SetProcessDpiAwareness(2) == 0:    # PROCESS_PER_MONITOR_DPI_AWARE
+            _DPI_MODE = "per-monitor"
+            return _DPI_MODE
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()          # 老系统：只能是"系统级 DPI 感知"
+        _DPI_MODE = "system"
+    except Exception:
+        _DPI_MODE = "none"
+    return _DPI_MODE
+
+
 class LivePetWindow:
     """一只浮在桌面上的透明桌宠。`frame_getter()` 要返回 PIL RGBA 图像。"""
 
@@ -259,13 +309,8 @@ class LivePetWindow:
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
         # 每个显示器独立 DPI：不然 150% 缩放下这张位图会被系统再拉一遍，糊
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwarenessContext(-4)   # PER_MONITOR_AWARE_V2
-        except Exception:
-            try:
-                ctypes.windll.shcore.SetProcessDpiAwareness(2)
-            except Exception:
-                pass
+        # （放在窗口线程里调用也能生效，但**算坐标之前**就该调好，见函数注释）
+        make_process_dpi_aware()
 
         WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_longlong, wintypes.HWND, wintypes.UINT,
                                      wintypes.WPARAM, wintypes.LPARAM)

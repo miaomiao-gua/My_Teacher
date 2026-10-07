@@ -267,15 +267,20 @@ def pet_window_payload(base: str, data_dir: Path) -> dict:
 
 
 def _screen_size() -> tuple:
-    """屏幕逻辑尺寸。用 Win32 拿（tkinter 已经退役了，不为了这个再把 tk 拉起来）。"""
+    """屏幕**物理**像素尺寸。用 Win32 拿（tkinter 已经退役了，不为了这个再把 tk 拉起来）。
+
+    ★ 先 `make_process_dpi_aware()` 再问尺寸：不感知 DPI 时 GetSystemMetrics 给的是
+      缩放后的逻辑值（实测 1707×1067），算出来的桌宠位置会被当成物理像素用，
+      桌宠就不在右下角了。用同一个函数（PER_MONITOR_AWARE_V2）保证
+      坐标空间与 petwin 建窗口时一致。
+    """
     try:
         if os.name == "nt":
             import ctypes
+            from desktop import petwin
+
+            petwin.make_process_dpi_aware()
             user32 = ctypes.windll.user32          # type: ignore[attr-defined]
-            try:
-                user32.SetProcessDPIAware()
-            except Exception:
-                pass
             return int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1))
     except Exception:
         pass

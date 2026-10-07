@@ -1,7 +1,68 @@
-# 交接单：My_Teacher 项目现状（2026-10-06）
+# 交接单：My_Teacher 项目现状（2026-10-06；**2026-10-07 更新，见第 0 节**）
 
 > 给"下一个我"看的。新对话窗口看不到之前的聊天记录，**这份文件就是记忆**。
-> 如果只读一段：第 1 节（现状）+ 第 5 节（硬约束）+ 第 6 节（待办与需要用户拍板的）。
+> 如果只读一段：**第 0 节（最新的改动与坑）** + 第 1 节（现状）+ 第 5 节（硬约束）+ 第 6 节（待办）。
+
+---
+
+## 0. 最新一次改动（2026-10-06 那版之后的收尾，2026-10-07）
+
+上一版提交是 `252ae32d`「真透明桌宠（B 方案）」。这次**没改桌宠的功能逻辑**，做的是
+「真去实测一遍 + 修掉三个真问题 + 把验收仪器修好」。
+
+**① 实测结果（真起服务、真在桌面上显示角色，数字都是当场量的）**
+
+| 量什么 | 结果 |
+| --- | --- |
+| 抓帧这条路通不通 | 通：`Page.captureScreenshot` 拿到的 PNG **真的带 alpha**（透明像素 67%、实体 29%） |
+| 抓帧耗时 | 中位 **69~85ms/帧**；页面自己渲染 **70fps** → 瓶颈在"抓帧 + PNG 解码（52ms）"，不在 Live2D |
+| 端到端帧率 | **9~13fps**（正常）；机器有负载时（学生在旁边开游戏）掉到 **274ms/帧 ≈ 3fps**，已接受降级 |
+| 逐像素透明 | ✅ 蒙版内变化 **99.4%**、蒙版外 **0.0%**（3 次试量取最干净那次） |
+| 位置对不对 | ✅ `shell._screen_size()` 算出的 pos 与窗口实际位置**逐像素一致**（2560×1600 屏上是 (2220,1100)） |
+| 点得穿 | 只有**纯函数**验证（透明处 `HTTRANSPARENT`／角色上 `HTCLIENT`）；**真鼠标点击这次没测** |
+| 拖动 / 右键菜单 | 本次**没实测**（代码在 `petwin.py`，上一版写的） |
+
+**② 修掉的三个真问题**
+
+- `desktop/petwin.py` 新增 `make_process_dpi_aware()` 并统一使用。原来那行是
+  `shcore.SetProcessDpiAwarenessContext(-4)` —— **`SetProcessDpiAwarenessContext` 在 `user32` 里，
+  shcore 里只有 `SetProcessDpiAwareness`**。AttributeError 被 `except` 吞掉，
+  于是一直**静默退回 V1**（混合 DPI 的多显示器上角色会被系统再拉一遍，糊）。
+  另外参数是伪句柄，必须声明 `c_void_p`。
+- `desktop/shell.py` 的 `_screen_size()` 改成**先** `petwin.make_process_dpi_aware()` **再**问尺寸。
+- `desktop/frames.py` 的 `stop()` 现在会 cancel 抓帧任务：不再打
+  `Task was destroyed but it is pending!`（看着像崩溃，其实只是噪音）。
+
+**③ 最值钱的产出：把"验收仪器"修好了 —— 它之前一直在骗人**
+
+透明桌宠的验收原来是「前后截两张屏幕，看变化像素占比」。这个判定在**学生自己的桌面上不成立**：
+同一份代码、同一台机器，实测变化占比 **53% → 94% 反复横跳**，误报过好几次 ❌。
+真正的两个原因（都踩实了才写在这里）：
+
+1. **坐标空间中途换了**：进程刚起来时 DPI **不感知**（`GetSystemMetrics` = 1707×1067），
+   起桌宠窗口时 `petwin` 才把进程设成感知 → 同一进程里变成 **2560×1600**。
+   "起窗口前截的底图"和"之后的图"因此属于两个坐标系，整块画面都不一样（假故障）。
+   → **规矩：算任何屏幕坐标之前，先 `petwin.make_process_dpi_aware()`。**
+2. **桌面自己在动**：学生在旁边开游戏/切窗口，背景整块地变。背景变化只会**增加**变化量。
+
+现在判定搬到 `agent_studio/tools/_screen_check.py`，做法：
+`SetWindowPos` 把窗口**搬到屏幕外再搬回来**当开关（只隔 0.12 秒，不是关掉重建窗口）→
+按**窗口当前那一帧的 alpha 蒙版**分开判（蒙版内该大面积变、蒙版外只该剩背景噪声）→
+量 **3 次取蒙版外变化最小的那次**（背景只可能加噪声）→
+实在判不出来就说「这次不算数」，**而不是报 ❌**。
+
+> **结论：桌宠本体没问题，是验收方法一直在骗人。**
+> 以后凡是要做"屏幕像素判定"的自检，直接用 `_screen_check.py`，别再手搓百分比阈值。
+
+**④ 这次验证用的命令**（服务要先起在 5001；探针会让角色在右下角露几秒）
+
+```powershell
+py -3.14 run_agent.py --port 5001            # 起服务（另一个窗口）
+cd agent_studio
+py -3.14 tools\probe_frames.py               # 抓帧带不带 alpha（不需要桌宠窗口）
+py -3.14 tools\probe_petwin.py               # 分层窗口：纯函数 + 逐像素透明（不依赖浏览器）
+py -3.14 tools\probe_livepet.py 16           # 端到端：Live2D 抓帧 → 桌面透明（会露 16 秒）
+```
 
 ---
 
@@ -145,8 +206,11 @@ D:\My_teacher\
 
 **等用户回答**
 
-3. **桌面版有两只桌宠**：窗口里的 Live2D 小玩偶 + 桌面上那只 tkinter 画的透明小桌宠。
-   用户可能只想要一只。去掉 floater 只要在 `desktop/shell.py` 里默认走 `--no-pet`（开关已存在）。
+3. ~~**桌面版有两只桌宠**：窗口里的 Live2D 小玩偶 + 桌面上那只 tkinter 画的透明小桌宠。~~
+   **已不再成立（2026-10-07 核对）**：`shell.py` 的默认分支现在起的是**真·透明桌宠**
+   （`livepet.LivePet` → 分层窗口），那只 tkinter 的 floater（`desktop/pet.py`）**已经不在默认路径里**
+   （只有老 `--pet-window` 分支会起"Edge 小窗"做对照），所以桌面版默认**只有一只**。
+   要不要把 `desktop/pet.py`（废弃的 tkinter 桌宠）删掉，仍等用户表态。
 
 **还没做完 / 没实测**
 
@@ -202,8 +266,11 @@ D:\My_teacher\
 4. **「已自动归档」提示自动刷新左侧树**：代码写了（`agent_ui.js` 的 `notice` 分支里调 `refreshTree()`），
    **但没在真浏览器里实测过**（node 桩不支持流式事件）。验法：在工作台里聊一个明显属于某学科的话题，
    等这轮跑完，看左边文件夹树是否自己移动。
-5. **桌面 exe 里的 Live2D 小玩偶**：exe 里现在有它（在 Edge 应用窗口内，已验证接口 200），
-   但**没有做成桌面上的透明 Live2D 浮窗**——那需要 WebView2 分层窗口，属于研究级任务，还没动。
+5. ~~**桌面 exe 里的 Live2D 小玩偶**：…但**没有做成桌面上的透明 Live2D 浮窗**——那需要 WebView2 分层窗口，还没动。~~
+   **已完成（2026-10-06 提交 `252ae32d`，2026-10-07 实测通过）**：桌面版默认就是**真·透明 Live2D 桌宠** ——
+   无头 Edge 渲染 `/agent/pet?frames=1` → CDP 抓带 alpha 的 PNG → `UpdateLayeredWindow` 逐像素透明贴到桌面。
+   实现见 `desktop/frames.py`（抓帧）+ `desktop/petwin.py`（分层窗口）+ `desktop/livepet.py`（合成/总线/降级）。
+   **走的是我们自己的分层窗口，不是 WebView2**（原来以为必须 WebView2，实测不必）。本次实测数据见第 0 节。
 6. **形象清单扫盘范围**：目前会扫「项目内 / 用户的 client/static/models / 桌面 / 下载 / Open-LLM-VTuber」。
    想加目录就写 `agent_studio/data/pet_model_dirs.json`（一行一个路径），不用改代码。
 7. **老项目还在**：`client/`、`server/` 没删，两套并存是**刻意**的（出问题能退回老界面）。
@@ -238,6 +305,7 @@ node ..\data\agent\_cdp_wb_settings.js  # 工作台「设置中心」：入口/�
 node ..\data\agent\_cdp_doll_verify.js  # 三栏还在 + 抓住角色能拖 + 点击不乱跑 + 位置记得住
 node ..\data\agent\_cdp_pet_v2.js       # 她身上无控件 / 设置里的滑杆·上传·TTS / 试听出音频
 node ..\data\agent\_cdp_tts.js         # TTS 接线：气泡→合成→播放；台词清洗；过程提示不念；不叠着念
+node ..\data\agent\_cdp_tts_petpage.js # 独立桌宠页（桌面小窗那一页）也会念 + 形象加载
 node ..\data\agent\_cdp_wb_settings.js  # 左下角设置中心：字段/密钥不回显/保存生效
 node ..\data\agent\_cdp_pet_head.js    # 她头顶上方没有任何元素
 node ..\data\agent\_cdp_pet.js       # 独立窗口页：气泡/提醒/兜底形象
@@ -250,6 +318,14 @@ py -3.14 tools\check_pet_http.py       # 形象接口端到端
 py -3.14 tools\peek_exe_size.py        # exe 里谁占体积
 py -3.14 tools\peek_exe_modules.py     # exe 里带没带某个模块（打包后 500 的第一嫌疑）
 py -3.14 tools\cleanup_test_sessions.py --apply   # 清掉测试留下的对话
+
+# ★ 真·透明桌宠的三个探针（2026-10-07 重写过判定；服务要先起在 5001）
+py -3.14 tools\probe_frames.py         # 抓帧带不带 alpha（不显示桌宠，最快）
+py -3.14 tools\probe_petwin.py         # 分层窗口：预乘/点穿纯函数 + 逐像素透明（不靠浏览器）
+py -3.14 tools\probe_livepet.py 16     # 端到端：Live2D → 桌面（角色会露 16 秒 + 闪几下）
+#   判定逻辑在 tools\_screen_check.py：先把窗口搬到屏幕外当开关（0.12 秒）→
+#   按窗口那帧的 alpha 蒙版分开判 → 量 3 次取最干净的一次 → 判不出来就说"不算数"。
+#   ⚠️ 别再手搓"变化像素百分比 < 60%"这种阈值：在学生的忙桌面上它一定骗你（第 0 节 ③）。
 ```
 
 打包：`py -3.14 agent_studio\desktop\build_exe.py --clean`（1~3 分钟，产物 42.9 MB）。
@@ -279,8 +355,12 @@ py -3.14 tools\cleanup_test_sessions.py --apply   # 清掉测试留下的对话
 - `docs/superpowers/specs/2026-10-06-pet-doll-and-model-switch.md`：小玩偶与换形象，
   含 Live2D 取景三个坑、`afterMotionUpdate` 参数钩子、canvas 上下文不能复用、
   以及"`#stage` 里只能放角色，否则聊天抽屉被清掉"
+- `docs/superpowers/specs/2026-10-07-transparent-desktop-pet.md`：**真·透明桌宠（B 方案）**
+  —— 整条链路（无头 Edge → CDP 抓 alpha → 分层窗口）、实测数字（70fps 页面 / 69ms 抓帧 /
+  9~13fps 端到端）、四个坑（**DPI 坐标空间中途会换**、屏幕像素判定为什么会骗人、
+  气泡把窗口撑高、`Task was destroyed` 的真相）、以及还没测的东西
 
 ## 10. 新窗口第一句话可以这么说
 
-> 读一下 `docs/HANDOFF.md` 和两份 spec，然后我们继续。
+> 读一下 `docs/HANDOFF.md`（重点第 0 节）和三份 spec，然后我们继续。
 > （要做什么就直说；不确定的先问我。）

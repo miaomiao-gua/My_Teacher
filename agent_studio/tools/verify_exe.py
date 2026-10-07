@@ -161,7 +161,16 @@ def main() -> int:
             check("★ exe 里能看图（视觉模型读出图里的数字）", resp.status_code == 200 and "47" in got,
                   f"{data.get('model')} {str(data.get('ms'))}ms answer={got[:60]}")
         except Exception as exc:  # noqa: BLE001
-            check("★ exe 里能看图（视觉模型读出图里的数字）", False, f"{type(exc).__name__}: {exc}")
+            # ★ 超时**不等于**打包打坏了（2026-10-07 实测）：本机 qwen2.5vl:7b 冷启动
+            #   本来就慢（首次约 40 秒），机器上有负载时会离谱 —— 开着游戏时，
+            #   一次"回两个字"的纯文本生成实测要 **416 秒**，而这个检查只等 300 秒。
+            #   所以超时时要给出人话提示，别让人以为 exe 少带了模块。
+            hint = ""
+            if "imeout" in type(exc).__name__:
+                hint = ("（超时：本机视觉模型冷启动 + 机器有负载时远超 300 秒。"
+                        "先关掉游戏/大程序再验一次，或在设置里把看图链路切到 cloud）")
+            check("★ exe 里能看图（视觉模型读出图里的数字）", False,
+                  f"{type(exc).__name__}: {exc}{hint}")
 
         r = get("/agent/vision/status")
         check("看图配置接口可用", hasattr(r, "status_code") and r.status_code == 200,

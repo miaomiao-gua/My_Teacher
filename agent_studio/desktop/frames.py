@@ -11,8 +11,12 @@
    （这是 Playwright `omitBackground` 的同一招）。
 2. 无头 Edge 要能跑 WebGL（Live2D 需要）：加 `--use-angle=swiftshader`
    `--enable-unsafe-swiftshader`，否则画布是空的。
-3. 帧率靠"抓帧循环"控制；一张 320×420 的 PNG 抓+解大约 20~40ms，
-   所以 10~15fps 是现实值。抓不动就降帧，不要卡死整机。
+3. 帧率靠"抓帧循环"控制。**实测（2026-10-07，340×460）**：
+   抓一帧 `Page.captureScreenshot(fromSurface=True, optimizeForSpeed=True)` 中位 **69ms**，
+   加上 base64 + PNG 解码（52ms）合计约 120ms → 约 8fps；
+   空载时抓帧线程实测 74~93ms/帧（9~13fps），**机器有负载时（学生在开游戏）会掉到 274ms/帧（3fps）**。
+   页面自己渲染是 70fps，所以瓶颈在"抓 + 解"，不在 Live2D。
+   抓不动就降帧，不要卡死整机。
 """
 
 from __future__ import annotations
@@ -59,6 +63,7 @@ class FrameSource:
         self._stopping = False
         self._ready = threading.Event()
         self._thread: Any = None
+        self._task: Any = None
 
     # ---------------- 启动 / 关闭 ----------------
     def start(self, timeout: float = 30.0) -> bool:
@@ -124,7 +129,7 @@ class FrameSource:
         asyncio.set_event_loop(self._loop)
         try:
             self._loop.run_until_complete(self._connect())
-            self._loop.create_task(self._capture_loop())
+            self._task = self._loop.create_task(self._capture_loop())
             self._loop.run_forever()
         except Exception as exc:  # noqa: BLE001
             self.last_error = f"{type(exc).__name__}: {exc}"
@@ -201,6 +206,15 @@ class FrameSource:
 
     def stop(self) -> None:
         self._stopping = True
+        # ★ 先把抓帧任务取消掉再关循环。不取消的话，循环带着一个 pending task 结束，
+        #   Python 会打一行 `Task was destroyed but it is pending!`（看着像崩溃，实际只是噪音）。
+        if self._loop and self._task is not None:
+            try:
+                self._loop.call_soon_threadsafe(self._task.cancel)
+                time.sleep(0.15)          # 给循环一点时间把取消跑完
+            except Exception:
+                pass
+            self._task = None
         try:
             if self._loop and self._ws:
                 fut = asyncio.run_coroutine_threadsafe(self._ws.close(), self._loop)
