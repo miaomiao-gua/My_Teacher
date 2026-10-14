@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 import sys
+import time
 import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -541,6 +542,161 @@ def remember_read(ctx: ToolContext, url: str) -> None:
         pass
 
 
+def _page_text(url: str) -> str:
+    """抓一个网页的正文（去标签后的纯文本）。`fetch_page` 与 `research_syllabus` 共用这一份。"""
+    resp = requests.get(url, headers=UA, timeout=SEARCH_TIMEOUT)
+    resp.raise_for_status()
+    html = resp.text or ""
+    text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = re.sub(r"&nbsp;?", " ", text)
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
+# 哪些来源算「权威」——只用来**排序**（找不到时就退而求其次，不是白名单）
+_AUTHORITATIVE_HINTS = (
+    ".edu", ".ac.uk", ".gov", "cambridgeinternational.org", "ocr.org.uk", "aqa.org.uk",
+    "pearson", "edexcel", "collegeboard", "python.org", "developer.mozilla.org", "w3.org",
+    "ocw.mit.edu", "khanacademy.org", "openstax.org", "wikipedia.org", "docs.",
+)
+
+
+def _authority_rank(url: str) -> int:
+    u = (url or "").lower()
+    return 0 if any(h in u for h in _AUTHORITATIVE_HINTS) else 1
+
+
+# 主题里这些词没有区分度，别拿它们当"相关信号"
+_TOPIC_STOPWORDS = {"cie", "the", "and", "for", "official", "syllabus", "specification",
+                    "a", "as", "level", "alevel", "course", "outline", "官方", "大纲", "考纲", "课程"}
+
+
+def _topic_tokens(topic: str) -> List[str]:
+    """主题里有区分度的词（"CIE A Level Mathematics 9709" → ["mathematics", "9709"]）。"""
+    out = []
+    for raw in re.split(r"[^0-9A-Za-z\u4e00-\u9fff]+", topic or ""):
+        t = raw.strip().lower()
+        if len(t) >= 3 and t not in _TOPIC_STOPWORDS:
+            out.append(t)
+    return out[:6]
+
+
+def _candidate_score(url: str, topic: str) -> int:
+    """越小越像"我们要的那份大纲"。
+
+    为什么需要打分（2026-10-14 实测）：第一组查询命中的是 cambridgeinternational.org **首页**
+    （45150 字全是导航），而真正有用的考纲页在第二组查询里 —— 早先"哪个查询先返回能用就吃哪个"
+    于是把首页当成了依据，"已查证"标着、内容却没用。**站点首页基本永远不是答案。**
+    """
+    u = (url or "").lower()
+    try:
+        path = (urllib.parse.urlparse(u).path or "").strip("/")
+    except Exception:
+        path = ""
+    score = _authority_rank(url) * 2
+    if not path:
+        score += 10                                   # 站点首页
+    elif len(path.split("/")) <= 1:
+        score += 3                                    # 一级栏目页也偏泛
+    for kw in ("syllabus", "specification", "scheme-of-work", "curriculum"):
+        if kw in u:
+            score -= 4
+    if re.search(r"\b\d{4}\b", u):
+        score -= 3                                    # 路径里带考试代号
+    for tok in _topic_tokens(topic):
+        if tok in u:
+            score -= 1
+    if u.endswith(".pdf"):
+        # PDF 现在会被下载 + 转 Markdown（pypdf/pdfplumber 本机都有），所以不再扣分；
+        # 名字里带 syllabus/specification 的 PDF 往往**就是**官方考纲，给它加分
+        if any(k in u for k in ("syllabus", "specification")):
+            score -= 2
+    return score
+
+
+def _looks_like_binary(text: str) -> bool:
+    """抓回来的到底是不是文本？（PDF 字节被当 HTML 去标签，就是下面这种垃圾）
+
+    实测那次：官方 9709 考纲是 PDF，被 `_page_text` 处理后成了 51 万字符的
+    `%PDF-1.7 ... xref 0000000016 ...` —— 还被当成"已查证的大纲"缓存了下来。
+    """
+    sample = (text or "")[:4000]
+    if not sample.strip():
+        return True
+    if sample.lstrip().startswith("%PDF"):
+        return True
+    printable = sum(1 for ch in sample if ch.isprintable() or ch in "\n\t")
+    return printable / max(1, len(sample)) < 0.75
+
+
+def _is_pdf_url(url: str) -> bool:
+    try:
+        return (urllib.parse.urlparse(url).path or "").lower().endswith(".pdf")
+    except Exception:
+        return False
+
+
+def _read_source(ctx: ToolContext, url: str) -> str:
+    """读一份来源：HTML 就去标签取正文；**PDF 就下下来转 Markdown**。
+
+    为什么要给 PDF 单开一条路（2026-10-14 实测）：官方考纲（"…-syllabus.pdf"）就是 PDF，
+    而官方 programme **网页** 44k 字里全是导航、没有考纲结构。不转 PDF 的话，
+    要么拿到乱码、要么只能拿一堆导航文本当依据 —— 都不算"真的查了考纲"。
+    """
+    if not _is_pdf_url(url):
+        text = _page_text(url)
+        return "" if _looks_like_binary(text) else text
+    try:
+        target = Path(getattr(ctx.session, "workspace", DATA_DIR))
+        target.mkdir(parents=True, exist_ok=True)
+        name = Path(urllib.parse.urlparse(url).path).name or "syllabus.pdf"
+        path = download_resource({"url": url, "title": name}, target, "syllabus")
+        markdown = convert_document_to_markdown(path) or ""
+    except Exception as exc:  # noqa: BLE001
+        print(f"[materials] PDF 下载/转换失败（{url}）：{type(exc).__name__}: {exc}", flush=True)
+        return ""
+    return "" if _looks_like_binary(markdown) else markdown
+
+
+def _syllabus_queries(topic: str) -> List[str]:
+    """按主题猜该搜什么。考试代号（9709 这种）就搜官方 syllabus，普通主题搜公认教学顺序。"""
+    t = topic.strip()
+    m = re.search(r"\b(\d{4})\b", t)
+    looks_exam = bool(m) or bool(re.search(r"(ial|igcse|a-?level|\bap\b|\bsat\b|\bib\b|考纲|syllabus|specification)",
+                                           t, re.I))
+    if looks_exam:
+        code = m.group(1) if m else t
+        return [f"{t} syllabus official",
+                f"{code} syllabus specification",
+                f"{t} 考纲 官方 大纲"]
+    return [f"{t} official tutorial table of contents",
+            f"{t} 公认 课程大纲 教学顺序",
+            f"{t} syllabus course outline"]
+
+
+def _remember_syllabus(ctx: ToolContext, topic: str, url: str, text: str) -> bool:
+    """把抓到的正文**缓存在会话里**，`prepare_course` 直接取用。返回是否真的存进去了。
+
+    为什么不让模型把正文抄进工具参数：一份考纲正文常有 5~10k 字，
+    让它逐字抄进 JSON 参数既吃 token 又容易抄错/截断。缓存下来，
+    模型只要「先调 research_syllabus，再调 prepare_course」就够了。
+
+    ★ 返回值必须如实反映结果：这里第一版写的是 `except: pass`，
+    而当时 materials.py **忘了 import time** —— NameError 被静默吞掉，
+    缓存永远写不进去，工具摘要却还在说「已缓存」（等于又造了一个骗人的字段）。
+    现在失败会打日志，并且**由调用方决定**要不要让模型改走手抄那条路。
+    """
+    try:
+        ctx.session.meta["syllabus_cache"] = {
+            "topic": topic, "url": url, "text": text[:40000], "ts": time.time(),
+        }
+        ctx.session.save()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"[materials] 大纲缓存写入失败（会改让模型手抄）：{type(exc).__name__}: {exc}", flush=True)
+        return False
+
+
 async def fetch_page(ctx: ToolContext, args: Dict[str, Any]) -> ToolResult:
     url = str(args.get("url") or "").strip()
     if not url:
@@ -548,15 +704,9 @@ async def fetch_page(ctx: ToolContext, args: Dict[str, Any]) -> ToolResult:
     if not safe_url_check(url):
         return ToolResult.fail("这个地址不允许抓取（只支持 http/https 的公开地址）。")
     try:
-        resp = await _as_thread(requests.get, url, headers=UA, timeout=SEARCH_TIMEOUT)
-        resp.raise_for_status()
+        text = await _as_thread(_page_text, url)
     except Exception as exc:  # noqa: BLE001
         return ToolResult.fail(f"抓取失败：{type(exc).__name__}: {exc}")
-    html = resp.text or ""
-    text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
-    text = re.sub(r"(?s)<[^>]+>", " ", text)
-    text = re.sub(r"&nbsp;?", " ", text)
-    text = re.sub(r"\s{2,}", " ", text).strip()
     if not text:
         return ToolResult.fail("这个页面没有可读文本（可能是纯图片或需要登录）。")
     snippet = text[:4000]
@@ -564,6 +714,89 @@ async def fetch_page(ctx: ToolContext, args: Dict[str, Any]) -> ToolResult:
     return ToolResult(
         summary=f"页面正文（前 {len(snippet)} 字，已去标签）：\n{snippet}",
         data={"url": url, "chars": len(text)},
+    )
+
+
+@tool(
+    "research_syllabus",
+    "**开课前先调这个**：替你去网上找官方考纲（考试代号，如 9709）或公认课程大纲（Python、微积分这类），"
+    "把正文缓存起来并告诉你真实来源。网页直接读正文，**官方考纲 PDF 会下载并转成 Markdown**。"
+    "之后直接调 `prepare_course`（不用再手抄正文），"
+    "它会自动用这份缓存、并在界面标出「备课依据」。找不到可靠来源时会明说 —— 那时要如实告诉学生没查到。",
+    {"type": "object", "properties": {
+        "topic": {"type": "string", "description": "课程主题或考试代号，如「9709」「CIE A Level Mathematics 9709」「Python 入门」"},
+    }, "required": ["topic"]},
+    timeout=180,
+)
+async def research_syllabus(ctx: ToolContext, args: Dict[str, Any]) -> ToolResult:
+    topic = str(args.get("topic") or "").strip()
+    if not topic:
+        return ToolResult.fail("请给出课程主题或考试代号（topic），例如「9709」。")
+
+    queries = _syllabus_queries(topic)
+    found: List[Dict[str, str]] = []
+    for q in queries:
+        try:
+            found += await _as_thread(web_search, q)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[materials] research_syllabus 搜索失败（{q}）：{type(exc).__name__}: {exc}", flush=True)
+
+    # ★ 把三组查询的候选**全部收集**再排序（早先是"哪个查询先返回能用的就吃哪个"，
+    #   结果吃到了站点首页，真正有用的考纲页在后面的查询里被跳过）
+    seen, ranked = set(), []
+    for item in found:
+        url = str(item.get("url") or "")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        ranked.append(item)
+    ranked.sort(key=lambda it: _candidate_score(str(it.get("url") or ""), topic))
+
+    tokens = _topic_tokens(topic)
+    best: Optional[tuple] = None
+    tried: List[str] = []
+    for item in ranked[:3]:                 # 最多读三份，读太多既慢又没必要
+        url = str(item.get("url") or "")
+        if not safe_url_check(url):
+            continue
+        try:
+            text = await _as_thread(_read_source, ctx, url)
+        except Exception:  # noqa: BLE001
+            continue
+        if len(text) < 400:                # 太短的多半是导航页 / 需要登录 / 空壳 / 转换失败
+            continue
+        tried.append(url)
+        has_token = (not tokens) or any(tok in text.lower() for tok in tokens)
+        rank = (1 if has_token else 0, -_candidate_score(url, topic), len(text))
+        if best is None or rank > best[0]:
+            best = (rank, url, text, item)
+
+    if best is None:
+        return ToolResult.fail(
+            f"没找到能读的权威大纲（试过：{'；'.join(queries)}）。"
+            "**如实告诉学生「我没查到可靠来源」**，然后用自己的知识照常 `prepare_course` 备课 —— "
+            "不要编来源、不要挂官网链接。"
+        )
+
+    _rank, url, text, item = best
+    remember_read(ctx, url)        # 记账：备课据此标「已查证」
+    stored = _remember_syllabus(ctx, topic, url, text)
+    head = text[:800]
+    if stored:
+        tail = (f"（正文 {len(text)} 字已缓存，**调 `prepare_course(topic=\"{topic}\")` 时会自动用它**，"
+                f"你不用再抄一遍）\n开头预览：{head}\n")
+    else:
+        # 缓存失败就退回"手抄"，并把正文给足（否则备课会失去依据）
+        tail = (f"（缓存失败，请把下面这段正文**整段**填进 `prepare_course` 的 `syllabus` 入参，"
+                f"`syllabus_source` 填上面的来源）\n正文：\n{text[:6000]}\n")
+    return ToolResult(
+        summary=(
+            f"已读过的大纲来源：{url}\n" + tail +
+            "接下来：① 用一两句话告诉学生**依据是哪一份、链接是什么**；"
+            "② 立刻调 `prepare_course` 备课；③ 备完**直接开讲第 1 课**，不要再问从哪课开始。"
+        ),
+        data={"url": url, "chars": len(text), "title": item.get("title"),
+              "cached": stored, "queries": queries, "tried": tried},
     )
 
 

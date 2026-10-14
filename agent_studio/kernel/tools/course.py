@@ -136,6 +136,14 @@ async def prepare_course(ctx: ToolContext, args: Dict[str, Any]) -> ToolResult:
     # 学生查到的「别人整理好的大纲」正文 + 来源（给了就照它切单元，见 lesson_prep._build_outline_message）
     syllabus = str(args.get("syllabus") or "").strip()
     syllabus_source = str(args.get("syllabus_source") or "").strip()
+    # ★ 如果刚调过 `research_syllabus`，正文已经缓存在会话里 —— 直接用，**不用模型手抄**
+    #   （一份考纲常有 5~10k 字，逐字抄进 JSON 参数既吃 token 又容易抄错/截断）
+    cache = (getattr(ctx.session, "meta", None) or {}).get("syllabus_cache") or {}
+    if not syllabus and isinstance(cache, dict) and cache.get("text"):
+        age = time.time() - float(cache.get("ts") or 0)
+        if age <= 3600:                                  # 一小时内的检索结果还算数
+            syllabus = str(cache.get("text") or "").strip()
+            syllabus_source = syllabus_source or str(cache.get("url") or "").strip()
     # ★ 模型很可能凭记忆写一份"考纲"再挂个官网链接（实测发生过，见 materials.remember_read 的注释）。
     #   这里拿「本会话真的读过哪些 URL」这本账核对一下，只标"已查证 / 未经查证"，不拦着备课。
     read_urls = list((getattr(ctx.session, "meta", None) or {}).get("read_urls") or [])

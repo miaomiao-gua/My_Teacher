@@ -75,6 +75,7 @@ async def main() -> int:
     check("说了先去查考纲/公认大纲", "考纲" in prompt and "大纲" in prompt)
     check("说了走 prepare_course 的 syllabus 入参", "syllabus" in prompt)
     check("说了具体知识点提问照旧直接讲", "具体知识点" in prompt)
+    check("提示词指向新工具 research_syllabus", "research_syllabus" in prompt)
 
     print("\n===== 2) 提示词：没目录线索时不该硬塞「别反问」 =====")
     plain = STORE.get_or_create("syllabus_plain", username="syl_test")
@@ -154,6 +155,88 @@ async def main() -> int:
         # 实测：备完课它反问「你想从哪一课开始」，学生要的是马上开讲
         check("收尾要它直接开讲第 1 课", "开讲第 1 课" in (res2.summary or ""))
         check("并明说别再问从哪课开始", "不要再问" in (res2.summary or ""))
+
+        print("\n===== 6) research_syllabus：真的读 + 缓存 + 备课自动取用 =====")
+        from kernel.tools import materials as mat
+
+        real_search, real_page = mat.web_search, mat._page_text
+        long_text = "# 9709 syllabus\n" + "Quadratics Functions Coordinate geometry Circular measure " * 40
+
+        def fake_search(q, limit=8):
+            # 真实故障的形状：官方首页（权威域名、能读、45k 字导航）排在前面，
+            # 真正有用的考纲页在后面 —— 必须选考纲页
+            return [
+                {"title": "Home", "url": "https://www.cambridgeinternational.org/", "snippet": ""},
+                {"title": "9709 syllabus",
+                 "url": ("https://www.cambridgeinternational.org/programmes-and-qualifications/"
+                         "cambridge-international-as-and-a-level-mathematics-9709/"), "snippet": ""},
+            ]
+
+        mat.web_search = fake_search
+        mat._page_text = lambda url: long_text
+        try:
+            sess.meta.pop("read_urls", None)
+            sess.meta.pop("syllabus_cache", None)
+            sess.lesson_folder = None
+            ctx4 = ToolContext(session=sess, call_id="t4", username="syl_test")
+            r4 = await get("research_syllabus").call(ctx4, {"topic": "9709"})
+            check("工具读到了正文", bool(r4.ok), (r4.summary or "")[:80])
+            check("首页与考纲页都能读时，选考纲页而不是首页",
+                  "/programmes-and-qualifications/" in str((r4.data or {}).get("url") or ""),
+                  str((r4.data or {}).get("url")))
+            check("记进 read_urls（备课才能标已查证）",
+                  "cambridgeinternational" in " ".join(sess.meta.get("read_urls") or []))
+            check("正文缓存进会话", bool((sess.meta.get("syllabus_cache") or {}).get("text")))
+            check("摘要告诉它接着调 prepare_course", "prepare_course" in (r4.summary or ""))
+
+            seen.clear()
+            ctx5 = ToolContext(session=sess, call_id="t5", username="syl_test")
+            r5 = await get("prepare_course").call(ctx5, {"topic": "CIE A Level Mathematics 9709"})
+            check("备课自动取用缓存正文（模型不用手抄）",
+                  str(seen.get("document_markdown") or "").startswith("# 9709 syllabus"),
+                  repr(seen.get("document_markdown"))[:60])
+            check("并标成「真的读过」", "真的读过" in (r5.summary or ""))
+
+            mat.web_search = lambda q, limit=8: []
+            ctx6 = ToolContext(session=sess, call_id="t6", username="syl_test")
+            r6 = await get("research_syllabus").call(ctx6, {"topic": "不存在的科目XYZ"})
+            check("找不到来源时明确失败并要它如实说",
+                  (not r6.ok) and ("没找到" in (r6.summary or "")), (r6.summary or "")[:70])
+
+            print("\n===== 7) 官方考纲是 PDF：要下载转 Markdown，二进制垃圾要拒收 =====")
+            real_dl, real_cv = mat.download_resource, mat.convert_document_to_markdown
+            page_fake = mat._page_text
+            markdown = "# 9709 syllabus\n" + ("Quadratics Coordinate geometry Circular measure " * 40)
+            mat.download_resource = lambda res, d, prefix="x": Path(str(d)) / "s.pdf"
+            mat.convert_document_to_markdown = lambda p: markdown
+            mat.web_search = lambda q, limit=8: [
+                {"title": "syllabus",
+                 "url": "https://www.cambridgeinternational.org/Images/697427-2026-2027-syllabus.pdf",
+                 "snippet": ""}]
+            try:
+                sess.meta.pop("read_urls", None)
+                sess.meta.pop("syllabus_cache", None)
+                ctx7 = ToolContext(session=sess, call_id="t7", username="syl_test")
+                r7 = await get("research_syllabus").call(ctx7, {"topic": "9709"})
+                cached = str((sess.meta.get("syllabus_cache") or {}).get("text") or "")
+                check("PDF 走「下载 + 转 Markdown」", bool(r7.ok) and "Quadratics" in cached,
+                      (r7.summary or "")[:70])
+                check("缓存里是 Markdown 而不是 %PDF 字节", "%PDF" not in cached)
+
+                # 二进制垃圾（PDF 字节被当 HTML 处理过）必须被拒收，不能当依据
+                mat._page_text = lambda url: "%PDF-1.7\n" + "xref 0000000016 00000 n " * 60
+                mat.web_search = lambda q, limit=8: [
+                    {"title": "junk", "url": "https://example.edu/junk", "snippet": ""}]
+                sess.meta.pop("syllabus_cache", None)
+                ctx8 = ToolContext(session=sess, call_id="t8", username="syl_test")
+                r8 = await get("research_syllabus").call(ctx8, {"topic": "随便一个主题"})
+                check("二进制垃圾被拒收（不许当依据）",
+                      (not r8.ok) and not (sess.meta.get("syllabus_cache") or {}).get("text"))
+            finally:
+                mat.download_resource, mat.convert_document_to_markdown = real_dl, real_cv
+                mat._page_text = page_fake
+        finally:
+            mat.web_search, mat._page_text = real_search, real_page
     finally:
         course_mod.storage, course_mod.prepare_lesson = real_storage, real_prepare
         for sid in ("syllabus_test", "syllabus_plain"):

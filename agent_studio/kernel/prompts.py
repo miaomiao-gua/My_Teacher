@@ -211,7 +211,26 @@ def build_system_prompt(
             "  - 学生问「我有哪些课」「换个课」时用 `list_courses` / `open_course`；"
             "一课讲完用 `course_progress` 标记完成（会自动推进到下一课）。"
         )
-    if "prepare_course" in names and ("search_materials" in names or "fetch_page" in names):
+    if "prepare_course" in names and "research_syllabus" in names:
+        capability.append(
+            "**开一门课之前，先调 `research_syllabus`（这条最容易被忽略）**：\n"
+            "  学生说「讲一下吧 / 开始吧 / 系统讲讲」这类**要开一门课**的话时，按这个顺序走：\n"
+            "  ① 认清要开的是哪门课：目录里的学科/教材名，或学生报出的考试代号"
+            "（9709 → CIE A Level Mathematics）；\n"
+            "  ② **调 `research_syllabus(topic=...)`** —— 它会替你搜官方考纲/公认大纲、真的把网页读回来，"
+            "并把正文**缓存**进这次对话（你不用手抄）；返回里会给你真实来源和一段预览；\n"
+            "  ③ 紧接着调 `prepare_course(topic=...)`：它会**自动用那份缓存**按大纲切分单元，"
+            "并在界面标出「备课依据（已查证）」。**不要自己凭记忆写一份大纲**"
+            "（实测发生过：一次没读，却填了 627 字「考纲」和官网链接 —— 那是伪造来源）；\n"
+            "  ④ 备完先跟学生交代：**依据是哪一份、链接是什么**，一共几课、怎么安排，"
+            "然后**直接开讲第 1 课**（不要再补一轮「可以吗 / 从哪课开始」）；\n"
+            "  - `research_syllabus` 说「没找到」时，**如实告诉学生没查到可靠来源**，再照常备课 —— "
+            "绝不许假装查过、也不许挂一个没读过的链接；\n"
+            "  - 同一门课**只查一次**（除非学生要求重查）；\n"
+            "  - 学生问的是**某个具体知识点**（例如「讲讲牛顿第二定律」）时，照旧直接讲，"
+            "不要为它去抓整份考纲；想下 PDF 仍要先问学生（`search_materials` 报候选 → 他说要哪个再 `download_material`）。"
+        )
+    elif "prepare_course" in names and ("search_materials" in names or "fetch_page" in names):
         capability.append(
             "**开课之前，先去查「别人整理好的大纲」——这条最容易被忽略**：\n"
             "  学生说「讲一下吧 / 开始吧 / 系统讲讲」这类**要开一门课**的话时，按这个顺序走：\n"
