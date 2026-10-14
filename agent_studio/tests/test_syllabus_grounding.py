@@ -235,6 +235,22 @@ async def main() -> int:
             finally:
                 mat.download_resource, mat.convert_document_to_markdown = real_dl, real_cv
                 mat._page_text = page_fake
+
+            print("\n===== 8) 模型只抄了片段时，以缓存里的完整正文为准 =====")
+            import time as _t
+
+            full = "# Python 教程\n" + ("基础语法 数据类型 流程控制 函数 模块 文件 异常 " * 200)   # 长正文
+            sess.meta["syllabus_cache"] = {"topic": "Python", "url": "https://docs.python.org/3/tutorial/",
+                                           "text": full, "ts": _t.time()}
+            sess.meta["read_urls"] = ["https://docs.python.org/3/tutorial/"]
+            sess.lesson_folder = None
+            seen.clear()
+            ctx9 = ToolContext(session=sess, call_id="t9", username="syl_test")
+            r9 = await get("prepare_course").call(ctx9, {"topic": "Python", "syllabus": full[:800]})
+            check("抄片段时改用缓存的完整正文（实测模型抄了 800 字站头导航）",
+                  str(seen.get("document_markdown") or "") == full.strip(),
+                  f"实际传给备课 {len(str(seen.get('document_markdown') or ''))} 字（缓存 {len(full.strip())} 字）")
+            check("来源仍标成本会话读过的那个", "真的读过" in (r9.summary or ""))
         finally:
             mat.web_search, mat._page_text = real_search, real_page
     finally:

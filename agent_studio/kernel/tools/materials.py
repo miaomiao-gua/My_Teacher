@@ -669,7 +669,8 @@ def _syllabus_queries(topic: str) -> List[str]:
         return [f"{t} syllabus official",
                 f"{code} syllabus specification",
                 f"{t} 考纲 官方 大纲"]
-    return [f"{t} official tutorial table of contents",
+    return [f"{t} official documentation tutorial",
+            f"{t} official tutorial table of contents",
             f"{t} 公认 课程大纲 教学顺序",
             f"{t} syllabus course outline"]
 
@@ -781,10 +782,13 @@ async def research_syllabus(ctx: ToolContext, args: Dict[str, Any]) -> ToolResul
     _rank, url, text, item = best
     remember_read(ctx, url)        # 记账：备课据此标「已查证」
     stored = _remember_syllabus(ctx, topic, url, text)
-    head = text[:800]
+    head = text[:150].replace("\n", " ")
     if stored:
-        tail = (f"（正文 {len(text)} 字已缓存，**调 `prepare_course(topic=\"{topic}\")` 时会自动用它**，"
-                f"你不用再抄一遍）\n开头预览：{head}\n")
+        # ★ 这里**故意不给预览正文**：早先给了 800 字预览，模型就把它抄进 `prepare_course` 的
+        #   `syllabus` 参数（实测「照你给的资料（800 字）」），而那 800 字往往是站点头部的导航 ——
+        #   等于课程照导航排的。只给一句"指纹"让它能向学生描述来源，正文走缓存。
+        tail = (f"（正文 {len(text)} 字已缓存，**调 `prepare_course(topic=\"{topic}\")` 时会自动用它 —— "
+                f"千万不要往 `syllabus` 里填任何东西**）\n开头一小段（仅供你向学生说明这份是什么）：{head}…\n")
     else:
         # 缓存失败就退回"手抄"，并把正文给足（否则备课会失去依据）
         tail = (f"（缓存失败，请把下面这段正文**整段**填进 `prepare_course` 的 `syllabus` 入参，"
