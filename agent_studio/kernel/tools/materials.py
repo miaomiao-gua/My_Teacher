@@ -497,6 +497,7 @@ async def download_material(ctx: ToolContext, args: Dict[str, Any]) -> ToolResul
 
     rel = str(path.relative_to(DATA_DIR)) if str(path).startswith(str(DATA_DIR)) else path.name
     size_txt = _human_size(path.stat().st_size) if path.exists() else _human_size(size)
+    remember_read(ctx, url)                # 下载也算「真的读过」（内容已经落盘）
     return ToolResult(
         summary=(
             f"下载完成：`{path.name}`（{size_txt}）已存到{where}{converted}。\n"
@@ -519,6 +520,27 @@ async def download_material(ctx: ToolContext, args: Dict[str, Any]) -> ToolResul
     {"type": "object", "properties": {"url": {"type": "string", "description": "网页地址"}}, "required": ["url"]},
     timeout=60,
 )
+def remember_read(ctx: ToolContext, url: str) -> None:
+    """记一笔「这个来源在本会话里**真的被读过**」。
+
+    为什么非记不可（2026-10-14 实测踩到的）：
+    `prepare_course` 的 `syllabus_source` 是模型**自己填的字符串**。实测那次它在
+    「数学 / 9709」目录里说「讲一下吧」，**一次 search_materials / fetch_page 都没调**，
+    却直接填了一份 627 字的"考纲"和 cambridgeinternational 的官网链接 ——
+    内容恰好是对的（P1 的 8 个单元确实是真实结构），所以从字面上根本看不出它是**凭记忆写的**。
+    有了这本账，备课就能如实标注"已查证 / 未经查证"，而不是替模型背书的谎。
+    """
+    try:
+        sess = ctx.session
+        urls = sess.meta.setdefault("read_urls", [])
+        if url and url not in urls:
+            urls.append(url)
+            del urls[:-20]                 # 只留最近 20 条，别把会话文件撑大
+        sess.save()
+    except Exception:
+        pass
+
+
 async def fetch_page(ctx: ToolContext, args: Dict[str, Any]) -> ToolResult:
     url = str(args.get("url") or "").strip()
     if not url:
@@ -538,6 +560,7 @@ async def fetch_page(ctx: ToolContext, args: Dict[str, Any]) -> ToolResult:
     if not text:
         return ToolResult.fail("这个页面没有可读文本（可能是纯图片或需要登录）。")
     snippet = text[:4000]
+    remember_read(ctx, url)                # 记进「本会话真的读过」的账（备课要拿它核对依据）
     return ToolResult(
         summary=f"页面正文（前 {len(snippet)} 字，已去标签）：\n{snippet}",
         data={"url": url, "chars": len(text)},

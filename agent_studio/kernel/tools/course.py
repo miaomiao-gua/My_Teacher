@@ -42,6 +42,36 @@ def _topic_brief(topic: str, level: str, focus: str) -> str:
     return brief
 
 
+def _norm_url(url: str) -> tuple:
+    """(域名, 路径) —— 去掉 www / 协议 / 末尾斜杠，方便比对"是不是同一个来源"。"""
+    import urllib.parse
+
+    try:
+        p = urllib.parse.urlparse(str(url or "").strip())
+        host = (p.netloc or "").lower().removeprefix("www.")
+        path = (p.path or "").rstrip("/")
+        return host, path
+    except Exception:
+        return "", ""
+
+
+def _source_verified(source: str, read_urls: List[str]) -> bool:
+    """这个来源是不是**本会话真的读过**（同域名，且路径有包含关系）。
+
+    只用来决定"能不能把它标成依据"，不做安全判断。
+    """
+    s_host, s_path = _norm_url(source)
+    if not s_host:
+        return False
+    for u in read_urls or []:
+        host, path = _norm_url(u)
+        if host != s_host:
+            continue
+        if not s_path or not path or s_path.startswith(path) or path.startswith(s_path):
+            return True
+    return False
+
+
 def _outline_summary(created: Dict[str, Any], plan: Dict[str, Any]) -> str:
     """给模型看的课程摘要（要短，但必须够它接着上课用）。"""
     lines = [
@@ -63,7 +93,8 @@ def _outline_summary(created: Dict[str, Any], plan: Dict[str, Any]) -> str:
     if created["unit_count"] > MAX_UNITS_IN_SUMMARY:
         lines.append(f"  …（还有 {created['unit_count'] - MAX_UNITS_IN_SUMMARY} 课，需要时说「讲第 N 课」）")
     lines.append(
-        "接下来：学生说「讲第 N 课」时，先调用 `lesson_context`(part=unit, unit_index=N) 取该课教案再讲；"
+        "接下来：**先把汇报说完，然后直接调用 `lesson_context`(part=unit, unit_index=1) 开讲第 1 课** —— "
+        "学生要的是「马上开始」，**不要再问「你想从哪一课开始」**（实测被这么反问了两次，学生很不满）。\n"
         "讲完用 `record_result` 记录学生答题对错；需要演示就用 graph_calculator / draw_board / render_ui。"
     )
     return "\n".join(lines)
@@ -73,13 +104,23 @@ def _outline_summary(created: Dict[str, Any], plan: Dict[str, Any]) -> str:
     "prepare_course",
     "给一个主题做**整门课**的备课：生成课程目标、单元大纲、每课的知识点/核心公式/易错对比/"
     "通关问题，并保存成一门课程（还会生成知识图谱）。需要 1~3 分钟。"
-    "学生第一次学某个主题、或说「帮我做一门课/系统讲讲 X」时用它——不要自己凭空编大纲。",
+    "学生第一次学某个主题、或说「帮我做一门课/系统讲讲 X」时用它——不要自己凭空编大纲。"
+    "**如果先去查到了官方考纲或公认课程大纲（search_materials + fetch_page 读到的正文），"
+    "把正文整段填进 `syllabus` 一起传进来，备课会照着它切分单元**；没查到就留空，不要自己编一份。",
     {
         "type": "object",
         "properties": {
             "topic": {"type": "string", "description": "课程主题，如「Python 列表与字典」「酸碱盐」「Alevel M1 力学」"},
             "level": {"type": "string", "description": "学生水平或年级（可选），如「初中」「大一无基础」"},
             "focus": {"type": "string", "description": "学生的具体诉求或侧重点（可选），如「只想学会做题」「偏实验现象」"},
+            "syllabus": {"type": "string", "description":
+                         "查到的**官方考纲/公认课程大纲的正文**（Markdown 原文，整段贴进来）。"
+                         "给了它，备课就**按这份资料切分单元**（内部走 lesson_prep 的 document_markdown）；"
+                         "没查到就留空 —— 不要自己编一份考纲"},
+            "syllabus_source": {"type": "string", "description":
+                                "上面那份大纲的来源（网址或名称，例如 "
+                                "https://www.cambridgeinternational.org/.../9709-syllabus）。"
+                                "会显示在界面的「备课依据」里"},
         },
         "required": ["topic"],
     },
@@ -92,12 +133,25 @@ async def prepare_course(ctx: ToolContext, args: Dict[str, Any]) -> ToolResult:
         return ToolResult.fail("请给出课程主题（topic），例如「酸碱盐」。")
     level = str(args.get("level") or "").strip()
     focus = str(args.get("focus") or "").strip()
+    # 学生查到的「别人整理好的大纲」正文 + 来源（给了就照它切单元，见 lesson_prep._build_outline_message）
+    syllabus = str(args.get("syllabus") or "").strip()
+    syllabus_source = str(args.get("syllabus_source") or "").strip()
+    # ★ 模型很可能凭记忆写一份"考纲"再挂个官网链接（实测发生过，见 materials.remember_read 的注释）。
+    #   这里拿「本会话真的读过哪些 URL」这本账核对一下，只标"已查证 / 未经查证"，不拦着备课。
+    read_urls = list((getattr(ctx.session, "meta", None) or {}).get("read_urls") or [])
+    source_verified = _source_verified(syllabus_source, read_urls) if syllabus_source else False
 
-    await ctx.push(_progress_notice("正在备课：生成课程目标与单元大纲…（约 1~3 分钟，请稍候）"))
+    notice = "正在备课：生成课程目标与单元大纲…（约 1~3 分钟，请稍候）"
+    if syllabus:
+        notice = (f"正在备课：照你给的资料（{len(syllabus)} 字"
+                  f"{'，来源 ' + syllabus_source if syllabus_source else ''}）"
+                  f"生成课程目标与单元大纲…（约 1~3 分钟）")
+    await ctx.push(_progress_notice(notice))
 
     cfg = load_app_config()
     try:
-        plan = await asyncio.to_thread(prepare_lesson, _topic_brief(topic, level, focus), cfg)
+        plan = await asyncio.to_thread(prepare_lesson, _topic_brief(topic, level, focus), cfg,
+                                       document_markdown=syllabus)
     except Exception as exc:  # noqa: BLE001
         return ToolResult.fail(
             f"备课失败：{type(exc).__name__}: {exc}。请检查模型链路（/agent/health），稍后可重试。"
@@ -130,7 +184,8 @@ async def prepare_course(ctx: ToolContext, args: Dict[str, Any]) -> ToolResult:
                 {"key": "单元数", "value": str(created["unit_count"])},
                 {"key": "课程目标", "value": plan.get("course_target") or "（未生成）"},
                 {"key": "知识图谱", "value": "已生成" if created["graph_ok"] else "未生成（不影响上课）"},
-            ]},
+            ] + ([{"key": "备课依据", "value": syllabus_source + ("（已查证：本会话读过）" if source_verified
+                                                       else "　⚠️ 未经查证：本会话没读过这个来源")}] if syllabus_source else [])},
             {"type": "steps", "current": 1, "steps": units_ui},
             {"type": "callout", "tone": "warning" if degraded else "success",
              "title": "⚠️ 这是降级生成的简版大纲" if degraded else "可以开始上课了",
@@ -140,12 +195,23 @@ async def prepare_course(ctx: ToolContext, args: Dict[str, Any]) -> ToolResult:
         ],
     }
     summary = _outline_summary(created, plan)
+    if syllabus_source and source_verified:
+        summary = (f"备课依据（本会话真的读过）：{syllabus_source}\n"
+                   f"（{len(syllabus)} 字正文已按它切分单元）\n" + summary)
+    elif syllabus_source:
+        summary = (f"⚠️ 备课依据**未经查证**：本会话没有读过 `{syllabus_source}`"
+                   f"（`read_urls` 里没有它）。这 {len(syllabus)} 字很可能是**模型凭记忆写的** ——"
+                   f"当参考可以，**不要当官方材料讲给学生**；要真材料就先 `search_materials` / `fetch_page` 读回来再备课。\n"
+                   + summary)
+    elif syllabus:
+        summary = f"（本次备课用了 {len(syllabus)} 字、未标明来源的资料）\n" + summary
     if degraded:
         summary = "⚠️ 本次是**降级模板**（模型未返回完整教案）：" + summary
     return ToolResult(
         summary=summary,
         ui=spec,
-        data={"folder": created["folder"], "unit_count": created["unit_count"], "degraded": degraded},
+        data={"folder": created["folder"], "unit_count": created["unit_count"], "degraded": degraded,
+              "syllabus_source": syllabus_source, "syllabus_chars": len(syllabus)},
         stage={"emotion": "joy"},
     )
 
