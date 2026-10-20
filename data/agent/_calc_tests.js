@@ -392,12 +392,15 @@ if (precSel) {
   precSel.onchange();
   const txt = String(viewInfo5.textContent);
   check('选「2 位小数」之后读数最多 2 位',
-    !/\.\d{3,}/.test(txt) && /-38\.26/.test(txt), txt);
+    !/\.\d{3,}/.test(txt), txt);
 }
 // spec 里直接指定精确度（模型可以这么发）
+// 注意：断言只看小数位数，**不要写死具体的视野数字** —— 取景规则是会变的（2026-10-20 改成
+// 「以请求窗口为准、最多放大 1.25 倍」，旧的 -38.255 就再也不该出现）。
 const box6 = UI.renderNode({ type: 'calculator', expressions: ['y=x^2'], xMin: -6.6666666, xMax: 6.6666666, decimals: 3 });
 const vi6 = findClass(box6, 'au-view-info')[0];
-check('spec 里的 decimals 生效（3 位）', /-38\.255/.test(String(vi6.textContent)), String(vi6.textContent));
+check('spec 里的 decimals 生效（3 位）', /\.\d{3}(?!\d)/.test(String(vi6.textContent)) &&
+  !/\.\d{4,}/.test(String(vi6.textContent)), String(vi6.textContent));
 
 console.log('\n--- 画质（采样密度） ---');
 function contourSegs(quality) {

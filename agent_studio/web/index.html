@@ -35,7 +35,7 @@
 
 <link rel="stylesheet" href="/static/css/pet.css?v=1">
 <script src="/static/js/pet_core.js?v=1"></script>
-<script src="/static/js/agent_ui.js?v=0.17.0"></script>
+<script src="/static/js/agent_ui.js?v=0.18.0"></script>
 <script>
   (function () {
     if (!window.AgentUI) {
@@ -50,9 +50,17 @@
     window.__app = app;
 
     // 兜底拦截：如果加载到的是旧版渲染器（浏览器缓存），直接告诉你，省得对着旧界面调试
-    if (AgentUI.version !== '0.17.0') {
+    // ★ 期望版本号**只写在一处**：从上面 <script> 的 ?v= 读出来。
+    //   以前这里硬编码 '0.17.0'，升渲染器版本时忘了改它 → 每次打开都弹「你加载的是旧版」，
+    //   而且这个 alert 是模态的，会把渲染进程整个卡住（连 CDP 探针都连不上，排查了很久）。
+    var EXPECTED = (function () {
+      var s = document.querySelector('script[src*="agent_ui.js"]');
+      var m = s && String(s.src).match(/[?&]v=([^&]+)/);
+      return m ? decodeURIComponent(m[1]) : '';
+    })();
+    if (EXPECTED && AgentUI.version !== EXPECTED) {
       setTimeout(function () {
-        alert('这个页面加载的是【旧版渲染器 v' + AgentUI.version + '】，最新是 v0.17.0。\n' +
+        alert('这个页面加载的是【旧版渲染器 v' + AgentUI.version + '】，最新是 v' + EXPECTED + '。\n' +
               '所以界面看起来还是老样子。\n\n请按 Ctrl + F5 强制刷新一次即可（只需一次）。');
       }, 300);
     }

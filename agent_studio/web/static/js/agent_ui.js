@@ -18,7 +18,7 @@
 (function () {
   'use strict';
 
-  const AgentUI = { version: '0.17.0' };
+  const AgentUI = { version: '0.18.0' };
   const HTML_NS = 'http://www.w3.org/1999/xhtml';
 
   /* ==========================================================================
@@ -870,19 +870,38 @@
 
     // 刻度数字：只在轴附近标，避免刷屏
     const dec = (opts && opts.decimals != null) ? opts.decimals : null;   // 精确度（小数位）
-    ctx.fillStyle = 'rgba(0,0,0,.5)';
     ctx.font = '11px "Segoe UI",system-ui,sans-serif';
+    // 数字后面垫一层浅色描边：否则轴线正好从字里穿过去（实测截图里 -10/-5/5/10 糊成一片）
+    const writeTick = function (text, px, py, align, baseline) {
+      ctx.textAlign = align; ctx.textBaseline = baseline;
+      ctx.lineWidth = 3.2;
+      ctx.strokeStyle = 'rgba(255,255,255,.88)';
+      ctx.strokeText(text, px, py);
+      ctx.fillStyle = 'rgba(0,0,0,.58)';
+      ctx.fillText(text, px, py);
+    };
+    // 刻度太密时隔一个标（像素间距 < 46px 就开始隔），不然数字会挤成一团
+    const pxPerStepX = Math.abs(map.x2p(step) - map.x2p(0)) || 1;
+    const pxPerStepY = Math.abs(map.y2p(step) - map.y2p(0)) || 1;
+    const skipX = pxPerStepX < 46 ? Math.ceil(46 / pxPerStepX) : 1;
+    const skipY = pxPerStepY < 34 ? Math.ceil(34 / pxPerStepY) : 1;
     const axisY = (yr[0] <= 0 && yr[1] >= 0) ? Math.min(h - pad.b - 4, Math.max(pad.t + 12, map.y2p(0) + 13)) : h - pad.b + 13;
-    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-    for (let x = x0; x <= xr[1] + 1e-9; x += step) {
-      if (Math.abs(x) < 1e-9 && yr[0] <= 0 && yr[1] >= 0) continue;
-      ctx.fillText(fmtTick(x, dec), map.x2p(x), axisY);
+    let kx = 0;
+    for (let x = x0; x <= xr[1] + 1e-9; x += step, kx++) {
+      if (Math.abs(x) < 1e-9 && yr[0] <= 0 && yr[1] >= 0) continue;     // 0 单独标在原点
+      if (kx % skipX !== 0) continue;
+      writeTick(fmtTick(x, dec), map.x2p(x), axisY, 'center', 'top');
     }
     const axisX = (xr[0] <= 0 && xr[1] >= 0) ? Math.max(pad.l + 4, Math.min(w - pad.r - 18, map.x2p(0) - 6)) : pad.l - 6;
-    ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-    for (let y = y0; y <= yr[1] + 1e-9; y += step) {
+    let ky = 0;
+    for (let y = y0; y <= yr[1] + 1e-9; y += step, ky++) {
       if (Math.abs(y) < 1e-9) continue;
-      ctx.fillText(fmtTick(y, dec), axisX, map.y2p(y));
+      if (ky % skipY !== 0) continue;
+      writeTick(fmtTick(y, dec), axisX, map.y2p(y), 'right', 'middle');
+    }
+    // 原点标一个 0（两条轴都在视野里时才有意义）
+    if (xr[0] <= 0 && xr[1] >= 0 && yr[0] <= 0 && yr[1] >= 0) {
+      writeTick('0', map.x2p(0) - 7, map.y2p(0) + 3, 'right', 'middle');
     }
     ctx.restore();
   }
@@ -1016,7 +1035,7 @@
   function shadeGrid(ctx, map, grid, test, color) {
     const g = grid.g, cols = grid.cols, rows = grid.rows, dx = grid.dx, dy = grid.dy;
     ctx.save();
-    ctx.globalAlpha = 0.17;
+    ctx.globalAlpha = 0.13;      // 太实会把别的曲线压住（实测：圆被绿块盖住）
     ctx.fillStyle = color;
     for (let j = 0; j < rows; j++) {
       let run = -1;
@@ -1040,7 +1059,7 @@
     const top0 = map.pad.t, bot0 = map.pad.t + map.availH;
     const e = Object.assign({}, env);
     ctx.save();
-    ctx.globalAlpha = 0.17;
+    ctx.globalAlpha = 0.13;      // 太实会把别的曲线压住（实测：圆被绿块盖住）
     ctx.fillStyle = color;
     for (let i = 0; i < N; i++) {
       const px = map.pad.l + i * wpx;
@@ -1889,6 +1908,8 @@
       ? [Number(n.yMin), Number(n.yMax)] : null;
     let showGrid = n.grid !== false;
     let equalAspect = n.equalAspect !== false;     // 默认等比：圆才是圆
+    let showMarks = n.marks !== false;             // 教学标注（根/顶点/交点）：默认开，可关
+    let fsBackup = null;                           // 全屏前记住原来的画布高度
     // ---- 精确度（小数位）与画质（采样密度）：学生随时能调，改过就记住 ----
     const PREC_OPTS = [
       { label: '自动', value: '' },
@@ -1946,6 +1967,9 @@
     const btnFormula = el('button', 'au-btn au-btn-mini', '＋ 公式');
     const btnText = el('button', 'au-btn au-btn-mini', '＋ 文字');
     const btnPoint = el('button', 'au-btn au-btn-mini', '＋ 点');
+    const btnMarks = el('button', 'au-btn au-btn-mini', '标注');
+    const btnFull = el('button', 'au-btn au-btn-mini', '全屏');
+    const btnExport = el('button', 'au-btn au-btn-mini', '导出');
     btnIn.onclick = function () { zoom(0.75); };
     btnOut.onclick = function () { zoom(1 / 0.75); };
     btnReset.onclick = function () { frame = null; draw(); };
@@ -1962,11 +1986,29 @@
     btnFormula.onclick = function () { addAndEdit(''); };
     btnText.onclick = function () { addAndEdit('"在这里写字"'); };
     btnPoint.onclick = function () { addAndEdit('(0, 0)'); };
+    btnMarks.onclick = function () {
+      showMarks = !showMarks;
+      btnMarks.classList.toggle('au-on', showMarks);
+      draw();
+    };
+    btnFull.onclick = function () { toggleFull(); };
+    btnExport.onclick = function () {
+      // 导出当前视图为 PNG（直接用画布像素，所见即所得；标注也在画布上，会一起导出）
+      try {
+        const a = document.createElement('a');
+        a.href = canvas.toDataURL('image/png');
+        a.download = 'graph-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.png';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      } catch (e) { /* 导不出来就算了，别把界面搞崩 */ }
+    };
+    btnMarks.classList.toggle('au-on', showMarks);
     btnGrid.classList.toggle('au-on', showGrid);
     btnEqual.classList.toggle('au-on', equalAspect);
     [btnFormula, btnText, btnPoint].forEach(function (b) { addBar.appendChild(b); });
     const tools = el('div', 'au-plot-tools');
-    [btnIn, btnOut, btnReset, btnGrid, btnEqual].forEach(function (b) { tools.appendChild(b); });
+    [btnIn, btnOut, btnReset, btnGrid, btnEqual, btnMarks, btnFull, btnExport].forEach(function (b) { tools.appendChild(b); });
 
     // 精确度：坐标刻度与鼠标读数保留几位小数（默认「自动」，最多 6 位）
     const precWrap = el('span', 'au-calc-prec');
@@ -2136,14 +2178,34 @@
       });
       if (!isFinite(lo) || !isFinite(hi)) { lo = -(wantX[1] - wantX[0]) * k / 2; hi = -lo; }
       if (hi - lo < 1e-6) { lo -= 1; hi += 1; }
-      const yMid = (lo + hi) / 2;
-      let xSpan = wantX[1] - wantX[0];
-      const need = (hi - lo) * 1.16;
-      if (need > xSpan * k) xSpan = need / k;
-      const ySpan = xSpan * k;
-      return { xr: [xMid - xSpan / 2, xMid + xSpan / 2], yr: [yMid - ySpan / 2, yMid + ySpan / 2] };
+      // ★ 取景规则（实测踩过）：以前为了让数据全进画面，会按数据的 y 跨度无限横向放大 ——
+      //   y=x^2-2x-3 于是被拉到 x∈[-50,50]，抛物线压成一条细线，根/顶点/交点全挤在原点。
+      //   现在改成：**以学生要的 x 窗口为准**（默认 ±10），y 以 0 为中心；
+      //   只有数据整个跑出视野时才平移过去；放大上限 1.25 倍，超出的部分宁可切掉。
+      const halfY = (wantX[1] - wantX[0]) * k / 2;        // 请求窗口对应的 y 半高
+      let yc = 0;
+      if (hi < -halfY * 0.9 || lo > halfY * 0.9) yc = (lo + hi) / 2;   // 数据完全在视野外 → 平移
+      const needHalf = Math.max(Math.abs(hi - yc), Math.abs(lo - yc)) * 1.1;
+      const yHalf = Math.min(halfY * 1.25, Math.max(halfY, needHalf));
+      const xSpan = 2 * yHalf / k;
+      return { xr: [xMid - xSpan / 2, xMid + xSpan / 2], yr: [yc - yHalf, yc + yHalf] };
     }
 
+    /** 第一遍：只铺填色。
+        为什么要分两遍（实测）：一条不等式铺满右下角时，会把**别的行**已经画好的曲线盖住 ——
+        圆被绿色蒙住就是这么来的。现在填色全画完，再统一画曲线/点/文字。 */
+    function drawRowFill(ctx, map, row, env) {
+      if (!row || row.hidden) return;
+      const color = row.color || CALC_COLORS[0];
+      const q = qNow();
+      if (row.kind === 'ineqY') {
+        shadeUnderCurve(ctx, map, row.c, env, color, row.op === '>' || row.op === '>=');
+      } else if (row.kind === 'ineqXY') {
+        shadeGrid(ctx, map, valueGrid(map, row.c, env, q.step), cmpOf(row.op), color);
+      }
+    }
+
+    /** 第二遍：曲线 / 点 / 文字（不再铺填色） */
     function drawRow(ctx, map, view, row, env) {
       if (!row || row.hidden) return;
       const color = row.color || CALC_COLORS[0];
@@ -2155,12 +2217,9 @@
       } else if (row.kind === 'implicit') {
         strokeContour(ctx, map, valueGrid(map, row.c, env, q.step), color, 2.2);
       } else if (row.kind === 'ineqY') {
-        shadeUnderCurve(ctx, map, row.c, env, color, row.op === '>' || row.op === '>=');
         drawOneCurve(ctx, map, row.c, env, color, 2, q.density);
       } else if (row.kind === 'ineqXY') {
-        const grid = valueGrid(map, row.c, env, q.step);
-        shadeGrid(ctx, map, grid, cmpOf(row.op), color);
-        strokeContour(ctx, map, grid, color, 2);
+        strokeContour(ctx, map, valueGrid(map, row.c, env, q.step), color, 2);
       } else if (row.kind === 'point') {
         let x = NaN, y = NaN;
         try { x = row.x.eval(env); y = row.y.eval(env); } catch (e) { /* 参数没定义 */ }
@@ -2232,6 +2291,167 @@
       coordEl.textContent = '(x, y) = (' + fmtNum(hx, decimals) + ', ' + fmtNum(hy, decimals) + ')' + (pick ? '　← 在曲线上' : '');
     }
 
+    /* ======================================================================
+     * 教学标注：把「根 / 顶点 / 交点」直接标在图上
+     * ----------------------------------------------------------------------
+     * 以前这些只能靠老师嘴上说「这里和 x 轴交于 2 和 3」；学生看图看不到。
+     * 现在显函数自动标根与极值点，两条曲线自动标交点，坐标按当前精确度显示。
+     * 性能：采样数在拖动时降到 1/3（interacting），停手后恢复；标注算不出来就不画。
+     * ==================================================================== */
+    function evalAt(row, env, x) {
+      const e = Object.assign({}, env);
+      e.x = x;
+      try {
+        const y = row.c.eval(e);
+        return typeof y === 'number' && isFinite(y) ? y : NaN;
+      } catch (err) { return NaN; }
+    }
+
+    function bisectZero(f, a, b, fa, fb) {
+      let lo = a, hi = b, flo = fa;
+      for (let i = 0; i < 36; i++) {
+        const mid = (lo + hi) / 2, fm = f(mid);
+        if (!isFinite(fm)) break;
+        if (fm === 0) return mid;
+        if ((flo < 0) === (fm < 0)) { lo = mid; flo = fm; } else { hi = mid; }
+      }
+      return (lo + hi) / 2;
+    }
+
+    function computeMarks(map, env) {
+      const out = [];
+      const pick = rows.filter(function (r) { return r && !r.hidden && r.kind === 'explicit' && r.c; });
+      if (!pick.length) return out;
+      const N = interacting ? 120 : 420;
+      const x0 = map.xr[0], x1 = map.xr[1];
+      const add = function (x, y, label, color) {
+        if (!isFinite(x) || !isFinite(y)) return;
+        if (x < map.xr[0] - 1e-9 || x > map.xr[1] + 1e-9) return;
+        if (y < map.yr[0] - 1e-9 || y > map.yr[1] + 1e-9) return;
+        for (let i = 0; i < out.length; i++) {
+          if (Math.abs(out[i].x - x) < 1e-6 && Math.abs(out[i].y - y) < 1e-6) return;
+        }
+        out.push({ x: x, y: y, label: label, color: color });
+      };
+
+      // 1) 根：相邻采样变号 → 二分求准
+      pick.forEach(function (row) {
+        let px = null, py = NaN;
+        for (let i = 0; i <= N; i++) {
+          const x = x0 + (x1 - x0) * (i + 0.5) / N, y = evalAt(row, env, x);
+          // ★ 采样点**正好落在 0 上**要单独认（y=x^2-2x-3 的根 x=3 就可能被采到），
+          //   否则「两端都不为 0 才算变号」会把它漏掉 —— 实测右根就是这么丢的。
+          if (isFinite(y) && y === 0) add(x, 0, '根', row.color);
+          if (px != null && isFinite(py) && isFinite(y) && py !== 0 && y !== 0 && (py < 0) !== (y < 0)) {
+            const r = bisectZero(function (t) { return evalAt(row, env, t); }, px, x, py, y);
+            add(r, 0, '根', row.color);
+          }
+          px = x; py = y;
+        }
+      });
+
+      // 2) 顶点（局部极值）：二阶差分变号 → 三分法细化
+      pick.forEach(function (row) {
+        let a = null, b = null;
+        for (let i = 0; i <= N; i++) {
+          const x = x0 + (x1 - x0) * (i + 0.5) / N, y = evalAt(row, env, x);
+          if (a && b && isFinite(y)) {
+            const d1 = b.y - a.y, d2 = y - b.y;
+            if (d1 * d2 < 0) {
+              const isMin = d1 < 0;
+              let lo = a.x, hi = x;
+              for (let k = 0; k < 40; k++) {
+                const m1 = lo + (hi - lo) / 3, m2 = hi - (hi - lo) / 3;
+                const f1 = evalAt(row, env, m1), f2 = evalAt(row, env, m2);
+                if (!isFinite(f1) || !isFinite(f2)) break;
+                if (isMin ? f1 < f2 : f1 > f2) hi = m2; else lo = m1;
+              }
+              const vx = (lo + hi) / 2;
+              add(vx, evalAt(row, env, vx), '顶点', row.color);
+            }
+          }
+          a = b; b = { x: x, y: y };
+        }
+      });
+
+      // 3) 两条曲线的交点
+      for (let i = 0; i < pick.length; i++) {
+        for (let j = i + 1; j < pick.length; j++) {
+          let px = null, py = NaN;
+          for (let k = 0; k <= N; k++) {
+            const x = x0 + (x1 - x0) * (k + 0.5) / N;
+            const d = evalAt(pick[i], env, x) - evalAt(pick[j], env, x);
+            if (isFinite(d) && d === 0) add(x, evalAt(pick[i], env, x), '交点', pick[i].color);
+            if (px != null && isFinite(py) && isFinite(d) && py !== 0 && d !== 0 && (py < 0) !== (d < 0)) {
+              const r = bisectZero(function (t) {
+                return evalAt(pick[i], env, t) - evalAt(pick[j], env, t);
+              }, px, x, py, d);
+              add(r, evalAt(pick[i], env, r), '交点', pick[i].color);
+            }
+            px = x; py = d;
+          }
+        }
+      }
+      return out;
+    }
+
+    function drawMarks(ctx, map, marks) {
+      if (!marks || !marks.length) return;
+      ctx.save();
+      ctx.font = '11.5px "Segoe UI",system-ui,sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
+      const roomR = map.pad.l + map.availW, roomB = map.pad.t + map.availH;
+      const boxes = [];          // 已占用的文字矩形，用来找空位
+      const overlaps = function (x, y, w, h) {
+        for (let i = 0; i < boxes.length; i++) {
+          const b = boxes[i];
+          if (x < b[0] + b[2] && x + w > b[0] && y < b[1] + b[3] && y + h > b[1]) return true;
+        }
+        return false;
+      };
+      marks.forEach(function (m) {
+        const px = map.x2p(m.x), py = map.y2p(m.y);
+        if (px < map.pad.l - 2 || px > roomR + 2 || py < map.pad.t - 2 || py > roomB + 2) return;
+        // 点**永远画**（以前按位置去重会把挨得近的第二个根整条丢掉）
+        ctx.beginPath();
+        ctx.arc(px, py, 3.1, 0, Math.PI * 2);
+        ctx.fillStyle = '#fff';
+        ctx.fill();
+        ctx.lineWidth = 1.7;
+        ctx.strokeStyle = m.color || '#0067c0';
+        ctx.stroke();
+
+        const txt = m.label + ' (' + fmtTick(m.x, decimals) + ', ' + fmtTick(m.y, decimals) + ')';
+        const tw = ctx.measureText(txt).width, th = 13;
+        // 四个候选方位：右上 / 左上 / 右下 / 左下，选第一个不压别人、也不出框的
+        const cand = [[px + 7, py - 7], [px - 7 - tw, py - 7], [px + 7, py + 16], [px - 7 - tw, py + 16]];
+        let pos = null;
+        for (let c = 0; c < cand.length; c++) {
+          const x = cand[c][0], y = cand[c][1];
+          if (x < map.pad.l + 2 || x + tw > roomR - 2) continue;
+          if (y - th < map.pad.t + 2 || y > roomB + 2) continue;
+          if (!overlaps(x, y - th, tw, th)) { pos = [x, y]; break; }
+        }
+        if (!pos) return;                    // 实在放不下：保留点，省掉文字
+        boxes.push([pos[0], pos[1] - th, tw, th]);
+        ctx.lineWidth = 3.4;
+        ctx.strokeStyle = 'rgba(255,255,255,.92)';
+        ctx.strokeText(txt, pos[0], pos[1]);
+        ctx.fillStyle = 'rgba(0,0,0,.74)';
+        ctx.fillText(txt, pos[0], pos[1]);
+      });
+      ctx.restore();
+    }
+
+    /* 高频重绘合并：拖动/滚轮每来一个事件就重画一次会掉帧（一帧内来 3 个事件就画 3 遍）。
+       改成「一帧最多画一次」—— 手感更顺，CPU 也省。 */
+    let rafId = 0;
+    function requestDraw() {
+      if (rafId) return;
+      rafId = requestAnimationFrame(function () { rafId = 0; draw(); });
+    }
+
     function draw() {
       const height = canvas.dataset.height ? +canvas.dataset.height : H0;
       const view = setupCanvas(canvas, height);
@@ -2249,8 +2469,14 @@
       ctx.rect(map.pad.l, map.pad.t, map.availW, map.availH);
       ctx.clip();
       rows.forEach(function (row) {
+        try { drawRowFill(ctx, map, row, env); } catch (e) { /* 填色出错不该拖垮整张图 */ }
+      });
+      rows.forEach(function (row) {
         try { drawRow(ctx, map, view, row, env); } catch (e) { /* 一行画不出来不该拖垮整张图 */ }
       });
+      if (showMarks) {
+        try { drawMarks(ctx, map, computeMarks(map, env)); } catch (e) { /* 标注算不出来不该挡住图 */ }
+      }
       ctx.restore();
       viewInfo.textContent = 'x ∈ [' + fmtTick(map.xr[0], decimals) + ', ' + fmtTick(map.xr[1], decimals) +
         ']　y ∈ [' + fmtTick(map.yr[0], decimals) + ', ' + fmtTick(map.yr[1], decimals) + ']';
@@ -2266,6 +2492,53 @@
       frame = { xr: [cx - sx, cx + sx], yr: [cy - sy, cy + sy] };
       draw();
     }
+
+    function panBy(dxu, dyu) {
+      if (!frame) return;
+      frame = {
+        xr: [frame.xr[0] + dxu, frame.xr[1] + dxu],
+        yr: [frame.yr[0] + dyu, frame.yr[1] + dyu],
+      };
+      draw();
+    }
+
+    /** 全屏：整个计算器铺满屏幕（Esc、「还原」都能退出）。窄栏里画图太憋屈时用 */
+    function toggleFull(force) {
+      const on = typeof force === 'boolean' ? force : !box.classList.contains('au-calc-full');
+      box.classList.toggle('au-calc-full', on);
+      btnFull.textContent = on ? '还原' : '全屏';
+      if (on) {
+        fsBackup = canvas.dataset.height || '';
+        canvas.dataset.height = String(Math.max(320, window.innerHeight - 250));
+      } else {
+        canvas.dataset.height = fsBackup || String(H0);
+        fsBackup = null;
+      }
+      try { syncLayout(); } catch (e) { /* 老浏览器没有也行 */ }
+      draw();
+      if (on) { try { canvas.focus(); } catch (e) {} }
+    }
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape' && box.isConnected && box.classList.contains('au-calc-full')) toggleFull(false);
+    });
+
+    // 双击复位视野：学生的第一反应是双击，而不是去找「重置视野」按钮
+    canvas.addEventListener('dblclick', function () { frame = null; draw(); });
+
+    // 方向键平移（画布可聚焦；只有焦点在画布上才响应，不抢页面的方向键）
+    canvas.tabIndex = 0;
+    canvas.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape') { toggleFull(false); return; }
+      if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].indexOf(ev.key) < 0) return;
+      if (!frame) return;
+      ev.preventDefault();
+      beginInteract();
+      const sx = (frame.xr[1] - frame.xr[0]) * 0.08;
+      const sy = (frame.yr[1] - frame.yr[0]) * 0.08;
+      panBy(ev.key === 'ArrowLeft' ? -sx : ev.key === 'ArrowRight' ? sx : 0,
+            ev.key === 'ArrowUp' ? sy : ev.key === 'ArrowDown' ? -sy : 0);
+      endInteract();
+    });
 
     /* ---------- 鼠标：悬停读数 / 点击加点 / 拖动平移 / 滚轮缩放 ---------- */
     canvas.addEventListener('mousemove', function (e) {
@@ -2304,7 +2577,7 @@
         xr: [drag.frame.xr[0] - dxu, drag.frame.xr[1] - dxu],
         yr: [drag.frame.yr[0] + dyu, drag.frame.yr[1] + dyu],
       };
-      draw();
+      requestDraw();          // 拖动是高频事件：一帧最多画一次
     });
     window.addEventListener('mouseup', function () {
       if (!drag) return;
@@ -2336,7 +2609,7 @@
         xr: [mx + (frame.xr[0] - mx) * f, mx + (frame.xr[1] - mx) * f],
         yr: [my + (frame.yr[0] - my) * f, my + (frame.yr[1] - my) * f],
       };
-      draw();
+      requestDraw();          // 滚轮也是高频：一帧最多一次
     }, { passive: false });
 
     buildList();
@@ -4031,6 +4304,19 @@
   .au-plot-tools{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
   /* ---------- 图形计算器（calculator）---------- */
   .au-calc-panel{flex:0 0 272px}
+  /* 全屏（窄栏里画图太憋屈时用；Esc 或「还原」退出） */
+  .au-calc.au-calc-full{position:fixed;inset:0;z-index:9999;background:var(--au-bg,#f7f7f7);
+    padding:12px 14px;border-radius:0;display:flex;flex-direction:row;gap:10px;box-shadow:none}
+  .au-calc-full .au-calc-panel{flex:0 0 300px;max-height:none;overflow:auto}
+  .au-calc-full .au-calc-list{max-height:46vh}
+  .au-calc-full .au-calc-wrap{flex:1 1 auto;min-width:0;min-height:0;display:flex;
+    align-items:stretch;justify-content:center}
+  .au-calc-full .au-canvas{max-width:100%}
+  .au-calc-full .au-calc-wrap .au-canvas{border:0;border-radius:0}   /* 全屏时别再套一圈边框 */
+  /* 画布可聚焦（要接方向键），但**别用浏览器默认的黑框** —— 全屏时那圈黑边就是这么来的。
+     鼠标点进来不显示；键盘 Tab 进来才显示一圈细的强调色。 */
+  .au-calc .au-canvas:focus{outline:none}
+  .au-calc .au-canvas:focus-visible{outline:2px solid var(--au-accent,#0067c0);outline-offset:2px}
   .au-calc-list{display:flex;flex-direction:column;gap:6px;overflow:auto;max-height:300px;padding-right:2px}
   .au-calc-row{display:grid;grid-template-columns:14px minmax(0,1fr) auto auto;gap:5px;align-items:center;
     border:1px solid var(--au-line);border-radius:6px;padding:4px 6px;background:var(--au-panel)}
