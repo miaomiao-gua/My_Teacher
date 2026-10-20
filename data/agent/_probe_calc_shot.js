@@ -75,7 +75,26 @@ async function main() {
   await ev(`(() => { document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); })()`);
   await sleep(700);
   const back = await ev(`(() => document.querySelector('.au-calc').classList.contains('au-calc-full'))()`);
-  console.log(JSON.stringify({ info, full, backToNormal: !back, consoleErrors: logs.slice(0,5) }, null, 1));
+
+  // 交互验收：放大 / 双击复位 / 方向键平移（这三条以前只写了没验）
+  const viewOf = () => ev(`document.querySelector('.au-calc .au-view-info').textContent`);
+  const v0 = await viewOf();
+  await ev(`(() => { const b=[...document.querySelectorAll('.au-calc .au-plot-tools button')].find(x=>x.textContent.trim()==='放大'); if (b) b.click(); })()`);
+  await sleep(500);
+  const vZoom = await viewOf();
+  await ev(`(() => { const cv=document.querySelector('.au-calc .au-canvas'); cv.dispatchEvent(new MouseEvent('dblclick',{bubbles:true})); })()`);
+  await sleep(600);
+  const vDbl = await viewOf();
+  await ev(`(() => { const cv=document.querySelector('.au-calc .au-canvas'); cv.focus(); cv.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true})); })()`);
+  await sleep(600);
+  const vKey = await viewOf();
+  const interactions = {
+    zoomChanged: vZoom !== v0,
+    dblclickReset: vDbl === v0,
+    arrowPanChanged: vKey !== vDbl,
+    v0: v0, vZoom: vZoom, vDbl: vDbl, vKey: vKey,
+  };
+  console.log(JSON.stringify({ info, full, backToNormal: !back, interactions, consoleErrors: logs.slice(0, 5) }, null, 1));
   ws.close();
 }
 main().catch(e => { console.error('失败：' + e.message); process.exit(1); });
