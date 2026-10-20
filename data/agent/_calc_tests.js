@@ -175,6 +175,18 @@ const cases = [
   ['', 'empty', '空行'],
   ['import os', 'error', '非数学内容必须报错'],
   ['y=', 'error', '缺右边'],
+  // —— 课本/聊天里的常见写法（2026-10-20 学生实测：x² 直接报「不认识的字符」）——
+  ['y=x²', 'explicit', '上标 ² 自动转 ^2'],
+  ['y=x³-3x', 'explicit', '上标 ³'],
+  ['y=2x²+3x-1', 'explicit', '系数+上标混写'],
+  ['y=sin²(x)', 'explicit', '函数带指数 sin²(x)'],
+  ['y=sin(30°)', 'explicit', '度数 30° 自动转弧度'],
+  ['y=sin(πx)', 'explicit', 'π 与隐式乘号'],
+  ['y=√x', 'explicit', '根号 √x'],
+  ['y=x×2', 'explicit', '乘号 ×'],
+  ['y=（x+1）/2', 'explicit', '全角括号'],
+  ['y=|x|', 'explicit', '绝对值'],
+  ['y=sin x', 'error', '函数没带括号必须报错（不能静默当参数画错）'],
 ];
 cases.forEach(function (c) {
   const got = kindOf(c[0]);

@@ -250,12 +250,78 @@
   };
   const CONSTS = { pi: Math.PI, e: Math.E, tau: Math.PI * 2 };
 
+  /* ========================================================================
+   * 输入规整：把「课本 / 聊天正文里常见的数学写法」翻成解析器认的 ASCII
+   * ------------------------------------------------------------------------
+   * 实测（2026-10-20）：学生抄一句 `y=x²` 进来，界面直接报「不认识的字符：²」；
+   * `x³`、`sin²(x)`、`sin(30°)`、`sin(πx)`、`√x`、`x×2`、全角 `（）` 全部画不出来 ——
+   * 而这些正是课本、聊天、Word 里的标准写法。所以**先规整再解析**，
+   * 但**界面上显示的原样保留**（学生敲进去什么就是什么，不偷偷改他的公式）。
+   * ====================================================================== */
+  const SUP_DIGITS = { '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4',
+                       '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9' };
+
+  function supToDigits(seq) {
+    return seq.split('').map(function (c) { return SUP_DIGITS[c] != null ? SUP_DIGITS[c] : c; }).join('');
+  }
+
+  /** sin²(x) / cos³(2x) → sin(x)^2 / cos(2x)^3（要配平括号，所以不能用一个正则搞定） */
+  function fixFnSuperscripts(s) {
+    const RE = /([A-Za-z_][A-Za-z_0-9]*)\s*([⁰¹²³⁴⁵⁶⁷⁸⁹]+)\s*\(/g;
+    let out = '', last = 0, m;
+    while ((m = RE.exec(s))) {
+      const open = m.index + m[0].length - 1;            // 指向那个 '('
+      let depth = 0, i = open;
+      for (; i < s.length; i++) {
+        if (s[i] === '(') depth++;
+        else if (s[i] === ')') { depth--; if (depth === 0) break; }
+      }
+      if (i >= s.length) break;                          // 括号不配对：交给解析器去报错
+      out += s.slice(last, m.index) + m[1] + '(' + s.slice(open + 1, i) + ')^' + supToDigits(m[2]);
+      last = i + 1;
+      RE.lastIndex = last;
+    }
+    return out + s.slice(last);
+  }
+
+  function normalizeMathText(src) {
+    let s = String(src == null ? '' : src);
+    // 1) 全角 → 半角（（），＝＋－＊／ 以及全角数字/字母）
+    s = s.replace(/[\uFF01-\uFF5E]/g, function (ch) {
+      return String.fromCharCode(ch.charCodeAt(0) - 0xFEE0);
+    });
+    s = s.replace(/[\u3000\u00A0]/g, ' ');
+    // 2) 排印符号 → 运算符号
+    s = s.replace(/[−–—‒]/g, '-').replace(/[×·⋅∗]/g, '*').replace(/[÷∕]/g, '/');
+    s = s.replace(/≤/g, '<=').replace(/≥/g, '>=').replace(/≠/g, '!=');
+    // 3) 根号：√x / √(x+1) / 3√x
+    s = s.replace(/√\s*(\([^()]*\)|[A-Za-z_][A-Za-z_0-9.]*|[0-9.]+)/g, 'sqrt($1)');
+    s = s.replace(/∛\s*(\([^()]*\)|[A-Za-z_][A-Za-z_0-9.]*|[0-9.]+)/g, 'cbrt($1)');
+    // 4) 度数：30° / sin(30°) → 换成弧度（解析器只认弧度）
+    s = s.replace(/([0-9]+(?:\.[0-9]+)?)\s*°/g, '($1*pi/180)');
+    s = s.replace(/°/g, '');
+    // 5) π → pi，并补上隐式乘号（πx 不能粘成 pix）
+    s = s.replace(/π/g, 'pi').replace(/τ/g, 'tau');
+    s = s.replace(/(pi|tau)(?=[A-Za-z0-9_])/g, '$1*');
+    // 6) Python 风格的幂、绝对值
+    s = s.replace(/\*\*/g, '^');
+    s = s.replace(/\|([^|]+)\|/g, 'abs($1)');
+    // 7) 函数带指数、剩下的上标
+    s = fixFnSuperscripts(s);
+    s = s.replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹]+/g, function (m) { return '^' + supToDigits(m); });
+    return s;
+  }
+
   function tokenizeExpr(src) {
-    const s = String(src).replace(/\s+/g, '');
+    // ★ 不能先 `.replace(/\s+/g,'')`：那会把 `sin x` 粘成 `sinx`，
+    //   于是它被当成一个参数（滑块叫 sinx），画出静默错误的结果。
+    //   现在逐个跳过空白，`sin x` 会拆成两个标识符 → 下面会被判成「函数要带括号」。
+    const s = String(src);
     const tokens = [];
     let i = 0;
     while (i < s.length) {
       const ch = s[i];
+      if (/\s/.test(ch)) { i++; continue; }
       if (/[0-9.]/.test(ch)) {
         let num = '';
         while (i < s.length && /[0-9.eE]/.test(s[i])) {
@@ -273,7 +339,8 @@
         continue;
       }
       if ('+-*/^%(),'.indexOf(ch) >= 0) { tokens.push({ t: ch }); i++; continue; }
-      throw new Error('表达式里有不认识的字符：' + ch);
+      throw new Error('表达式里有不认识的字符：' + ch +
+        '（只认 ASCII 写法：指数用 ^，乘除用 * /，π 写 pi，根号用 sqrt()，度数用弧度或 30°）');
     }
     return tokens;
   }
@@ -338,7 +405,17 @@
     }
 
     const ast = parseAdd();
-    if (pos < tokens.length) throw new Error('表达式有多余内容：' + tokens[pos].t);
+    if (pos < tokens.length) {
+      const t = tokens[pos];
+      const name = t.t === 'id' ? t.v : '';
+      // 人话提示：函数名后面直接跟了东西（`sin x`）→ 告诉他加括号；
+      // 其余情况给出实际看到的字符，别只甩一个 token 类型（"id" 谁也看不懂）。
+      if (name && FUNCS[name]) {
+        throw new Error('「' + name + '」是函数，要带括号写：' + name + '(x)'
+          + '（如果要除，写 ' + name + '(x)/x）');
+      }
+      throw new Error('表达式有多余内容：「' + (name || t.t) + '」—— 检查是不是漏了运算符（乘号、括号）');
+    }
     return ast;
   }
 
@@ -495,14 +572,40 @@
    * 判断一行公式是什么。返回 {kind, ...}：
    * empty / text / point / constant / explicit / vertical / implicit / ineqY / ineqXY / error
    */
+  /* 包一层：拦掉「把函数当变量用」的写法。
+     实测：`y=sin x` 旧版本**不报错**，而是把 sin 当成一个参数（滑块叫 sin），
+     画出 y=sin·x —— 静默画错比报错更糟。 */
   function classifyRow(raw) {
-    const src = String(raw == null ? '' : raw).trim();
-    if (!src) return { kind: 'empty', raw: src };
-    const row = { kind: 'error', raw: src };
+    const row = classifyRowInner(raw);
+    if (row && !row.err && row.params) {
+      const bad = Object.keys(row.params).filter(function (k) { return FUNCS[k] || CONSTS[k]; });
+      if (bad.length) {
+        row.kind = 'error';
+        row.err = '「' + bad[0] + '」是函数，要带括号写：' + bad[0] + '(x)'
+          + '（相除要写除号，比如 sin(x)/x）';
+      }
+    }
+    // 函数名后面没括号（sin x）时，解析器只会甩一句「多余内容：x」——换成能照做的提示
+    if (row && row.err && row.kind !== 'text' && row.kind !== 'empty') {
+      const txt = normalizeMathText(raw);
+      const bad = txt.match(/(?:^|[^A-Za-z_0-9])(sin|cos|tan|asin|acos|atan|sinh|cosh|tanh|sqrt|cbrt|abs|exp|ln|log10|log2|log|hypot)(?![A-Za-z_0-9]*\s*\()/);
+      if (bad) {
+        row.err = '「' + bad[1] + '」是函数，要带括号写：' + bad[1] + '(x)'
+          + '（乘除写在后面，比如 ' + bad[1] + '(x)/2）';
+      }
+    }
+    return row;
+  }
+
+  function classifyRowInner(raw) {
+    const shown = String(raw == null ? '' : raw).trim();       // 显示/回填用学生原样
+    if (!shown) return { kind: 'empty', raw: shown };
+    const row = { kind: 'error', raw: shown };
 
     // —— 文字：("文字",(1,2)) 或 "文字" 或 "文字" @ (1,2) ——
-    let m = src.match(/^\(\s*(["'])([\s\S]*?)\1\s*(?:,\s*\(([^)]*)\)\s*)?\)$/);
-    if (!m) m = src.match(/^(["'])([\s\S]*?)\1\s*(?:@\s*\(?([^)]*?)\)?)?$/);
+    //   用原样匹配：规整不该改标签里的文字
+    let m = shown.match(/^\(\s*(["'])([\s\S]*?)\1\s*(?:,\s*\(([^)]*)\)\s*)?\)$/);
+    if (!m) m = shown.match(/^(["'])([\s\S]*?)\1\s*(?:@\s*\(?([^)]*?)\)?)?$/);
     if (m) {
       row.kind = 'text';
       row.text = m[2];
@@ -512,8 +615,10 @@
       }
       return row;
     }
-    if (/^["']/.test(src)) { row.kind = 'text'; row.text = src.replace(/^["']|["']$/g, ''); return row; }
+    if (/^["']/.test(shown)) { row.kind = 'text'; row.text = shown.replace(/^["']|["']$/g, ''); return row; }
 
+    // 数学部分用规整后的文本（x² → x^2、30° → 弧度、全角括号 → 半角 …）
+    const src = normalizeMathText(shown).trim();
     const ops = findTopLevelOps(src);
     const op = ops.length ? ops[0] : null;
 
