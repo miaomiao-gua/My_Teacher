@@ -83,3 +83,6 @@ data/_build.log
 # agent_studio/tools/ 下的自检脚本要入库（上面的 check*.py 规则会误伤）
 !agent_studio/tools/check*.py
 
+# ====== 拆分后的两个独立仓库（各自有自己的 .git，不再属于本仓库）======
+myTeacher1/
+myTeacher2/
